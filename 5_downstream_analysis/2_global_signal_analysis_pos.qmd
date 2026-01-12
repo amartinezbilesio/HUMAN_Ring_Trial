@@ -565,7 +565,6 @@ Gives us some kind of chromatographic fingerprint per lab.
 Instead of baseline shape, you’re summarizing where peaks are detected along
 the gradient.
 
-
 Inference from Detected BPC/TIC Ratio along RT
 
 This is a "fingerprint of detected signal."
@@ -659,10 +658,10 @@ of complexity for the peaks they detect across the gradient. This is a
 high-level comparison of the quality of the detected features.
 
 ```{r, dtw-ratio, eval =eval_sim, fig.width=10, fig.height=10}
-try(library(pheatmap))
-try(library(proxy))
-try(library(dplyr))
-try(library(tidyr))
+library(pheatmap)
+library(proxy)
+library(dplyr)
+library(tidyr)
 
 # Transpose ratio_all so samples are rows
 sim_matrix_med <- as.matrix(proxy::dist(t(ratio_all),
@@ -850,98 +849,6 @@ ggplot(plot_data_ratio_ann, aes(x = Lab, y = BPC_TIC_Ratio, fill = Lab)) +
   theme_minimal() +
   theme(legend.position = "bottom")
 ```
-
-
-## tic/bpc ratio along rt
-
-Inference from Annotated BPC/TIC Ratio along RT
-This plot shows where the annotated standards are eluting and what their peak
-purity (BPC/TIC ratio) is at that location.
-
-BPC/TIC Ratio Plot: The plot should be "spiky," not continuous, as it only
-contains data from annotated peaks. The height of the spikes in each bin
-reflects the average "purity" of the standards eluting there. We can see the
-'icl' profile is consistently lower than the others, confirming its peaks are
-less "pure" (lower BPC/TIC ratio) across the entire gradient.
-
-Data Point Coverage Plot: This is a key validation plot. It shows how many
-annotated standards were detected in each RT bin. It confirms that all labs
-are finding the standards in roughly the same elution regions (e.g., bins 5-15).
-
-```{r ratio-ann, eval = FALSE, fig.width=12, fig.height=9}
-# Preallocate containers
-ratio_all <- sapply(seq_along(tic_ann), function(i) {
-  rt <- rtime(tic_ann[i])[[1]]
-  int_tic <- intensity(tic_ann[i])[[1]]
-  int_bpc <- intensity(bpc_ann[i])[[1]]
-
-  compute_bin_ratio(rt, int_tic, int_bpc, n_bins = 30)
-})
-
-coverage_all <- sapply(seq_along(tic_ann), function(i) {
-  rt <- rtime(tic_ann[i])[[1]]
-  compute_bin_count(rt, n_bins = 30)
-})
-
-# Assign names
-colnames(ratio_all) <- paste(tic_ann$lab, tic_ann$mixture, "pol:",
-                             tic_ann$polarity, sep = "_")
-colnames(coverage_all) <- colnames(ratio_all)
-
-
-ratio_df <- as.data.frame(ratio_all) %>%
-  mutate(rt_bin = 1:n()) %>%
-  pivot_longer(
-    cols = -rt_bin,
-    names_to = "sample_id",
-    values_to = "value"
-  ) %>%
-  mutate(metric = "BPC/TIC Ratio")
-
-
-coverage_df <- as.data.frame(coverage_all) %>%
-  mutate(rt_bin = 1:n()) %>%
-  pivot_longer(
-    cols = -rt_bin,
-    names_to = "sample_id",
-    values_to = "value"
-  ) %>%
-  mutate(metric = "Annotated Peak Count") # Renamed for clarity
-
-sample_info <- data.frame(
-  sample_id = colnames(ratio_all),
-  lab = tic_ann$lab,
-  mixture = tic_ann$mixture
-)
-
-plot_data <- bind_rows(ratio_df, coverage_df) %>%
-  left_join(sample_info, by = "sample_id")
-
-plot_data$metric <- factor(plot_data$metric,
-                           levels = c("BPC/TIC Ratio", "Annotated Peak Count"))
-
-ggplot(plot_data, aes(x = rt_bin, y = value, color = lab, group = sample_id)) +
-  geom_line(alpha = 0.7, linewidth = 1) +
-  facet_grid(metric ~ mixture, scales = "free_y") +
-  labs(
-    title = "Chromatographic Fingerprint Comparison (Annotated Data - Positive Mode)",
-    subtitle = "BPC/TIC Ratio and Peak Count by Lab and Mixture",
-    x = "Retention Time Bin",
-    y = "Value (Ratio or Count)",
-    color = "Laboratory"
-  ) +
-  scale_color_brewer(palette = "Set1") +
-  theme_minimal() +
-  theme(
-    legend.position = "bottom",
-    strip.text = element_text(face = "bold", size = 12)
-  )
-
-## for later similarity analysis i need to remove NA
-ratio_all[is.na(ratio_all)] <- 0
-```
-
-Note: ye we will probably get rid of this, it's not readable anymore.
 
 ## Chromatogram  Similarity
 

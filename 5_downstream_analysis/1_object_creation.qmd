@@ -1,8 +1,6 @@
 ---
 title: "Object Creation for Lab Comparison Analysis"
 format: html
-execute:
-  dir: project
 ---
 
 # Introduction
@@ -19,8 +17,9 @@ library(Spectra)
 library(xcms)
 library(MsIO)
 library(MsExperiment)
+library(here)
 
-base_path <- file.path("5_downstream_analysis")
+base_path <- here("5_downstream_analysis")
 source(file.path(base_path, "rt_analysis_function.R"))
 ```
 

@@ -7,23 +7,37 @@ toc: true
 
 ## 1. Setup and Data Loading
 
-We begin by loading the annotated peak data and the raw EICs. The goal is to establish methods to group peaks derived from the same compound (adducts, in-source fragments) using both scalar features and raw data shapes.
+We begin by loading the annotated peak data and the raw EICs. The goal is to
+establish methods to group peaks derived from the same compound
+(adducts, in-source fragments) using both scalar features and raw data shapes.
+
+In the futur i want to load the full detected eics (whihc will be names eics_detected)
+an the annotated peakonly eics will be named  eics_ann. for this is need to run
+teh new object creation code ont he cluster but it's not possible at the moment
+therefore i will just set up the code as much as I can and correct it when i have the
+updated objects.
+
+essentially: 
+- we have ground truth on the annotated peaks
+- we want to test different methods to group peaks based on shape similarity
+- we use all detected peaks for the unsupervised grouping as it is more realistic
 
 ```{r setup, message=FALSE, warning=FALSE}
 library(tidyverse)
-library(data.table)
 library(xcms) # if needed for raw data handling
-library(corrr) # useful for correlations
+#library(corrr) # useful for correlations
+library(MsCoreUtils) ## rt grouping
+library(MsFeatures)
 
 base_path <- file.path("5_downstream_analysis")
 
 # Load data
 # Ensure these objects are available in your environment
-# load(file = file.path(base_path, "object/full_peak_report.RData"))
-# load(file = file.path(base_path, "object/final_eics.RData"))
+load(file = file.path(base_path, "object/full_peak_report.RData"))
+load(file = file.path(base_path, "object/final_eics.RData"))
 
-# Convert to data.table for speed if datasets are large
-dt_peaks <- as.data.table(full_peak_report)
+# Convert to data.frame
+df_peaks <- as.data.frame(full_peak_report)
 ```
 
 ## 2. Peak Shape Similarity based on Features (Scalar Metrics)
@@ -32,47 +46,22 @@ dt_peaks <- as.data.table(full_peak_report)
 
 ### 2.1. Define Ground Truth (For Validation)
 
-Since we are developing the method on *annotated* data first, we define what a "correct group" looks like.
+Since we are developing the method on *annotated* data first, we define what a 
+"correct group" looks like.
 
 ```{r}
-# Create a unique ID for the "True Compound" in a specific sample
-dt_peaks[, true_group_id := paste(lab, mixture, compound_name, sep = "_")]
-
-# Check how many multi-adduct groups we actually have to work with
-group_counts <- dt_peaks[, .N, by = true_group_id][N > 1]
-print(paste("Number of ground truth groups with >1 peak:", nrow(group_counts)))
-
+df_peaks$true_group_id <- paste0(df_peaks$compound_name, "_", df_peaks$lab, "_", df_peaks$mixture)
 ```
 
-### 2.2. Pre-clustering by Retention Time (Hard Filter)
+### 2.3. Variation of each features
 
-Before checking shape, peaks must co-elute. We create a "Candidate Group" ID based on RT windows.
-
-```{r}
-# Function to assign initial groups based on RT tolerance (e.g., 5 seconds)
-assign_rt_groups <- function(data, rt_col = "rt_apex", tolerance = 5) {
-  data %>%
-    group_by(lab, mixture) %>%
-    arrange(.data[[rt_col]]) %>%
-    mutate(rt_diff = c(0, diff(.data[[rt_col]])),
-           # New group if gap > tolerance
-           is_new_group = rt_diff > tolerance,
-           rt_group_id = cumsum(is_new_group)) %>%
-    ungroup()
-}
-
-dt_peaks <- assign_rt_groups(dt_peaks, rt_col = "rt_apex", tolerance = 3) # Strict window
-
-```
-
-### 2.3. Testing Feature Similarity
-
-We iterate through specific metrics (`fwhm`, `tailing_factor`, `asymmetry`) to see which one best predicts membership in the same `true_group_id`.
-
-**Method:** Within each `rt_group_id`, we calculate the Coefficient of Variation (CV) for the metric. If the group consists of real adducts, the CV should be low.
+We iterate through specific metrics (`fwhm`, `tailing_factor`, `asymmetry`) to 
+see which one has the lowest CV within `true_group_id`.
 
 ```{r}
-features_to_test <- c("fwhm", "tailing_factor", "gaussian_similarity", "rt_width")
+features_to_test <- c("fwhm", "tailing_factor", "gaussian_similarity",
+ "rt_width", "entropy")
+
 
 # Function to evaluate a single feature
 evaluate_feature <- function(data, feature_name) {
@@ -94,37 +83,163 @@ evaluate_feature <- function(data, feature_name) {
 }
 
 # Run evaluation
-results_features <- map_dfr(features_to_test, ~evaluate_feature(dt_peaks, .x))
+results_features <- map_dfr(features_to_test, ~evaluate_feature(df_peaks, .x))
+results_features <- as.data.frame(results_features)
 print(results_features)
+```
+
+### 2.4 Unsupervised grouping 
+
+Here i want to try to cluster within the RT groups using each feature 
+individually to see how well they separate the true groups. This is run 
+using ALL detected peaks, not just annotated ones.
+
+Pre-clustering by Retention Time
+peaks must co-elute. We create a "Candidate Group" ID based on RT windows.
+not sure how strici to be here.
+
+```{r}
+# Split by Lab/Mixture to avoid cross-hardware RT shifts
+df_peaks$lab_mixture <- paste(df_peaks$lab, df_peaks$mixture, sep = "_")
+inj_list <- split(df_peaks, df_peaks$lab_mixture)
+
+group_l <- lapply(inj_list, function(dt) {
+  param <- SimilarRtimeParam(diffRt = 10, groupFun = MsCoreUtils::group)
+  rt_groups <- groupFeatures(dt$rt_apex, param)
+  return(rt_groups)
+})
+```
+
+
+below we loop through the group_l list to cluster within each RT group using each feature
+and we need to calcualte the clustering quality by comparing to true_group_id
+
+use ARI ? 
+
+```{r}
+library(mclust) # for ARI calculation
+# Example for one feature
+feature_name <- "fwhm" # Example feature
+clustering_results <- lapply(names(inj_list), function(lab_mix) {
+  dt <- inj_list[[lab_mix]]
+  dt$rt_group_id <- group_l[[lab_mix]]
+  
+  # For each RT group, cluster using the feature
+  # Define clustering function for ave()
+  clustering_func <- function(feature_values) {
+    if (length(unique(feature_values)) > 1 && !any(is.na(feature_values))) {
+      dist_matrix <- dist(feature_values)
+      hc <- hclust(dist_matrix)
+      cutree(hc, k = 2) # Example: split into 2 clusters, it could be user defined. or not specified. 
+    } else {
+      rep(1, length(feature_values))
+    }
+  }
+  
+  # Apply clustering per group using base R ave()
+  dt$cluster_id <- ave(dt[[feature_name]], dt$rt_group_id, FUN = clustering_func)
+  
+  return(dt)
+})
 
 ```
 
-*Note: The feature with the lowest Median CV is the most robust predictor.*
+Below we run that on all groups and using all features and calculate ARI for each feature
+
+```{r}
+feature_clustering_results <- lapply(features_to_test, function(feature_name) {
+  clustering_results <- lapply(names(inj_list), function(lab_mix) {
+    dt <- inj_list[[lab_mix]]
+    dt$rt_group_id <- group_l[[lab_mix]]
+    
+    # For each RT group, cluster using the feature
+    clustering_func <- function(feature_values) {
+      if (length(unique(feature_values)) > 1 && !any(is.na(feature_values))) {
+        dist_matrix <- dist(feature_values)
+        hc <- hclust(dist_matrix)
+        cutree(hc, k = 2) # Example: split into 2 clusters
+      } else {
+        rep(1, length(feature_values))
+      }
+    }
+    
+    dt$cluster_id <- ave(dt[[feature_name]], dt$rt_group_id, FUN = clustering_func)
+    
+    return(dt)
+  })
+  
+  # Combine results and calculate ARI
+  combined_dt <- do.call(rbind, clustering_results)
+  ari_value <- adjustedRandIndex(combined_dt$true_group_id, combined_dt$cluster_id)
+  
+  return(data.frame(feature = feature_name, ARI = ari_value))
+})
+```
+
+*ARI score* :  explain 
+
+Should we do random forest instead ? how, and what could that mean?
 
 ### 2.4. Combined Feature Model
 
-Once the best single features are identified, we combine them (e.g., using Euclidean distance on scaled variables) to cluster within the RT windows.
+Test all possible group of features (>=2) to cluster within the RT windows. 
+and see if the y improve the clustering quality.
+
+test every possible combination of features (2 to all) 
 
 ```{r}
-# Conceptual code for clustering within RT groups
-# 1. Normalize features (scale)
-# 2. Calculate distance matrix
-# 3. Hierarchical clustering to split the RT group if shapes are distinct
+library(combinat)
+feature_combinations <- unlist(lapply(2:length(features_to_test), 
+                                      function(x) combn(features_to_test, x, simplify = FALSE)), 
+                               recursive = FALSE)
+
+combination_clustering_results <- lapply(feature_combinations, function(feature_set) {
+  clustering_results <- lapply(names(inj_list), function(lab_mix) {
+    dt <- inj_list[[lab_mix]]
+    dt$rt_group_id <- group_l[[lab_mix]]
+    
+    # For each RT group, cluster using the combined features
+    clustering_func <- function(...) {
+      feature_values <- as.data.frame(list(...))
+      if (nrow(unique(feature_values)) > 1 && !any(is.na(feature_values))) {
+        dist_matrix <- dist(feature_values)
+        hc <- hclust(dist_matrix)
+        cutree(hc, k = 2) # Example: split into 2 clusters
+      } else {
+        rep(1, nrow(feature_values))
+      }
+    }
+    
+    dt$cluster_id <- do.call(ave, c(dt[feature_set], list(FUN = clustering_func)))
+    
+    return(dt)
+  })
+
+  # Combine results and calculate ARI
+  combined_dt <- do.call(rbind, clustering_results)
+  ari_value <- adjustedRandIndex(combined_dt$true_group_id, combined_dt$cluster_id)
+  return(data.frame(features = paste(feature_set, collapse = "+"), ARI = ari_value))
+})
+combination_clustering_results_df <- do.call(rbind, combination_clustering_results)
+
 
 ```
 
 ## 3. Peak Shape Similarity based on Raw Data (EICs)
 
-**Hypothesis:** EICs of adducts are perfectly correlated (Pearson r \> 0.9) because they are slices of the same chromatographic band.
+**Hypothesis:** EICs of adducts are perfectly correlated 
+(Pearson r \> 0.9) because they are slices of the same chromatographic band.
 
 ### 3.1. Data Preparation (Interpolation)
 
-Raw data points are often not aligned on the exact same scan times. We must interpolate EICs in a candidate group to a common time axis.
+Raw data points are often not aligned on the exact same scan times. 
+We must interpolate EICs in a candidate group to a common time axis.
+
+get intensities 
 
 ```{r}
-# Function to prepare EIC pairs for correlation
-# Input: List of EIC objects (time, intensity) belonging to one RT Group
-# Output: Correlation Matrix
+ints <- intensity(final_eics)
+
 
 ```
 
@@ -141,7 +256,7 @@ calculate_eic_correlation <- function(eic_list) {
 }
 
 # Apply to a subset for testing (e.g., one specific lab/mix)
-# test_group <- dt_peaks[lab == "SpecificLab" & mixture == "Mix1" & rt_group_id == X]
+# test_group <- df_peaks |> filter(lab == "SpecificLab", mixture == "Mix1", rt_group_id == X)
 # eic_correlations <- calculate_eic_correlation(final_eics[test_group$chrom_peak_id])
 
 ```
@@ -165,12 +280,13 @@ We do *not* group peaks across labs based on shape (as shapes vary by hardware).
 
 ```{r}
 # Example: Is FWHM variability for [M+H] vs [M+Na] consistent across labs?
-cross_lab_check <- dt_peaks %>%
+cross_lab_check <- df_peaks %>%
   group_by(lab, compound_name) %>%
   summarise(
     fwhm_cv = sd(fwhm)/mean(fwhm),
     .groups = "drop"
-  )
+  ) %>%
+  as.data.frame()
 
 ggplot(cross_lab_check, aes(x = lab, y = fwhm_cv)) +
   geom_boxplot() +

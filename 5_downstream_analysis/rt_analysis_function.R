@@ -1,3 +1,5 @@
+library(here)
+
 # Compute median BPC/TIC ratio per RT bin
 compute_bin_ratio <- function(rt, int_tic, int_bpc, n_bins = 30) {
   bins <- cut(rt, breaks = n_bins)
@@ -17,7 +19,7 @@ compute_bin_count <- function(rt, n_bins = 30) {
 #' @return spectra object
 load_data <- function(lab, study_group, return = "sp") {
   ## Load MS1 level data.
-  dr <- file.path("1_preprocessing", lab, study_group)
+  dr <- here::here("1_preprocessing", lab, study_group)
   mse <- readMsObject(
     XcmsExperiment(),
     AlabasterParam(path = file.path(dr, "mse")),
@@ -53,29 +55,34 @@ detect_signal <- function(
   lab = character(),
   bpparam
 ) {
-  ## lab should be character of length 1.
+
   a <- load_data(lab = lab, study_group = study_group, return = "mse")
+
   if (annotated) {
-    res <- read.csv(file.path(
+    res <- read.csv(here::here(
       "4_library_generation",
       lab,
       study_group,
       "ring_trial_library_HE.csv"
     ))
+
     cpks <- chromPeaks(a)[
       res$X,
       c("rtmin", "rtmax", "mzmin", "mzmax", "sample")
     ]
   } else {
     cpks <- chromPeaks(a)[, c("rtmin", "rtmax", "mzmin", "mzmax", "sample")]
-    ## need to map polarity information here, to the sampleData(a)$polarity row index
+
+    ## need to map polarity information here
     cpks <- as.data.frame(cpks)
     cpks$polarity <- sampleData(a)$polarity[
       match(cpks$sample, seq_len(nrow(sampleData(a))))
     ]
+
+    # FIX 2: Use here() to save the output CSV correctly
     write.csv(
       cpks,
-      file = file.path(
+      file = here::here(
         "5_downstream_analysis",
         "object",
         paste0("detected_peaks_", lab, "_", study_group, ".csv")
@@ -83,6 +90,9 @@ detect_signal <- function(
       row.names = FALSE
     )
   }
+
+  # The rest of your processing code is logic-based (not path-based),
+  # so it remains exactly the same.
   spectra(a) <- setBackend(spectra(a), MsBackendMemory())
   cpk_split <- split(as.data.frame(cpks), cpks[, "sample"])
   cpk_split <- lapply(cpk_split, function(df) {
@@ -90,6 +100,7 @@ detect_signal <- function(
       c("rtmin", "rtmax", "mzmin", "mzmax")
     ])
   })
+
   bg <- bpmapply(
     FUN = function(s, pks) {
       s <- Spectra::filterPeaksRanges(
@@ -104,6 +115,7 @@ detect_signal <- function(
     cpk_split,
     BPPARAM = bpparam
   )
+
   bg_full <- concatenateSpectra(bg)
   bg_full <- filterEmptySpectra(bg_full)
   return(bg_full)
