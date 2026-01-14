@@ -45,6 +45,8 @@ if (!file.exists(file.path(base_path, "object/sp_full.RData"))) {
   sp_cembio <- load_data(lab = "cembio", study_group = "HE")
   sp_full <- c(sp_afekta, sp_hmgu, sp_icl, sp_cembio)
   sp_full <- filterMzRange(sp_full, mz = c(100, 1100))
+  sp_full <- setBackend(sp_full, ChromBackendMemory())
+  sp_full <- applyProcessing(sp_full)
   save(sp_full, file = file.path(base_path, "object/sp_full.RData"))
   rm(sp_afekta, sp_hmgu, sp_icl, sp_cembio)
 } else {
@@ -128,6 +130,7 @@ if (!file.exists(file.path(base_path, "object/sp_full_detect.RData"))) {
 
   sp_full_detect <- c(sp_afekta, sp_hmgu, sp_icl, sp_cembio)
   sp_full_detect <- filterMzRange(sp_full_detect, mz = c(100, 1100))
+  sp_full_detect <- setBackend(sp_full_detect, ChromBackendMemory())
   sp_full_detect <- applyProcessing(sp_full_detect)
   save(
     sp_full_detect,
@@ -199,6 +202,7 @@ if (!file.exists(file.path(base_path, "object/sp_full_ann.RData"))) {
                              annotated = TRUE, bpparam = bpparam)
   sp_full_ann <- c(sp_afekta, sp_hmgu, sp_icl, sp_cembio)
   sp_full_ann <- filterMzRange(sp_full_ann, mz = c(100, 1100))
+  sp_full_ann <- setBackend(sp_full_ann, ChromBackendMemory())
   sp_full_ann <- applyProcessing(sp_full_ann)
   save(sp_full_ann, file = file.path(base_path, "object/sp_full_ann.RData"))
   rm(sp_afekta, sp_hmgu, sp_icl, sp_cembio)

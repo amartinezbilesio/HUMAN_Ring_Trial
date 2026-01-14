@@ -448,6 +448,61 @@ are not significant"
 
 This focused approach avoids redundancy and highlights the key insight: **lab protocols matter as much or more than instrument hardware**.
 
+### Paired Tests for RT Quartile Ratios - Full Data
+
+```{r paired-test-rt-quartiles-full, fig.width=12, fig.height=8}
+# Test RT Q2 (25-50% RT range - early-mid elution)
+cat("\n=== RT Quartile Q2 (25-50% RT) - Full Data ===\n")
+
+# Friedman test for Q2
+friedman_q2_full <- friedman.test(
+  ratio_rt_q2 ~ lab | mixture,
+  data = metrics_full
+)
+cat("\nFriedman Test (Q2):\n")
+print(friedman_q2_full)
+
+# Pairwise for Q2
+cat("\nPairwise Wilcoxon (Q2):\n")
+pairwise_q2_full <- pairwise.wilcox.test(
+  metrics_full$ratio_rt_q2,
+  metrics_full$lab,
+  p.adjust.method = "bonferroni",
+  paired = TRUE
+)
+print(pairwise_q2_full)
+
+# Test RT Q3 (50-75% RT range - mid-late elution)
+cat("\n=== RT Quartile Q3 (50-75% RT) - Full Data ===\n")
+
+# Friedman test for Q3
+friedman_q3_full <- friedman.test(
+  ratio_rt_q3 ~ lab | mixture,
+  data = metrics_full
+)
+cat("\nFriedman Test (Q3):\n")
+print(friedman_q3_full)
+
+# Pairwise for Q3
+cat("\nPairwise Wilcoxon (Q3):\n")
+pairwise_q3_full <- pairwise.wilcox.test(
+  metrics_full$ratio_rt_q3,
+  metrics_full$lab,
+  p.adjust.method = "bonferroni",
+  paired = TRUE
+)
+print(pairwise_q3_full)
+
+# Agilent comparison for Q2 and Q3
+agilent_q2_full <- wilcox.test(ratio_rt_q2 ~ lab, data = agilent_data, paired = TRUE)
+cat("\n=== Wilcoxon Test Q2: Afekta vs Cembio (Full Data) ===\n")
+print(agilent_q2_full)
+
+agilent_q3_full <- wilcox.test(ratio_rt_q3 ~ lab, data = agilent_data, paired = TRUE)
+cat("\n=== Wilcoxon Test Q3: Afekta vs Cembio (Full Data) ===\n")
+print(agilent_q3_full)
+```
+
 
 
 
@@ -685,6 +740,61 @@ cat("\n=== Wilcoxon Test: Afekta vs Cembio (Detected Data) ===\n")
 print(agilent_diff_detect)
 ```
 
+### Paired Tests for RT Quartile Ratios - Detected Data
+
+```{r paired-test-rt-quartiles-detect, fig.width=12, fig.height=8}
+# Test RT Q2 (25-50% RT range - early-mid elution)
+cat("\n=== RT Quartile Q2 (25-50% RT) - Detected Data ===\n")
+
+# Friedman test for Q2
+friedman_q2_detect <- friedman.test(
+  ratio_rt_q2 ~ lab | mixture,
+  data = metrics_detect
+)
+cat("\nFriedman Test (Q2):\n")
+print(friedman_q2_detect)
+
+# Pairwise for Q2
+cat("\nPairwise Wilcoxon (Q2):\n")
+pairwise_q2_detect <- pairwise.wilcox.test(
+  metrics_detect$ratio_rt_q2,
+  metrics_detect$lab,
+  p.adjust.method = "bonferroni",
+  paired = TRUE
+)
+print(pairwise_q2_detect)
+
+# Test RT Q3 (50-75% RT range - mid-late elution)
+cat("\n=== RT Quartile Q3 (50-75% RT) - Detected Data ===\n")
+
+# Friedman test for Q3
+friedman_q3_detect <- friedman.test(
+  ratio_rt_q3 ~ lab | mixture,
+  data = metrics_detect
+)
+cat("\nFriedman Test (Q3):\n")
+print(friedman_q3_detect)
+
+# Pairwise for Q3
+cat("\nPairwise Wilcoxon (Q3):\n")
+pairwise_q3_detect <- pairwise.wilcox.test(
+  metrics_detect$ratio_rt_q3,
+  metrics_detect$lab,
+  p.adjust.method = "bonferroni",
+  paired = TRUE
+)
+print(pairwise_q3_detect)
+
+# Agilent comparison for Q2 and Q3
+agilent_q2_detect <- wilcox.test(ratio_rt_q2 ~ lab, data = agilent_detect, paired = TRUE)
+cat("\n=== Wilcoxon Test Q2: Afekta vs Cembio (Detected Data) ===\n")
+print(agilent_q2_detect)
+
+agilent_q3_detect <- wilcox.test(ratio_rt_q3 ~ lab, data = agilent_detect, paired = TRUE)
+cat("\n=== Wilcoxon Test Q3: Afekta vs Cembio (Detected Data) ===\n")
+print(agilent_q3_detect)
+```
+
 ```{r clean-detect}
 rm(tic_detect, bpc_detect, sp_full_detect)
 ```
@@ -920,6 +1030,61 @@ agilent_ann <- metrics_ann %>% filter(setup == "Agilent1290_Agilent")
 agilent_diff_ann <- wilcox.test(bpc_tic_ratio ~ lab, data = agilent_ann, paired = TRUE)
 cat("\n=== Wilcoxon Test: Afekta vs Cembio (Annotated Data) ===\n")
 print(agilent_diff_ann)
+```
+
+### Paired Tests for RT Quartile Ratios - Annotated Data
+
+```{r paired-test-rt-quartiles-ann, fig.width=12, fig.height=8}
+# Test RT Q2 (25-50% RT range - early-mid elution)
+cat("\n=== RT Quartile Q2 (25-50% RT) - Annotated Data ===\n")
+
+# Friedman test for Q2
+friedman_q2_ann <- friedman.test(
+  ratio_rt_q2 ~ lab | mixture,
+  data = metrics_ann
+)
+cat("\nFriedman Test (Q2):\n")
+print(friedman_q2_ann)
+
+# Pairwise for Q2
+cat("\nPairwise Wilcoxon (Q2):\n")
+pairwise_q2_ann <- pairwise.wilcox.test(
+  metrics_ann$ratio_rt_q2,
+  metrics_ann$lab,
+  p.adjust.method = "bonferroni",
+  paired = TRUE
+)
+print(pairwise_q2_ann)
+
+# Test RT Q3 (50-75% RT range - mid-late elution)
+cat("\n=== RT Quartile Q3 (50-75% RT) - Annotated Data ===\n")
+
+# Friedman test for Q3
+friedman_q3_ann <- friedman.test(
+  ratio_rt_q3 ~ lab | mixture,
+  data = metrics_ann
+)
+cat("\nFriedman Test (Q3):\n")
+print(friedman_q3_ann)
+
+# Pairwise for Q3
+cat("\nPairwise Wilcoxon (Q3):\n")
+pairwise_q3_ann <- pairwise.wilcox.test(
+  metrics_ann$ratio_rt_q3,
+  metrics_ann$lab,
+  p.adjust.method = "bonferroni",
+  paired = TRUE
+)
+print(pairwise_q3_ann)
+
+# Agilent comparison for Q2 and Q3
+agilent_q2_ann <- wilcox.test(ratio_rt_q2 ~ lab, data = agilent_ann, paired = TRUE)
+cat("\n=== Wilcoxon Test Q2: Afekta vs Cembio (Annotated Data) ===\n")
+print(agilent_q2_ann)
+
+agilent_q3_ann <- wilcox.test(ratio_rt_q3 ~ lab, data = agilent_ann, paired = TRUE)
+cat("\n=== Wilcoxon Test Q3: Afekta vs Cembio (Annotated Data) ===\n")
+print(agilent_q3_ann)
 ```
 
 ```{r clean-ann}
