@@ -6,9 +6,7 @@ editor_options:
 ---
 
 ### TODOS
-- introduce the setups table and use it to describe inferences.
-- Introduce statistical test for the differences observed.
-- what else ??
+- See what was done in POS
 
 # Introduction
 

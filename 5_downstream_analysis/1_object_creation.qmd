@@ -148,13 +148,13 @@ if (!file.exists(file.path(base_path, "object/tic_detect.RData"))) {
 
 ```{r load-annotations}
 study_group <- "HE"
-res_afekta <- read.csv(file.path("4_library_generation", "afekta",
+res_afekta <- read.csv(here("4_library_generation", "afekta",
                                  study_group, "ring_trial_library_HE.csv"))
-res_hmgu <- read.csv(file.path("4_library_generation", "hmgu",
+res_hmgu <- read.csv(here("4_library_generation", "hmgu",
                                study_group, "ring_trial_library_HE.csv"))
-res_icl <- read.csv(file.path("4_library_generation", "icl",
+res_icl <- read.csv(here("4_library_generation", "icl",
                                study_group, "ring_trial_library_HE.csv"))
-res_cembio <- read.csv(file.path("4_library_generation", "cembio",
+res_cembio <- read.csv(here("4_library_generation", "cembio",
                                  study_group, "ring_trial_library_HE.csv"))
 ```
 

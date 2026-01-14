@@ -6,11 +6,9 @@ editor_options:
 ---
 
 ### TODOS
-- Separate POS and NEG plots
-- introduce the setups table and use it to describe inferences.
-- Introduce statistical test for the differences observed.
-- simplify plots into function ?
-- what else ??
+- implement QC metrics of full data in chromatograms/MsQuality and compute them here 
+  - Introduce statistical test for the differences observed.
+  - See how they are affected by hardware.
 
 # Introduction
 

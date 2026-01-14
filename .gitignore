@@ -45,3 +45,4 @@ results/lab_comparison_HE.rmarkdown
 .nfs*
 slurm-*.out
 redner.sh
+/5_downstream_analysis/4_peak_shape_similarity_files
