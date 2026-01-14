@@ -277,9 +277,9 @@ All metrics show highly significant laboratory effects (p < 2e-16), indicating s
 - **TIC Quantiles (Q25, Q50, Q75)**: All show extremely strong lab effects (p < 2e-16) with consistent patterns—HMGU >> cembio > ICL differences. Effects are strongest at Q75 (narrower residuals: 0.0747 vs 0.1038 for BPC).
 
 **Instrument Setup Effects**
-All setup coefficients return NA (singularities), meaning setup is **perfectly confounded with laboratory**—each lab uses a unique instrument combination. This prevents separate estimation of setup effects. To resolve this:
-- Request multi-instrument labs (same lab, different setup), or
-- Remove setup from the model to focus on lab differences alone.
+All setup coefficients return NA (singularities) due to **rank deficiency**: afekta and cembio share the same setup (Agilent1290_Agilent), while icl and hmgu each use unique setups. The model cannot separately estimate setup effects from lab effects when some labs share setups and others don't. To estimate separate setup effects:
+- Collect data from multiple labs using the same setup, or
+- Remove setup from the model to focus on lab effects alone (which is the primary factor here).
 
 **Model Quality**
 - **Best models**: TIC Q75 (R² = 0.9972) and TIC Q25 (R² = 0.9959) explain 99.7% and 99.6% of variance
@@ -299,9 +299,124 @@ All setup coefficients return NA (singularities), meaning setup is **perfectly c
 
 3. **Peak Complexity Similar**: The BPC/TIC ratio shows minimal variation between labs (except cembio), suggesting all labs produce similarly complex peak distributions despite different signal magnitudes.
 
-4. **Setup Cannot Be Evaluated**: Current data structure prevents separate estimation of instrument setup effects; lab and setup are confounded.
+## Paired Analysis by Mixture
 
-How can I interpret this?
+```{r paired-test, fig.width=12, fig.height=8}
+# 1. VISUALIZATION (Paired Trends) ----------------------------------------
+# "Spaghetti Plot" - Tracks how each lab performs across the *same* mixtures
+# If lines cross significantly, there's a lab×mixture interaction.
+# If they are parallel but separated, there's a systematic lab offset.
+
+ggplot(
+  metrics_full,
+  aes(x = mixture, y = bpc_tic_ratio, color = lab, group = lab)
+) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_color_brewer(palette = "Set1") +
+  theme_bw() +
+  labs(
+    title = "BPC/TIC Ratio Trends across Mixtures by Lab",
+    subtitle = "Parallel lines = consistent lab effect; crossing lines = lab×mixture interaction",
+    y = "BPC / TIC Ratio (Signal Quality)",
+    x = "Mixture ID"
+  ) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
+
+# 2. BOXPLOT - Lab effects aggregated across mixtures
+ggplot(metrics_full, aes(x = lab, y = bpc_tic_ratio, fill = setup)) +
+  geom_boxplot(alpha = 0.7) +
+  theme_bw() +
+  labs(
+    title = "BPC/TIC Ratio Distribution by Lab",
+    y = "BPC / TIC Ratio",
+    x = "Laboratory"
+  )
+
+# 3. STATISTICS (Paired/Blocked) ------------------------------------------
+
+# Friedman Test: Is there a difference between labs, controlling for mixture?
+friedman_res <- friedman.test(
+  bpc_tic_ratio ~ lab | mixture,
+  data = metrics_full
+)
+cat("\n=== Friedman Test (Non-parametric ANOVA) ===\n")
+print(friedman_res)
+
+# Pairwise Wilcoxon Test: Compare each pair of labs (paired by mixture)
+cat("\n=== Pairwise Wilcoxon Test (Bonferroni corrected) ===\n")
+pairwise_res <- pairwise.wilcox.test(
+  metrics_full$bpc_tic_ratio,
+  metrics_full$lab,
+  p.adjust.method = "bonferroni",
+  paired = TRUE
+)
+print(pairwise_res)
+
+# Focused comparison: Agilent labs (afekta vs cembio) - same setup, different protocols
+agilent_data <- metrics_full %>% filter(setup == "Agilent1290_Agilent")
+agilent_diff <- wilcox.test(bpc_tic_ratio ~ lab, data = agilent_data, paired = TRUE)
+cat("\n=== Wilcoxon Test: Afekta vs Cembio (identical setup, paired by mixture) ===\n")
+print(agilent_diff)
+```
+
+## Interpretation of Paired Analysis Results
+
+### Why Use BPC/TIC Ratio for Paired Tests?
+
+The paired analysis focuses on **BPC/TIC ratio** rather than absolute metrics (BPC, TIC, quantiles) for several reasons:
+
+1. **Removes Instrument/Lab Sensitivity Effects**: The ratio normalizes for differences in instrument sensitivity. A 40× difference in absolute TIC between HMGU and afekta becomes irrelevant; we only care if the *peak complexity* differs.
+
+2. **Tests Biological/Method Variance, Not Hardware**: The ratio captures whether labs process samples differently (e.g., different peak picking parameters, sample preparation), not just raw detector sensitivity.
+
+3. **Appropriate for Paired Design**: Each mixture is measured across all labs. The ratio stays relatively constant within mixtures if labs are equivalent, making paired comparisons more powerful and interpretable.
+
+4. **Better Statistical Properties**: The ratio is dimensionless and less likely to violate non-parametric test assumptions compared to raw signal intensities.
+
+### Key Findings from Paired Tests
+
+**Friedman Test (p = 0.00086)**
+- Highly significant difference between labs when controlling for mixture
+- Confirms that labs differ systematically across the same sample set
+- Demonstrates the paired design effectively controls for sample variation
+
+**Pairwise Comparisons (Bonferroni corrected)**
+- **Afekta vs Cembio: p = 2.3e-05*** (strongest difference)
+  - Despite using identical equipment, these two Agilent labs produce significantly different peak ratios
+  - Suggests **human/protocol differences** (sample prep, calibration, operator technique) dominate over hardware
+  
+- **Cembio vs HMGU: p = 0.049** (borderline significant)
+  - Different instruments (Agilent vs Sciex) show marginal difference in peak ratio
+  - Suggests instrument type has less effect than lab-specific practices
+  
+- **Afekta vs HMGU: p = 1.000** (not significant)
+- **Afekta vs ICL: p = 1.000** (not significant)
+- **HMGU vs ICL: p = 1.000** (not significant)
+  - Most lab pairs are equivalent in peak complexity
+
+**Paired Wilcoxon: Afekta vs Cembio (p = 3.8e-06)**
+- Confirms strongest difference is between the two "identical-setup" labs
+- V = 190 indicates strong consistent direction of difference across mixtures
+- Evidence that **lab practices/protocols matter more than hardware specifications**
+
+### Recommendations
+
+**Should you run paired tests on other metrics? NO, here's why:**
+
+1. **BPC & TIC**: These show ~40-50× differences between labs (lab×hardware confounded). Paired tests would just re-confirm hardware differences we already know from the linear models (R² = 0.99). Low interpretive value.
+
+2. **TIC Quantiles (Q25, Q50, Q75)**: Same issue—these are absolute signal measures showing strong hardware effects. Paired tests add no new insight beyond "HMGU is weaker."
+
+3. **Ratio is the only metric that separates hardware from protocols**: It's the only metric where afekta and cembio can differ despite identical equipment.
+
+**Consider removing/simplifying to:**
+- Keep: **Friedman test** (global test controlling for mixture)
+- Keep: **Pairwise Wilcoxon** (identifies which labs differ)
+- **Optional removal**: The three non-significant pairwise comparisons (afekta vs HMGU/ICL, HMGU vs ICL) could be condensed with a note that "remaining pairs are not significant"
+- Keep: **Agilent paired comparison** (illustrates protocol vs hardware effect)
+
+This focused approach avoids redundancy and highlights the key insight: **lab protocols matter as much or more than instrument hardware**.
 
 
 
@@ -477,6 +592,51 @@ cat("\n=== TIC Q50 Detected Data ===\n")
 summary(lm_tic_q50_detect)
 ```
 
+## Paired Analysis by Mixture - Detected Data
+
+```{r paired-test-detect, fig.width=12, fig.height=8}
+# Visualization: Spaghetti plot for detected data
+ggplot(
+  metrics_detect,
+  aes(x = mixture, y = bpc_tic_ratio, color = lab, group = lab)
+) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_color_brewer(palette = "Set1") +
+  theme_bw() +
+  labs(
+    title = "BPC/TIC Ratio Trends (Detected Signal)",
+    subtitle = "Parallel lines = consistent lab effect; crossing lines = lab×mixture interaction",
+    y = "BPC / TIC Ratio",
+    x = "Mixture ID"
+  ) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
+
+# Statistics: Friedman Test
+friedman_detect <- friedman.test(
+  bpc_tic_ratio ~ lab | mixture,
+  data = metrics_detect
+)
+cat("\n=== Friedman Test (Detected Data) ===\n")
+print(friedman_detect)
+
+# Pairwise comparisons
+cat("\n=== Pairwise Wilcoxon Test (Detected Data) ===\n")
+pairwise_detect <- pairwise.wilcox.test(
+  metrics_detect$bpc_tic_ratio,
+  metrics_detect$lab,
+  p.adjust.method = "bonferroni",
+  paired = TRUE
+)
+print(pairwise_detect)
+
+# Agilent labs comparison
+agilent_detect <- metrics_detect %>% filter(setup == "Agilent1290_Agilent")
+agilent_diff_detect <- wilcox.test(bpc_tic_ratio ~ lab, data = agilent_detect, paired = TRUE)
+cat("\n=== Wilcoxon Test: Afekta vs Cembio (Detected Data) ===\n")
+print(agilent_diff_detect)
+```
+
 ```{r clean-detect}
 rm(tic_detect, bpc_detect, sp_full_detect)
 ```
@@ -649,6 +809,51 @@ summary(lm_ratio_ann)
 lm_tic_q50_ann <- lm(log(tic_q50) ~ lab + setup, data = metrics_ann)
 cat("\n=== TIC Q50 Annotated Data ===\n")
 summary(lm_tic_q50_ann)
+```
+
+## Paired Analysis by Mixture - Annotated Data
+
+```{r paired-test-ann, fig.width=12, fig.height=8}
+# Visualization: Spaghetti plot for annotated data
+ggplot(
+  metrics_ann,
+  aes(x = mixture, y = bpc_tic_ratio, color = lab, group = lab)
+) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_color_brewer(palette = "Set1") +
+  theme_bw() +
+  labs(
+    title = "BPC/TIC Ratio Trends (Annotated Compounds Only)",
+    subtitle = "Parallel lines = consistent lab effect; crossing lines = lab×mixture interaction",
+    y = "BPC / TIC Ratio",
+    x = "Mixture ID"
+  ) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
+
+# Statistics: Friedman Test
+friedman_ann <- friedman.test(
+  bpc_tic_ratio ~ lab | mixture,
+  data = metrics_ann
+)
+cat("\n=== Friedman Test (Annotated Data) ===\n")
+print(friedman_ann)
+
+# Pairwise comparisons
+cat("\n=== Pairwise Wilcoxon Test (Annotated Data) ===\n")
+pairwise_ann <- pairwise.wilcox.test(
+  metrics_ann$bpc_tic_ratio,
+  metrics_ann$lab,
+  p.adjust.method = "bonferroni",
+  paired = TRUE
+)
+print(pairwise_ann)
+
+# Agilent labs comparison
+agilent_ann <- metrics_ann %>% filter(setup == "Agilent1290_Agilent")
+agilent_diff_ann <- wilcox.test(bpc_tic_ratio ~ lab, data = agilent_ann, paired = TRUE)
+cat("\n=== Wilcoxon Test: Afekta vs Cembio (Annotated Data) ===\n")
+print(agilent_diff_ann)
 ```
 
 ```{r clean-ann}

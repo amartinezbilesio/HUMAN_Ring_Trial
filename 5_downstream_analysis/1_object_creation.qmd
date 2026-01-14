@@ -40,11 +40,14 @@ Note:
 ```{r load-full-data}
 if (!file.exists(file.path(base_path, "object/sp_full.RData"))) {
   sp_afekta <- load_data(lab = "afekta", study_group = "HE")
+
   sp_hmgu <- load_data(lab = "hmgu", study_group = "HE")
   sp_icl <- load_data(lab = "icl", study_group = "HE")
   sp_cembio <- load_data(lab = "cembio", study_group = "HE")
 
   sp_full <- c(sp_afekta, sp_hmgu, sp_icl, sp_cembio)
+  sp_full <- filterMzRange(sp_full, mz = c(100, 1100))
+  sp_full <- applyProcessing(sp_full)
   save(sp_full, file = file.path(base_path, "object/sp_full.RData"))
   rm(sp_afekta, sp_hmgu, sp_icl, sp_cembio)
 } else {
@@ -87,23 +90,39 @@ if (!file.exists(file.path(base_path, "object/tic_full.RData"))) {
 ```{r load-detect}
 if (!file.exists(file.path(base_path, "object/sp_full_detect.RData"))) {
   bpparam <- MulticoreParam(8) # for the cluster
-  sp_afekta <- detect_signal(lab = "afekta", study_group = "HE",
-                             annotated = FALSE, bpparam = bpparam)
+  sp_afekta <- detect_signal(
+    lab = "afekta",
+    study_group = "HE",
+    annotated = FALSE,
+    bpparam = bpparam
+  )
   save(sp_afekta, file = file.path(base_path, "object/sp_afekta.RData"))
   rm(sp_afekta)
 
-  sp_hmgu <- detect_signal(lab = "hmgu", study_group = "HE",
-                           annotated = FALSE, bpparam = bpparam)
+  sp_hmgu <- detect_signal(
+    lab = "hmgu",
+    study_group = "HE",
+    annotated = FALSE,
+    bpparam = bpparam
+  )
   save(sp_hmgu, file = file.path(base_path, "object/sp_hmgu.RData"))
   rm(sp_hmgu)
 
-  sp_icl <- detect_signal(lab = "icl", study_group = "HE",
-                          annotated = FALSE, bpparam = bpparam)
+  sp_icl <- detect_signal(
+    lab = "icl",
+    study_group = "HE",
+    annotated = FALSE,
+    bpparam = bpparam
+  )
   save(sp_icl, file = file.path(base_path, "object/sp_icl.RData"))
   rm(sp_icl)
 
-  sp_cembio <- detect_signal(lab = "cembio", study_group = "HE",
-                             annotated = FALSE, bpparam = bpparam)
+  sp_cembio <- detect_signal(
+    lab = "cembio",
+    study_group = "HE",
+    annotated = FALSE,
+    bpparam = bpparam
+  )
   save(sp_cembio, file = file.path(base_path, "object/sp_cembio.RData"))
 
   load(file.path(base_path, "object/sp_hmgu.RData"))
@@ -111,7 +130,12 @@ if (!file.exists(file.path(base_path, "object/sp_full_detect.RData"))) {
   load(file.path(base_path, "object/sp_icl.RData"))
 
   sp_full_detect <- c(sp_afekta, sp_hmgu, sp_icl, sp_cembio)
-  save(sp_full_detect, file = file.path(base_path, "object/sp_full_detect.RData"))
+  sp_full_detect <- filterMzRange(sp_full_detect, mz = c(100, 1100))
+  sp_full_detect <- applyProcessing(sp_full_detect)
+  save(
+    sp_full_detect,
+    file = file.path(base_path, "object/sp_full_detect.RData")
+  )
   rm(sp_afekta, sp_hmgu, sp_icl, sp_cembio)
 } else {
   load(file.path(base_path, "object/sp_full_detect.RData"))
@@ -177,6 +201,8 @@ if (!file.exists(file.path(base_path, "object/sp_full_ann.RData"))) {
   sp_cembio <- detect_signal(lab = "cembio", study_group = study_group,
                              annotated = TRUE, bpparam = bpparam)
   sp_full_ann <- c(sp_afekta, sp_hmgu, sp_icl, sp_cembio)
+  sp_full_ann <- filterMzRange(sp_full_ann, mz = c(100, 1100))
+  sp_full_ann <- applyProcessing(sp_full_ann)
   save(sp_full_ann, file = file.path(base_path, "object/sp_full_ann.RData"))
   rm(sp_afekta, sp_hmgu, sp_icl, sp_cembio)
 } else {
