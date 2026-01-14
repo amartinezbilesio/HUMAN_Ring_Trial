@@ -451,6 +451,27 @@ This focused approach avoids redundancy and highlights the key insight: **lab pr
 ### Paired Tests for RT Quartile Ratios - Full Data
 
 ```{r paired-test-rt-quartiles-full, fig.width=12, fig.height=8}
+# Test RT Q1 (0-25% RT range - early elution)
+cat("\n=== RT Quartile Q1 (0-25% RT) - Full Data ===\n")
+
+# Friedman test for Q1
+friedman_q1_full <- friedman.test(
+  ratio_rt_q1 ~ lab | mixture,
+  data = metrics_full
+)
+cat("\nFriedman Test (Q1):\n")
+print(friedman_q1_full)
+
+# Pairwise for Q1
+cat("\nPairwise Wilcoxon (Q1):\n")
+pairwise_q1_full <- pairwise.wilcox.test(
+  metrics_full$ratio_rt_q1,
+  metrics_full$lab,
+  p.adjust.method = "bonferroni",
+  paired = TRUE
+)
+print(pairwise_q1_full)
+
 # Test RT Q2 (25-50% RT range - early-mid elution)
 cat("\n=== RT Quartile Q2 (25-50% RT) - Full Data ===\n")
 
@@ -493,7 +514,32 @@ pairwise_q3_full <- pairwise.wilcox.test(
 )
 print(pairwise_q3_full)
 
-# Agilent comparison for Q2 and Q3
+# Test RT Q4 (75-100% RT range - late elution)
+cat("\n=== RT Quartile Q4 (75-100% RT) - Full Data ===\n")
+
+# Friedman test for Q4
+friedman_q4_full <- friedman.test(
+  ratio_rt_q4 ~ lab | mixture,
+  data = metrics_full
+)
+cat("\nFriedman Test (Q4):\n")
+print(friedman_q4_full)
+
+# Pairwise for Q4
+cat("\nPairwise Wilcoxon (Q4):\n")
+pairwise_q4_full <- pairwise.wilcox.test(
+  metrics_full$ratio_rt_q4,
+  metrics_full$lab,
+  p.adjust.method = "bonferroni",
+  paired = TRUE
+)
+print(pairwise_q4_full)
+
+# Agilent comparison for all quartiles
+agilent_q1_full <- wilcox.test(ratio_rt_q1 ~ lab, data = agilent_data, paired = TRUE)
+cat("\n=== Wilcoxon Test Q1: Afekta vs Cembio (Full Data) ===\n")
+print(agilent_q1_full)
+
 agilent_q2_full <- wilcox.test(ratio_rt_q2 ~ lab, data = agilent_data, paired = TRUE)
 cat("\n=== Wilcoxon Test Q2: Afekta vs Cembio (Full Data) ===\n")
 print(agilent_q2_full)
@@ -501,6 +547,10 @@ print(agilent_q2_full)
 agilent_q3_full <- wilcox.test(ratio_rt_q3 ~ lab, data = agilent_data, paired = TRUE)
 cat("\n=== Wilcoxon Test Q3: Afekta vs Cembio (Full Data) ===\n")
 print(agilent_q3_full)
+
+agilent_q4_full <- wilcox.test(ratio_rt_q4 ~ lab, data = agilent_data, paired = TRUE)
+cat("\n=== Wilcoxon Test Q4: Afekta vs Cembio (Full Data) ===\n")
+print(agilent_q4_full)
 ```
 
 
@@ -743,6 +793,27 @@ print(agilent_diff_detect)
 ### Paired Tests for RT Quartile Ratios - Detected Data
 
 ```{r paired-test-rt-quartiles-detect, fig.width=12, fig.height=8}
+# Test RT Q1 (0-25% RT range - early elution)
+cat("\n=== RT Quartile Q1 (0-25% RT) - Detected Data ===\n")
+
+# Friedman test for Q1
+friedman_q1_detect <- friedman.test(
+  ratio_rt_q1 ~ lab | mixture,
+  data = metrics_detect
+)
+cat("\nFriedman Test (Q1):\n")
+print(friedman_q1_detect)
+
+# Pairwise for Q1
+cat("\nPairwise Wilcoxon (Q1):\n")
+pairwise_q1_detect <- pairwise.wilcox.test(
+  metrics_detect$ratio_rt_q1,
+  metrics_detect$lab,
+  p.adjust.method = "bonferroni",
+  paired = TRUE
+)
+print(pairwise_q1_detect)
+
 # Test RT Q2 (25-50% RT range - early-mid elution)
 cat("\n=== RT Quartile Q2 (25-50% RT) - Detected Data ===\n")
 
@@ -785,7 +856,32 @@ pairwise_q3_detect <- pairwise.wilcox.test(
 )
 print(pairwise_q3_detect)
 
-# Agilent comparison for Q2 and Q3
+# Test RT Q4 (75-100% RT range - late elution)
+cat("\n=== RT Quartile Q4 (75-100% RT) - Detected Data ===\n")
+
+# Friedman test for Q4
+friedman_q4_detect <- friedman.test(
+  ratio_rt_q4 ~ lab | mixture,
+  data = metrics_detect
+)
+cat("\nFriedman Test (Q4):\n")
+print(friedman_q4_detect)
+
+# Pairwise for Q4
+cat("\nPairwise Wilcoxon (Q4):\n")
+pairwise_q4_detect <- pairwise.wilcox.test(
+  metrics_detect$ratio_rt_q4,
+  metrics_detect$lab,
+  p.adjust.method = "bonferroni",
+  paired = TRUE
+)
+print(pairwise_q4_detect)
+
+# Agilent comparison for all quartiles
+agilent_q1_detect <- wilcox.test(ratio_rt_q1 ~ lab, data = agilent_detect, paired = TRUE)
+cat("\n=== Wilcoxon Test Q1: Afekta vs Cembio (Detected Data) ===\n")
+print(agilent_q1_detect)
+
 agilent_q2_detect <- wilcox.test(ratio_rt_q2 ~ lab, data = agilent_detect, paired = TRUE)
 cat("\n=== Wilcoxon Test Q2: Afekta vs Cembio (Detected Data) ===\n")
 print(agilent_q2_detect)
@@ -793,6 +889,10 @@ print(agilent_q2_detect)
 agilent_q3_detect <- wilcox.test(ratio_rt_q3 ~ lab, data = agilent_detect, paired = TRUE)
 cat("\n=== Wilcoxon Test Q3: Afekta vs Cembio (Detected Data) ===\n")
 print(agilent_q3_detect)
+
+agilent_q4_detect <- wilcox.test(ratio_rt_q4 ~ lab, data = agilent_detect, paired = TRUE)
+cat("\n=== Wilcoxon Test Q4: Afekta vs Cembio (Detected Data) ===\n")
+print(agilent_q4_detect)
 ```
 
 ```{r clean-detect}
@@ -1035,6 +1135,27 @@ print(agilent_diff_ann)
 ### Paired Tests for RT Quartile Ratios - Annotated Data
 
 ```{r paired-test-rt-quartiles-ann, fig.width=12, fig.height=8}
+# Test RT Q1 (0-25% RT range - early elution)
+cat("\n=== RT Quartile Q1 (0-25% RT) - Annotated Data ===\n")
+
+# Friedman test for Q1
+friedman_q1_ann <- friedman.test(
+  ratio_rt_q1 ~ lab | mixture,
+  data = metrics_ann
+)
+cat("\nFriedman Test (Q1):\n")
+print(friedman_q1_ann)
+
+# Pairwise for Q1
+cat("\nPairwise Wilcoxon (Q1):\n")
+pairwise_q1_ann <- pairwise.wilcox.test(
+  metrics_ann$ratio_rt_q1,
+  metrics_ann$lab,
+  p.adjust.method = "bonferroni",
+  paired = TRUE
+)
+print(pairwise_q1_ann)
+
 # Test RT Q2 (25-50% RT range - early-mid elution)
 cat("\n=== RT Quartile Q2 (25-50% RT) - Annotated Data ===\n")
 
@@ -1077,7 +1198,32 @@ pairwise_q3_ann <- pairwise.wilcox.test(
 )
 print(pairwise_q3_ann)
 
-# Agilent comparison for Q2 and Q3
+# Test RT Q4 (75-100% RT range - late elution)
+cat("\n=== RT Quartile Q4 (75-100% RT) - Annotated Data ===\n")
+
+# Friedman test for Q4
+friedman_q4_ann <- friedman.test(
+  ratio_rt_q4 ~ lab | mixture,
+  data = metrics_ann
+)
+cat("\nFriedman Test (Q4):\n")
+print(friedman_q4_ann)
+
+# Pairwise for Q4
+cat("\nPairwise Wilcoxon (Q4):\n")
+pairwise_q4_ann <- pairwise.wilcox.test(
+  metrics_ann$ratio_rt_q4,
+  metrics_ann$lab,
+  p.adjust.method = "bonferroni",
+  paired = TRUE
+)
+print(pairwise_q4_ann)
+
+# Agilent comparison for all quartiles
+agilent_q1_ann <- wilcox.test(ratio_rt_q1 ~ lab, data = agilent_ann, paired = TRUE)
+cat("\n=== Wilcoxon Test Q1: Afekta vs Cembio (Annotated Data) ===\n")
+print(agilent_q1_ann)
+
 agilent_q2_ann <- wilcox.test(ratio_rt_q2 ~ lab, data = agilent_ann, paired = TRUE)
 cat("\n=== Wilcoxon Test Q2: Afekta vs Cembio (Annotated Data) ===\n")
 print(agilent_q2_ann)
@@ -1085,6 +1231,10 @@ print(agilent_q2_ann)
 agilent_q3_ann <- wilcox.test(ratio_rt_q3 ~ lab, data = agilent_ann, paired = TRUE)
 cat("\n=== Wilcoxon Test Q3: Afekta vs Cembio (Annotated Data) ===\n")
 print(agilent_q3_ann)
+
+agilent_q4_ann <- wilcox.test(ratio_rt_q4 ~ lab, data = agilent_ann, paired = TRUE)
+cat("\n=== Wilcoxon Test Q4: Afekta vs Cembio (Annotated Data) ===\n")
+print(agilent_q4_ann)
 ```
 
 ```{r clean-ann}
