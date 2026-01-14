@@ -1,0 +1,795 @@
+---
+title: "Global Signal Analysis - Positive Mode (Simplified)"
+format: html
+editor_options:
+  chunk_output_type: console
+---
+
+# Introduction
+
+This simplified analysis computes key metrics from preprocessed LC-MS data to compare across different labs and instrument setups. The analysis focuses on:
+
+- **Base Peak Chromatogram (BPC)**: Sum of peak apices
+- **Total Ion Current (TIC)**: Sum of all peak areas
+- **BPC/TIC Ratio**: Metric for peak purity/complexity
+- **TIC Quantiles**: Distribution assessment (Q25, Q50, Q75)
+
+For each metric, the analysis evaluates data distribution to determine if transformation is needed before statistical analysis, then fits linear models: `Metric ~ lab + mixture + setup`
+
+The analysis is performed on three data levels:
+1. **Full Data**: All detected signal (includes baseline noise)
+2. **Detected Data**: Signal from peak picking (excludes baseline noise)
+3. **Annotated Data**: Only annotated standard compounds
+
+Setup information is derived from the LC and MS instruments in the lab metadata.
+
+## Load libraries
+
+```{r library, include=TRUE, warning=FALSE, message=FALSE}
+library(Chromatograms)
+library(Spectra)
+library(xcms)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(ggbeeswarm)
+library(nortest)
+library(car)
+library(broom)
+library(here)
+
+base_path <- here("5_downstream_analysis")
+```
+
+```{r, cores-cluster}
+# bpparam <- MulticoreParam(workers = parallel::detectCores() - 1)
+```
+
+## Setup Information
+
+Load and prepare the setup metadata:
+
+```{r load-setup}
+setup <- read.csv(file.path(base_path, "lab_setup_phase1.csv"), skip = 1)
+
+# Create a combined setup variable from LC and MS instruments
+setup_simplified <- setup %>%
+  filter(details == "harmonized") %>%
+  select(lab, `LC.Instrument`, `MS.Instrument`) %>%
+  distinct() %>%
+  mutate(
+    lc_short = case_when(
+      grepl("Agilent 1290", `LC.Instrument`) ~ "Agilent1290",
+      grepl("Acquity", `LC.Instrument`) ~ "Acquity",
+      grepl("ExionLC", `LC.Instrument`) ~ "ExionLC",
+      grepl("Bruker", `LC.Instrument`) ~ "Bruker",
+      TRUE ~ "Other"
+    ),
+    ms_short = case_when(
+      grepl("6540|6545", `MS.Instrument`) ~ "Agilent",
+      grepl("Synapt", `MS.Instrument`) ~ "Waters",
+      grepl("Zeno", `MS.Instrument`) ~ "Sciex",
+      grepl("TIMS", `MS.Instrument`) ~ "Bruker",
+      TRUE ~ "Other"
+    ),
+    setup = paste(lc_short, ms_short, sep = "_")
+  ) %>%
+  select(lab, setup)
+
+setup_simplified
+```
+
+# Full Data Analysis
+
+Load the full preprocessed data:
+
+```{r}
+pol <- 1L  # positive polarity
+
+load(file.path(base_path, "object/sp_full.RData"))
+sp_full <- sp_full[sp_full$polarity == pol]
+
+load(file.path(base_path, "object/bpc_full.RData"))
+bpc_full <- bpc_full[bpc_full$polarity == pol]
+
+load(file.path(base_path, "object/tic_full.RData"))
+tic_full <- tic_full[tic_full$polarity == pol]
+```
+
+## Compute Metrics
+
+```{r compute-full-metrics}
+metrics_full <- data.frame(
+  lab = bpc_full$lab,
+  mixture = bpc_full$mixture,
+  bpc = vapply(intensity(bpc_full), sum, numeric(1), na.rm = TRUE), ## sum or median, i'd say sum especially to compare instrument perf
+  tic = vapply(intensity(tic_full), sum, numeric(1), na.rm = TRUE)
+)
+
+metrics_full$bpc_tic_ratio <- metrics_full$bpc / metrics_full$tic
+
+# Add TIC quantiles
+tic_quantiles <- lapply(intensity(tic_full), function(x) {
+  quantile(x, probs = c(0.25, 0.5, 0.75), na.rm = TRUE)
+})
+metrics_full$tic_q25 <- sapply(tic_quantiles, `[`, 1)
+metrics_full$tic_q50 <- sapply(tic_quantiles, `[`, 2)
+metrics_full$tic_q75 <- sapply(tic_quantiles, `[`, 3)
+
+# Add setup information
+metrics_full <- metrics_full %>%
+  left_join(setup_simplified, by = "lab")
+
+head(metrics_full)
+```
+
+## Distribution Assessment
+
+For each metric, assess normality to determine if transformation is needed:
+
+```{r dist-assessment-full}
+metrics_to_assess <- c("bpc", "tic", "bpc_tic_ratio", "tic_q25", "tic_q50", "tic_q75")
+
+distribution_summary_full <- data.frame(
+  metric = character(),
+  n = numeric(),
+  mean = numeric(),
+  sd = numeric(),
+  skewness = numeric(),
+  shapiro_p = numeric(),
+  log_shapiro_p = numeric(),
+  transform_recommended = character(),
+  stringsAsFactors = FALSE
+)
+
+for (m in metrics_to_assess) {
+  data_vec <- metrics_full[[m]]
+  data_vec <- data_vec[!is.na(data_vec)]
+  
+  skewness <- (mean(data_vec) - median(data_vec)) / sd(data_vec)
+  shapiro_test <- shapiro.test(data_vec)
+  log_data <- log(data_vec + 1)  # Add 1 to handle potential zeros
+  shapiro_log <- shapiro.test(log_data)
+  
+  # Recommend transform if log is more normal (p > 0.05)
+  transform_rec <- ifelse(shapiro_log$p.value > shapiro_test$p.value, "log", "none")
+  
+  distribution_summary_full <- rbind(distribution_summary_full, data.frame(
+    metric = m,
+    n = length(data_vec),
+    mean = mean(data_vec),
+    sd = sd(data_vec),
+    skewness = skewness,
+    shapiro_p = round(shapiro_test$p.value, 4),
+    log_shapiro_p = round(shapiro_log$p.value, 4),
+    transform_recommended = transform_rec
+  ))
+}
+
+distribution_summary_full
+```
+
+## Distribution Plots - Full Data
+
+Violin plots and histograms for all metrics:
+
+```{r plots-full, fig.width=14, fig.height=12}
+# Prepare data for plotting
+plot_data_full <- metrics_full %>%
+  pivot_longer(
+    cols = all_of(metrics_to_assess),
+    names_to = "metric",
+    values_to = "value"
+  ) %>%
+  filter(!is.na(value))
+
+# Violin plots by lab
+ggplot(plot_data_full, aes(x = lab, y = value, fill = lab)) +
+  geom_violin(alpha = 0.5) +
+  geom_point(position = position_jitter(width = 0.2), alpha = 0.3) +
+  facet_wrap(~metric, scales = "free_y", ncol = 3) +
+  labs(
+    title = "Full Data - Distribution of Metrics by Laboratory",
+    x = "Laboratory",
+    y = "Value"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Histograms by lab (raw scale) - one plot per lab
+for (lab_name in unique(plot_data_full$lab)) {
+  p <- ggplot(plot_data_full %>% filter(lab == lab_name), aes(x = value, fill = metric)) +
+    geom_histogram(bins = 20, color = "black", alpha = 0.7) +
+    facet_wrap(~metric, scales = "free", ncol = 3) +
+    labs(
+      title = paste("Full Data -", lab_name, "- Distribution Histograms (Raw Scale)"),
+      x = "Value",
+      y = "Frequency"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "none")
+  print(p)
+}
+
+# Histograms on log scale by lab (where applicable)
+plot_data_full_log <- plot_data_full %>%
+  filter(metric %in% c("bpc", "tic", "tic_q25", "tic_q50", "tic_q75"))
+
+for (lab_name in unique(plot_data_full_log$lab)) {
+  p <- ggplot(plot_data_full_log %>% filter(lab == lab_name), aes(x = log(value + 1), fill = metric)) +
+    geom_histogram(bins = 20, color = "black", alpha = 0.7) +
+    facet_wrap(~metric, scales = "free", ncol = 3) +
+    labs(
+      title = paste("Full Data -", lab_name, "- Distribution Histograms (Log Scale)"),
+      x = "Log(Value + 1)",
+      y = "Frequency"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "none")
+  print(p)
+}
+```
+
+## Linear Models - Full Data
+
+```{r lm-full}
+# BPC model
+lm_bpc_full <- lm(log(bpc) ~ lab + setup, data = metrics_full)
+cat("\n=== BPC Full Data ===\n")
+summary(lm_bpc_full)
+
+# TIC model
+lm_tic_full <- lm(log(tic) ~ lab + setup, data = metrics_full)
+cat("\n=== TIC Full Data ===\n")
+summary(lm_tic_full)
+
+# BPC/TIC ratio model
+lm_ratio_full <- lm(bpc_tic_ratio ~ lab + setup, data = metrics_full)
+cat("\n=== BPC/TIC Ratio Full Data ===\n")
+summary(lm_ratio_full)
+
+# TIC Q50 model
+lm_tic_q50_full <- lm(log(tic_q50) ~ lab + setup, data = metrics_full)
+cat("\n=== TIC Q50 Full Data ===\n")
+summary(lm_tic_q50_full)
+```
+
+```{r clean-full}
+rm(tic_full, bpc_full, sp_full)
+```
+
+---
+
+# Detected Signal Analysis
+
+Load the detected signal data:
+
+```{r load-detect}
+load(file.path(base_path, "object/sp_full_detect.RData"))
+sp_full_detect <- sp_full_detect[sp_full_detect$polarity == pol]
+
+load(file.path(base_path, "object/bpc_detect.RData"))
+bpc_detect <- bpc_detect[bpc_detect$polarity == pol]
+
+load(file.path(base_path, "object/tic_detect.RData"))
+tic_detect <- tic_detect[tic_detect$polarity == pol]
+```
+
+## Compute Metrics
+
+```{r compute-detect-metrics}
+metrics_detect <- data.frame(
+  lab = bpc_detect$lab,
+  mixture = bpc_detect$mixture,
+  bpc = vapply(intensity(bpc_detect), sum, numeric(1), na.rm = TRUE),
+  tic = vapply(intensity(tic_detect), sum, numeric(1), na.rm = TRUE)
+)
+
+metrics_detect$bpc_tic_ratio <- metrics_detect$bpc / metrics_detect$tic
+
+# Add TIC quantiles
+tic_quantiles <- lapply(intensity(tic_detect), function(x) {
+  quantile(x, probs = c(0.25, 0.5, 0.75), na.rm = TRUE)
+})
+metrics_detect$tic_q25 <- sapply(tic_quantiles, `[`, 1)
+metrics_detect$tic_q50 <- sapply(tic_quantiles, `[`, 2)
+metrics_detect$tic_q75 <- sapply(tic_quantiles, `[`, 3)
+
+# Add setup information
+metrics_detect <- metrics_detect %>%
+  left_join(setup_simplified, by = "lab")
+
+head(metrics_detect)
+```
+
+## Distribution Assessment
+
+```{r dist-assessment-detect}
+distribution_summary_detect <- data.frame(
+  metric = character(),
+  n = numeric(),
+  mean = numeric(),
+  sd = numeric(),
+  skewness = numeric(),
+  shapiro_p = numeric(),
+  log_shapiro_p = numeric(),
+  transform_recommended = character(),
+  stringsAsFactors = FALSE
+)
+
+for (m in metrics_to_assess) {
+  data_vec <- metrics_detect[[m]]
+  data_vec <- data_vec[!is.na(data_vec)]
+  
+  skewness <- (mean(data_vec) - median(data_vec)) / sd(data_vec)
+  shapiro_test <- shapiro.test(data_vec)
+  log_data <- log(data_vec + 1)
+  shapiro_log <- shapiro.test(log_data)
+  
+  transform_rec <- ifelse(shapiro_log$p.value > shapiro_test$p.value, "log", "none")
+  
+  distribution_summary_detect <- rbind(distribution_summary_detect, data.frame(
+    metric = m,
+    n = length(data_vec),
+    mean = mean(data_vec),
+    sd = sd(data_vec),
+    skewness = skewness,
+    shapiro_p = round(shapiro_test$p.value, 4),
+    log_shapiro_p = round(shapiro_log$p.value, 4),
+    transform_recommended = transform_rec
+  ))
+}
+
+distribution_summary_detect
+```
+
+## Distribution Plots - Detected Data
+
+Violin plots and histograms for all metrics:
+
+```{r plots-detect, fig.width=14, fig.height=12}
+# Prepare data for plotting
+plot_data_detect <- metrics_detect %>%
+  pivot_longer(
+    cols = all_of(metrics_to_assess),
+    names_to = "metric",
+    values_to = "value"
+  ) %>%
+  filter(!is.na(value))
+
+# Violin plots by lab
+ggplot(plot_data_detect, aes(x = lab, y = value, fill = lab)) +
+  geom_violin(alpha = 0.5) +
+  geom_point(position = position_jitter(width = 0.2), alpha = 0.3) +
+  facet_wrap(~metric, scales = "free_y", ncol = 3) +
+  labs(
+    title = "Detected Data - Distribution of Metrics by Laboratory",
+    x = "Laboratory",
+    y = "Value"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Histograms by lab (raw scale) - one plot per lab
+for (lab_name in unique(plot_data_detect$lab)) {
+  p <- ggplot(plot_data_detect %>% filter(lab == lab_name), aes(x = value, fill = metric)) +
+    geom_histogram(bins = 20, color = "black", alpha = 0.7) +
+    facet_wrap(~metric, scales = "free", ncol = 3) +
+    labs(
+      title = paste("Detected Data -", lab_name, "- Distribution Histograms (Raw Scale)"),
+      x = "Value",
+      y = "Frequency"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "none")
+  print(p)
+}
+
+# Histograms on log scale by lab (where applicable)
+plot_data_detect_log <- plot_data_detect %>%
+  filter(metric %in% c("bpc", "tic", "tic_q25", "tic_q50", "tic_q75"))
+
+for (lab_name in unique(plot_data_detect_log$lab)) {
+  p <- ggplot(plot_data_detect_log %>% filter(lab == lab_name), aes(x = log(value + 1), fill = metric)) +
+    geom_histogram(bins = 20, color = "black", alpha = 0.7) +
+    facet_wrap(~metric, scales = "free", ncol = 3) +
+    labs(
+      title = paste("Detected Data -", lab_name, "- Distribution Histograms (Log Scale)"),
+      x = "Log(Value + 1)",
+      y = "Frequency"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "none")
+  print(p)
+}
+```
+
+## Linear Models - Detected Data
+
+```{r lm-detect}
+# BPC model
+lm_bpc_detect <- lm(log(bpc) ~ lab + setup, data = metrics_detect)
+cat("\n=== BPC Detected Data ===\n")
+summary(lm_bpc_detect)
+
+# TIC model
+lm_tic_detect <- lm(log(tic) ~ lab + setup, data = metrics_detect)
+cat("\n=== TIC Detected Data ===\n")
+summary(lm_tic_detect)
+
+# BPC/TIC ratio model
+lm_ratio_detect <- lm(bpc_tic_ratio ~ lab + setup, data = metrics_detect)
+cat("\n=== BPC/TIC Ratio Detected Data ===\n")
+summary(lm_ratio_detect)
+
+# TIC Q50 model
+lm_tic_q50_detect <- lm(log(tic_q50) ~ lab + setup, data = metrics_detect)
+cat("\n=== TIC Q50 Detected Data ===\n")
+summary(lm_tic_q50_detect)
+```
+
+```{r clean-detect}
+rm(tic_detect, bpc_detect, sp_full_detect)
+```
+
+---
+
+# Annotated Signal Analysis
+
+Load the annotated signal data:
+
+```{r load-ann}
+load(file.path(base_path, "object/sp_full_ann.RData"))
+sp_full_ann <- sp_full_ann[sp_full_ann$polarity == pol]
+
+load(file.path(base_path, "object/bpc_ann.RData"))
+bpc_ann <- bpc_ann[bpc_ann$polarity == pol]
+
+load(file.path(base_path, "object/tic_ann.RData"))
+tic_ann <- tic_ann[tic_ann$polarity == pol]
+```
+
+## Compute Metrics
+
+```{r compute-ann-metrics}
+metrics_ann <- data.frame(
+  lab = bpc_ann$lab,
+  mixture = bpc_ann$mixture,
+  bpc = vapply(intensity(bpc_ann), sum, numeric(1), na.rm = TRUE),
+  tic = vapply(intensity(tic_ann), sum, numeric(1), na.rm = TRUE)
+)
+
+metrics_ann$bpc_tic_ratio <- metrics_ann$bpc / metrics_ann$tic
+
+# Add TIC quantiles
+tic_quantiles <- lapply(intensity(tic_ann), function(x) {
+  quantile(x, probs = c(0.25, 0.5, 0.75), na.rm = TRUE)
+})
+metrics_ann$tic_q25 <- sapply(tic_quantiles, `[`, 1)
+metrics_ann$tic_q50 <- sapply(tic_quantiles, `[`, 2)
+metrics_ann$tic_q75 <- sapply(tic_quantiles, `[`, 3)
+
+# Add setup information
+metrics_ann <- metrics_ann %>%
+  left_join(setup_simplified, by = "lab")
+
+head(metrics_ann)
+```
+
+## Distribution Assessment
+
+```{r dist-assessment-ann}
+distribution_summary_ann <- data.frame(
+  metric = character(),
+  n = numeric(),
+  mean = numeric(),
+  sd = numeric(),
+  skewness = numeric(),
+  shapiro_p = numeric(),
+  log_shapiro_p = numeric(),
+  transform_recommended = character(),
+  stringsAsFactors = FALSE
+)
+
+for (m in metrics_to_assess) {
+  data_vec <- metrics_ann[[m]]
+  data_vec <- data_vec[!is.na(data_vec)]
+  
+  skewness <- (mean(data_vec) - median(data_vec)) / sd(data_vec)
+  shapiro_test <- shapiro.test(data_vec)
+  log_data <- log(data_vec + 1)
+  shapiro_log <- shapiro.test(log_data)
+  
+  transform_rec <- ifelse(shapiro_log$p.value > shapiro_test$p.value, "log", "none")
+  
+  distribution_summary_ann <- rbind(distribution_summary_ann, data.frame(
+    metric = m,
+    n = length(data_vec),
+    mean = mean(data_vec),
+    sd = sd(data_vec),
+    skewness = skewness,
+    shapiro_p = round(shapiro_test$p.value, 4),
+    log_shapiro_p = round(shapiro_log$p.value, 4),
+    transform_recommended = transform_rec
+  ))
+}
+
+distribution_summary_ann
+```
+
+## Distribution Plots - Annotated Data
+
+Violin plots and histograms for all metrics:
+
+```{r plots-ann, fig.width=14, fig.height=12}
+# Prepare data for plotting
+plot_data_ann <- metrics_ann %>%
+  pivot_longer(
+    cols = all_of(metrics_to_assess),
+    names_to = "metric",
+    values_to = "value"
+  ) %>%
+  filter(!is.na(value))
+
+# Violin plots by lab
+ggplot(plot_data_ann, aes(x = lab, y = value, fill = lab)) +
+  geom_violin(alpha = 0.5) +
+  geom_point(position = position_jitter(width = 0.2), alpha = 0.3) +
+  facet_wrap(~metric, scales = "free_y", ncol = 3) +
+  labs(
+    title = "Annotated Data - Distribution of Metrics by Laboratory",
+    x = "Laboratory",
+    y = "Value"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Histograms by lab (raw scale) - one plot per lab
+for (lab_name in unique(plot_data_ann$lab)) {
+  p <- ggplot(plot_data_ann %>% filter(lab == lab_name), aes(x = value, fill = metric)) +
+    geom_histogram(bins = 20, color = "black", alpha = 0.7) +
+    facet_wrap(~metric, scales = "free", ncol = 3) +
+    labs(
+      title = paste("Annotated Data -", lab_name, "- Distribution Histograms (Raw Scale)"),
+      x = "Value",
+      y = "Frequency"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "none")
+  print(p)
+}
+
+# Histograms on log scale by lab (where applicable)
+plot_data_ann_log <- plot_data_ann %>%
+  filter(metric %in% c("bpc", "tic", "tic_q25", "tic_q50", "tic_q75"))
+
+for (lab_name in unique(plot_data_ann_log$lab)) {
+  p <- ggplot(plot_data_ann_log %>% filter(lab == lab_name), aes(x = log(value + 1), fill = metric)) +
+    geom_histogram(bins = 20, color = "black", alpha = 0.7) +
+    facet_wrap(~metric, scales = "free", ncol = 3) +
+    labs(
+      title = paste("Annotated Data -", lab_name, "- Distribution Histograms (Log Scale)"),
+      x = "Log(Value + 1)",
+      y = "Frequency"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "none")
+  print(p)
+}
+```
+
+## Linear Models - Annotated Data
+
+```{r lm-ann}
+# BPC model
+lm_bpc_ann <- lm(log(bpc) ~ lab + setup, data = metrics_ann)
+cat("\n=== BPC Annotated Data ===\n")
+summary(lm_bpc_ann)
+
+# TIC model
+lm_tic_ann <- lm(log(tic) ~ lab + setup, data = metrics_ann)
+cat("\n=== TIC Annotated Data ===\n")
+summary(lm_tic_ann)
+
+# BPC/TIC ratio model
+lm_ratio_ann <- lm(bpc_tic_ratio ~ lab + setup, data = metrics_ann)
+cat("\n=== BPC/TIC Ratio Annotated Data ===\n")
+summary(lm_ratio_ann)
+
+# TIC Q50 model
+lm_tic_q50_ann <- lm(log(tic_q50) ~ lab + setup, data = metrics_ann)
+cat("\n=== TIC Q50 Annotated Data ===\n")
+summary(lm_tic_q50_ann)
+```
+
+```{r clean-ann}
+rm(tic_ann, bpc_ann, sp_full_ann)
+```
+
+---
+
+# Noise Analysis
+
+Compute noise/background signal metrics:
+
+```{r noise-analysis}
+# Reload data for noise calculation
+load("object/tic_full.RData")
+tic_full <- tic_full[tic_full$polarity == pol]
+
+load("object/tic_detect.RData")
+tic_detect <- tic_detect[tic_detect$polarity == pol]
+
+load("object/tic_ann.RData")
+tic_ann <- tic_ann[tic_ann$polarity == pol]
+
+# Sum TIC for each level
+stic_full <- vapply(intensity(tic_full), sum, numeric(1), na.rm = TRUE)
+stic_detect <- vapply(intensity(tic_detect), sum, numeric(1), na.rm = TRUE)
+stic_ann <- vapply(intensity(tic_ann), sum, numeric(1), na.rm = TRUE)
+
+# Compute noise metrics
+noise_metrics <- data.frame(
+  lab = tic_full$lab,
+  mixture = tic_full$mixture,
+  
+  # Background noise (full - detected)
+  noise_baseline = stic_full - stic_detect,
+  
+  # Other signal (detected - annotated)
+  noise_unannotated = stic_detect - stic_ann,
+  
+  # All non-annotated signal
+  noise_total_other = stic_full - stic_ann,
+  
+  # Ratios
+  ratio_detected_to_background = stic_detect / (stic_full - stic_detect),
+  ratio_annotated_to_other = stic_ann / (stic_detect - stic_ann),
+  ratio_annotated_to_full = stic_ann / stic_full
+)
+
+# Add setup information
+noise_metrics <- noise_metrics %>%
+  left_join(setup_simplified, by = "lab")
+
+head(noise_metrics)
+```
+
+## Distribution Assessment - Noise
+
+```{r dist-assessment-noise}
+noise_metrics_to_assess <- c("noise_baseline", "noise_unannotated", "noise_total_other",
+                              "ratio_detected_to_background", "ratio_annotated_to_other", 
+                              "ratio_annotated_to_full")
+
+distribution_summary_noise <- data.frame(
+  metric = character(),
+  n = numeric(),
+  mean = numeric(),
+  sd = numeric(),
+  skewness = numeric(),
+  shapiro_p = numeric(),
+  log_shapiro_p = numeric(),
+  transform_recommended = character(),
+  stringsAsFactors = FALSE
+)
+
+for (m in noise_metrics_to_assess) {
+  data_vec <- noise_metrics[[m]]
+  data_vec <- data_vec[!is.na(data_vec) & data_vec > 0]
+  
+  if (length(data_vec) < 3) next  # Skip if too few observations
+  
+  skewness <- (mean(data_vec) - median(data_vec)) / sd(data_vec)
+  shapiro_test <- shapiro.test(data_vec)
+  log_data <- log(data_vec + 1)
+  shapiro_log <- shapiro.test(log_data)
+  
+  transform_rec <- ifelse(shapiro_log$p.value > shapiro_test$p.value, "log", "none")
+  
+  distribution_summary_noise <- rbind(distribution_summary_noise, data.frame(
+    metric = m,
+    n = length(data_vec),
+    mean = mean(data_vec),
+    sd = sd(data_vec),
+    skewness = skewness,
+    shapiro_p = round(shapiro_test$p.value, 4),
+    log_shapiro_p = round(shapiro_log$p.value, 4),
+    transform_recommended = transform_rec
+  ))
+}
+
+distribution_summary_noise
+```
+
+## Distribution Plots - Noise Metrics
+
+Violin plots and histograms for all noise metrics:
+
+```{r plots-noise, fig.width=14, fig.height=12}
+# Prepare data for plotting
+plot_data_noise <- noise_metrics %>%
+  pivot_longer(
+    cols = all_of(noise_metrics_to_assess),
+    names_to = "metric",
+    values_to = "value"
+  ) %>%
+  filter(!is.na(value) & is.finite(value) & value > 0)
+
+# Violin plots by lab
+ggplot(plot_data_noise, aes(x = lab, y = value, fill = lab)) +
+  geom_violin(alpha = 0.5) +
+  geom_point(position = position_jitter(width = 0.2), alpha = 0.3) +
+  facet_wrap(~metric, scales = "free_y", ncol = 3) +
+  labs(
+    title = "Noise Metrics - Distribution by Laboratory",
+    x = "Laboratory",
+    y = "Value"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Histograms by lab (raw scale) - one plot per lab
+for (lab_name in unique(plot_data_noise$lab)) {
+  p <- ggplot(plot_data_noise %>% filter(lab == lab_name), aes(x = value, fill = metric)) +
+    geom_histogram(bins = 20, color = "black", alpha = 0.7) +
+    facet_wrap(~metric, scales = "free", ncol = 3) +
+    labs(
+      title = paste("Noise Metrics -", lab_name, "- Distribution Histograms (Raw Scale)"),
+      x = "Value",
+      y = "Frequency"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "none")
+  print(p)
+}
+
+# Histograms on log scale by lab
+for (lab_name in unique(plot_data_noise$lab)) {
+  p <- ggplot(plot_data_noise %>% filter(lab == lab_name), aes(x = log(value + 1), fill = metric)) +
+    geom_histogram(bins = 20, color = "black", alpha = 0.7) +
+    facet_wrap(~metric, scales = "free", ncol = 3) +
+    labs(
+      title = paste("Noise Metrics -", lab_name, "- Distribution Histograms (Log Scale)"),
+      x = "Log(Value + 1)",
+      y = "Frequency"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "none")
+  print(p)
+}
+```
+
+## Linear Models - Noise
+
+```{r lm-noise}
+# Remove rows with infinite or NA values in ratios
+noise_metrics_clean <- noise_metrics %>%
+  filter(is.finite(ratio_detected_to_background) & 
+         is.finite(ratio_annotated_to_other) &
+         noise_baseline > 0 & noise_unannotated > 0)
+
+# Baseline noise model
+lm_baseline <- lm(log(noise_baseline) ~ lab + setup, data = noise_metrics_clean)
+cat("\n=== Baseline Noise (Full - Detected) ===\n")
+summary(lm_baseline)
+
+# Unannotated signal model
+lm_unannotated <- lm(log(noise_unannotated) ~ lab + setup, data = noise_metrics_clean)
+cat("\n=== Unannotated Signal (Detected - Annotated) ===\n")
+summary(lm_unannotated)
+
+# Ratio: detected to background
+lm_ratio_det_bg <- lm(log(ratio_detected_to_background) ~ lab + setup, data = noise_metrics_clean)
+cat("\n=== Ratio: Detected / Background ===\n")
+summary(lm_ratio_det_bg)
+
+# Ratio: annotated to other
+lm_ratio_ann_other <- lm(log(ratio_annotated_to_other) ~ lab + setup, data = noise_metrics_clean)
+cat("\n=== Ratio: Annotated / Other Detected ===\n")
+summary(lm_ratio_ann_other)
+```
+
+```{r clean-noise}
+rm(tic_full, tic_detect, tic_ann)
+```
