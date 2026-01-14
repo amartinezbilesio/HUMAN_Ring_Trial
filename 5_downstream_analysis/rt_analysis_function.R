@@ -442,6 +442,18 @@ setMethod(
 #'
 #' @return A data frame where each row corresponds to an EIC and each column
 #'   is a calculated metric.
+#'
+#' @note add these below:
+#' Asymmetry factor - ratio of back half to front half width at 10% height (different from tailing at 5%)
+# Peak skewness - third moment of the peak distribution
+# Peak kurtosis - fourth moment (peakedness)
+# Rise time / Fall time - time from 10% to 90% height on each side
+# Modality - number of local maxima (detect shouldering)
+#' Peak area ratio - area above 50% max vs total area
+# # Front - to - back area ratio
+#  sn (signal-to-noise)
+# into / maxo ratio (integrated vs max intensity)
+
 calculatePeakMetrics <- function(df_list) {
   # Check for the 'pracma' package, needed for AUC calculation
   if (!requireNamespace("pracma", quietly = TRUE)) {
