@@ -248,15 +248,64 @@ lm_ratio_full <- lm(bpc_tic_ratio ~ lab + setup, data = metrics_full)
 cat("\n=== BPC/TIC Ratio Full Data ===\n")
 summary(lm_ratio_full)
 
+#TIC 25 model
+lm_tic_q25_full <- lm(log(tic_q25) ~ lab + setup, data = metrics_full)
+cat("\n=== TIC Q25 Full Data ===\n")
+summary(lm_tic_q25_full)
+
 # TIC Q50 model
 lm_tic_q50_full <- lm(log(tic_q50) ~ lab + setup, data = metrics_full)
 cat("\n=== TIC Q50 Full Data ===\n")
 summary(lm_tic_q50_full)
+
+# TIC Q75 model
+lm_tic_q75_full <- lm(log(tic_q75) ~ lab + setup, data = metrics_full)
+cat("\n=== TIC Q75 Full Data ===\n")
+summary(lm_tic_q75_full)
 ```
 
-```{r clean-full}
-rm(tic_full, bpc_full, sp_full)
-```
+## Interpretation of Full Data Linear Models
+
+### Key Findings
+
+**Laboratory Effects (Primary Finding)**
+All metrics show highly significant laboratory effects (p < 2e-16), indicating substantial differences in signal intensity across labs:
+
+- **BPC (Log scale)**: HMGU produces ~40× less signal (exp(-3.937)), cembio ~44% less (exp(-0.750)), and ICL ~37% less (exp(-0.980)) compared to afekta (baseline).
+- **TIC (Log scale)**: Even stronger lab effects. HMGU shows ~50× reduction, cembio ~72% reduction, ICL ~61% reduction. This metric is highly discriminatory (R² = 0.9953).
+- **BPC/TIC Ratio**: Only cembio differs significantly (p = 0.003), with 0.037 higher ratio. HMGU and ICL show no significant difference from afekta. This suggests different peak complexity patterns between labs.
+- **TIC Quantiles (Q25, Q50, Q75)**: All show extremely strong lab effects (p < 2e-16) with consistent patterns—HMGU >> cembio > ICL differences. Effects are strongest at Q75 (narrower residuals: 0.0747 vs 0.1038 for BPC).
+
+**Instrument Setup Effects**
+All setup coefficients return NA (singularities), meaning setup is **perfectly confounded with laboratory**—each lab uses a unique instrument combination. This prevents separate estimation of setup effects. To resolve this:
+- Request multi-instrument labs (same lab, different setup), or
+- Remove setup from the model to focus on lab differences alone.
+
+**Model Quality**
+- **Best models**: TIC Q75 (R² = 0.9972) and TIC Q25 (R² = 0.9959) explain 99.7% and 99.6% of variance
+- **Moderate model**: BPC (R² = 0.943) explains 94.3% of variance
+- **Weak model**: BPC/TIC Ratio (R² = 0.1442) explains only 14.4%—this ratio is not a good discriminator between labs
+
+**Residual Diagnostics**
+- BPC residuals show right skew and outliers (Max = 1.29, Min = -0.76), suggesting non-normality despite log transformation
+- TIC metrics have much tighter, more symmetric residuals
+- BPC/TIC has smallest residual range, indicating more consistent measurement
+
+### Interpretation Summary
+
+1. **Strong Lab Differences**: Across all metrics, HMGU consistently produces the weakest signal, while afekta (baseline) produces the strongest. This likely reflects instrument sensitivity differences or sample handling protocols.
+
+2. **TIC is More Reliable**: TIC metrics (especially quantiles) show tighter models and less residual variation, making them more suitable for inter-lab comparisons than BPC alone.
+
+3. **Peak Complexity Similar**: The BPC/TIC ratio shows minimal variation between labs (except cembio), suggesting all labs produce similarly complex peak distributions despite different signal magnitudes.
+
+4. **Setup Cannot Be Evaluated**: Current data structure prevents separate estimation of instrument setup effects; lab and setup are confounded.
+
+How can I interpret this?
+
+
+
+
 
 ---
 

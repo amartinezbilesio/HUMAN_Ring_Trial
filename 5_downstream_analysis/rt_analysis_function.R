@@ -27,7 +27,7 @@ load_data <- function(lab, study_group, return = "sp") {
   )
 
   ## filter mz 100 - 1100
-  spectra(mse) <- filterMz(spectra(mse), c(100, 1100))
+  mse <- filterMzRange(mse, c(100, 1100))
 
   sampleData(mse)$mixture <- sub(".*_", "", sampleData(mse)$Sample.Name)
   sampleData(mse)$mixture <- gsub("\\.", "_", sampleData(mse)$mixture)
