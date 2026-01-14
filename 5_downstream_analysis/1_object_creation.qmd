@@ -40,14 +40,11 @@ Note:
 ```{r load-full-data}
 if (!file.exists(file.path(base_path, "object/sp_full.RData"))) {
   sp_afekta <- load_data(lab = "afekta", study_group = "HE")
-
   sp_hmgu <- load_data(lab = "hmgu", study_group = "HE")
   sp_icl <- load_data(lab = "icl", study_group = "HE")
   sp_cembio <- load_data(lab = "cembio", study_group = "HE")
-
   sp_full <- c(sp_afekta, sp_hmgu, sp_icl, sp_cembio)
   sp_full <- filterMzRange(sp_full, mz = c(100, 1100))
-  sp_full <- applyProcessing(sp_full)
   save(sp_full, file = file.path(base_path, "object/sp_full.RData"))
   rm(sp_afekta, sp_hmgu, sp_icl, sp_cembio)
 } else {

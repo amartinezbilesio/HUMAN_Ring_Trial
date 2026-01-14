@@ -108,13 +108,29 @@ metrics_full <- data.frame(
 
 metrics_full$bpc_tic_ratio <- metrics_full$bpc / metrics_full$tic
 
-# Add TIC quantiles
-tic_quantiles <- lapply(intensity(tic_full), function(x) {
-  quantile(x, probs = c(0.25, 0.5, 0.75), na.rm = TRUE)
-})
-metrics_full$tic_q25 <- sapply(tic_quantiles, `[`, 1)
-metrics_full$tic_q50 <- sapply(tic_quantiles, `[`, 2)
-metrics_full$tic_q75 <- sapply(tic_quantiles, `[`, 3)
+# Add BPC/TIC ratio by RT quartiles
+rt_quartile_ratios <- mapply(function(bpc_int, tic_int, rt) {
+  # Split RT into quartiles
+  rt_range <- range(rt, na.rm = TRUE)
+  rt_breaks <- seq(rt_range[1], rt_range[2], length.out = 5)
+  
+  # Calculate ratio for each quartile
+  q1 <- sum(bpc_int[rt >= rt_breaks[1] & rt < rt_breaks[2]], na.rm = TRUE) / 
+        sum(tic_int[rt >= rt_breaks[1] & rt < rt_breaks[2]], na.rm = TRUE)
+  q2 <- sum(bpc_int[rt >= rt_breaks[2] & rt < rt_breaks[3]], na.rm = TRUE) / 
+        sum(tic_int[rt >= rt_breaks[2] & rt < rt_breaks[3]], na.rm = TRUE)
+  q3 <- sum(bpc_int[rt >= rt_breaks[3] & rt < rt_breaks[4]], na.rm = TRUE) / 
+        sum(tic_int[rt >= rt_breaks[3] & rt < rt_breaks[4]], na.rm = TRUE)
+  q4 <- sum(bpc_int[rt >= rt_breaks[4] & rt <= rt_breaks[5]], na.rm = TRUE) / 
+        sum(tic_int[rt >= rt_breaks[4] & rt <= rt_breaks[5]], na.rm = TRUE)
+  
+  c(q1, q2, q3, q4)
+}, intensity(bpc_full), intensity(tic_full), rtime(bpc_full), SIMPLIFY = TRUE)
+
+metrics_full$ratio_rt_q1 <- rt_quartile_ratios[1, ]
+metrics_full$ratio_rt_q2 <- rt_quartile_ratios[2, ]
+metrics_full$ratio_rt_q3 <- rt_quartile_ratios[3, ]
+metrics_full$ratio_rt_q4 <- rt_quartile_ratios[4, ]
 
 # Add setup information
 metrics_full <- metrics_full %>%
@@ -128,7 +144,7 @@ head(metrics_full)
 For each metric, assess normality to determine if transformation is needed:
 
 ```{r dist-assessment-full}
-metrics_to_assess <- c("bpc", "tic", "bpc_tic_ratio", "tic_q25", "tic_q50", "tic_q75")
+metrics_to_assess <- c("bpc", "tic", "bpc_tic_ratio", "ratio_rt_q1", "ratio_rt_q2", "ratio_rt_q3", "ratio_rt_q4")
 
 distribution_summary_full <- data.frame(
   metric = character(),
@@ -213,7 +229,7 @@ for (lab_name in unique(plot_data_full$lab)) {
 
 # Histograms on log scale by lab (where applicable)
 plot_data_full_log <- plot_data_full %>%
-  filter(metric %in% c("bpc", "tic", "tic_q25", "tic_q50", "tic_q75"))
+  filter(metric %in% c("bpc", "tic"))
 
 for (lab_name in unique(plot_data_full_log$lab)) {
   p <- ggplot(plot_data_full_log %>% filter(lab == lab_name), aes(x = log(value + 1), fill = metric)) +
@@ -248,20 +264,25 @@ lm_ratio_full <- lm(bpc_tic_ratio ~ lab + setup, data = metrics_full)
 cat("\n=== BPC/TIC Ratio Full Data ===\n")
 summary(lm_ratio_full)
 
-#TIC 25 model
-lm_tic_q25_full <- lm(log(tic_q25) ~ lab + setup, data = metrics_full)
-cat("\n=== TIC Q25 Full Data ===\n")
-summary(lm_tic_q25_full)
+# BPC/TIC Ratio RT Q1 model (0-25% RT range)
+lm_ratio_rt_q1_full <- lm(ratio_rt_q1 ~ lab + setup, data = metrics_full)
+cat("\n=== BPC/TIC Ratio RT Q1 (0-25% RT) Full Data ===\n")
+summary(lm_ratio_rt_q1_full)
 
-# TIC Q50 model
-lm_tic_q50_full <- lm(log(tic_q50) ~ lab + setup, data = metrics_full)
-cat("\n=== TIC Q50 Full Data ===\n")
-summary(lm_tic_q50_full)
+# BPC/TIC Ratio RT Q2 model (25-50% RT range)
+lm_ratio_rt_q2_full <- lm(ratio_rt_q2 ~ lab + setup, data = metrics_full)
+cat("\n=== BPC/TIC Ratio RT Q2 (25-50% RT) Full Data ===\n")
+summary(lm_ratio_rt_q2_full)
 
-# TIC Q75 model
-lm_tic_q75_full <- lm(log(tic_q75) ~ lab + setup, data = metrics_full)
-cat("\n=== TIC Q75 Full Data ===\n")
-summary(lm_tic_q75_full)
+# BPC/TIC Ratio RT Q3 model (50-75% RT range)
+lm_ratio_rt_q3_full <- lm(ratio_rt_q3 ~ lab + setup, data = metrics_full)
+cat("\n=== BPC/TIC Ratio RT Q3 (50-75% RT) Full Data ===\n")
+summary(lm_ratio_rt_q3_full)
+
+# BPC/TIC Ratio RT Q4 model (75-100% RT range)
+lm_ratio_rt_q4_full <- lm(ratio_rt_q4 ~ lab + setup, data = metrics_full)
+cat("\n=== BPC/TIC Ratio RT Q4 (75-100% RT) Full Data ===\n")
+summary(lm_ratio_rt_q4_full)
 ```
 
 ## Interpretation of Full Data Linear Models
@@ -273,8 +294,8 @@ All metrics show highly significant laboratory effects (p < 2e-16), indicating s
 
 - **BPC (Log scale)**: HMGU produces ~40× less signal (exp(-3.937)), cembio ~44% less (exp(-0.750)), and ICL ~37% less (exp(-0.980)) compared to afekta (baseline).
 - **TIC (Log scale)**: Even stronger lab effects. HMGU shows ~50× reduction, cembio ~72% reduction, ICL ~61% reduction. This metric is highly discriminatory (R² = 0.9953).
-- **BPC/TIC Ratio**: Only cembio differs significantly (p = 0.003), with 0.037 higher ratio. HMGU and ICL show no significant difference from afekta. This suggests different peak complexity patterns between labs.
-- **TIC Quantiles (Q25, Q50, Q75)**: All show extremely strong lab effects (p < 2e-16) with consistent patterns—HMGU >> cembio > ICL differences. Effects are strongest at Q75 (narrower residuals: 0.0747 vs 0.1038 for BPC).
+- **BPC/TIC Ratio (Overall)**: Only cembio differs significantly (p = 0.003), with 0.037 higher ratio. HMGU and ICL show no significant difference from afekta. This suggests different peak complexity patterns between labs.
+- **BPC/TIC Ratio by RT Quartiles (Q1-Q4)**: Evaluates peak purity across the chromatographic separation window (0-25%, 25-50%, 50-75%, 75-100% RT). Shows whether lab differences in peak complexity are consistent throughout elution or vary by retention time region.
 
 **Instrument Setup Effects**
 All setup coefficients return NA (singularities) due to **rank deficiency**: afekta and cembio share the same setup (Agilent1290_Agilent), while icl and hmgu each use unique setups. The model cannot separately estimate setup effects from lab effects when some labs share setups and others don't. To estimate separate setup effects:
@@ -383,11 +404,14 @@ The paired analysis focuses on **BPC/TIC ratio** rather than absolute metrics (B
 
 **Pairwise Comparisons (Bonferroni corrected)**
 - **Afekta vs Cembio: p = 2.3e-05*** (strongest difference)
-  - Despite using identical equipment, these two Agilent labs produce significantly different peak ratios
-  - Suggests **human/protocol differences** (sample prep, calibration, operator technique) dominate over hardware
+  - Despite using identical equipment, these two Agilent labs produce 
+  significantly different peak ratios
+  - Suggests **human/protocol differences** (sample prep, calibration, operator 
+  technique) dominate over hardware
   
 - **Cembio vs HMGU: p = 0.049** (borderline significant)
-  - Different instruments (Agilent vs Sciex) show marginal difference in peak ratio
+  - Different instruments (Agilent vs Sciex) show marginal difference in peak
+   ratio
   - Suggests instrument type has less effect than lab-specific practices
   
 - **Afekta vs HMGU: p = 1.000** (not significant)
@@ -404,16 +428,22 @@ The paired analysis focuses on **BPC/TIC ratio** rather than absolute metrics (B
 
 **Should you run paired tests on other metrics? NO, here's why:**
 
-1. **BPC & TIC**: These show ~40-50× differences between labs (lab×hardware confounded). Paired tests would just re-confirm hardware differences we already know from the linear models (R² = 0.99). Low interpretive value.
+1. **BPC & TIC**: These show ~40-50× differences between labs (lab×hardware 
+confounded). Paired tests would just re-confirm hardware differences we already
+ know from the linear models (R² = 0.99). Low interpretive value.
 
-2. **TIC Quantiles (Q25, Q50, Q75)**: Same issue—these are absolute signal measures showing strong hardware effects. Paired tests add no new insight beyond "HMGU is weaker."
+2. **TIC Quantiles (Q25, Q50, Q75)**: Same issue—these are absolute signal 
+measures showing strong hardware effects. Paired tests add no new insight beyond "HMGU is weaker."
 
-3. **Ratio is the only metric that separates hardware from protocols**: It's the only metric where afekta and cembio can differ despite identical equipment.
+3. **Ratio is the only metric that separates hardware from protocols**: It's 
+the only metric where afekta and cembio can differ despite identical equipment.
 
 **Consider removing/simplifying to:**
 - Keep: **Friedman test** (global test controlling for mixture)
 - Keep: **Pairwise Wilcoxon** (identifies which labs differ)
-- **Optional removal**: The three non-significant pairwise comparisons (afekta vs HMGU/ICL, HMGU vs ICL) could be condensed with a note that "remaining pairs are not significant"
+- **Optional removal**: The three non-significant pairwise comparisons (afekta 
+vs HMGU/ICL, HMGU vs ICL) could be condensed with a note that "remaining pairs 
+are not significant"
 - Keep: **Agilent paired comparison** (illustrates protocol vs hardware effect)
 
 This focused approach avoids redundancy and highlights the key insight: **lab protocols matter as much or more than instrument hardware**.
@@ -451,13 +481,27 @@ metrics_detect <- data.frame(
 
 metrics_detect$bpc_tic_ratio <- metrics_detect$bpc / metrics_detect$tic
 
-# Add TIC quantiles
-tic_quantiles <- lapply(intensity(tic_detect), function(x) {
-  quantile(x, probs = c(0.25, 0.5, 0.75), na.rm = TRUE)
-})
-metrics_detect$tic_q25 <- sapply(tic_quantiles, `[`, 1)
-metrics_detect$tic_q50 <- sapply(tic_quantiles, `[`, 2)
-metrics_detect$tic_q75 <- sapply(tic_quantiles, `[`, 3)
+# Add BPC/TIC ratio by RT quartiles
+rt_quartile_ratios <- mapply(function(bpc_int, tic_int, rt) {
+  rt_range <- range(rt, na.rm = TRUE)
+  rt_breaks <- seq(rt_range[1], rt_range[2], length.out = 5)
+  
+  q1 <- sum(bpc_int[rt >= rt_breaks[1] & rt < rt_breaks[2]], na.rm = TRUE) / 
+        sum(tic_int[rt >= rt_breaks[1] & rt < rt_breaks[2]], na.rm = TRUE)
+  q2 <- sum(bpc_int[rt >= rt_breaks[2] & rt < rt_breaks[3]], na.rm = TRUE) / 
+        sum(tic_int[rt >= rt_breaks[2] & rt < rt_breaks[3]], na.rm = TRUE)
+  q3 <- sum(bpc_int[rt >= rt_breaks[3] & rt < rt_breaks[4]], na.rm = TRUE) / 
+        sum(tic_int[rt >= rt_breaks[3] & rt < rt_breaks[4]], na.rm = TRUE)
+  q4 <- sum(bpc_int[rt >= rt_breaks[4] & rt <= rt_breaks[5]], na.rm = TRUE) / 
+        sum(tic_int[rt >= rt_breaks[4] & rt <= rt_breaks[5]], na.rm = TRUE)
+  
+  c(q1, q2, q3, q4)
+}, intensity(bpc_detect), intensity(tic_detect), rtime(bpc_detect), SIMPLIFY = TRUE)
+
+metrics_detect$ratio_rt_q1 <- rt_quartile_ratios[1, ]
+metrics_detect$ratio_rt_q2 <- rt_quartile_ratios[2, ]
+metrics_detect$ratio_rt_q3 <- rt_quartile_ratios[3, ]
+metrics_detect$ratio_rt_q4 <- rt_quartile_ratios[4, ]
 
 # Add setup information
 metrics_detect <- metrics_detect %>%
@@ -551,7 +595,7 @@ for (lab_name in unique(plot_data_detect$lab)) {
 
 # Histograms on log scale by lab (where applicable)
 plot_data_detect_log <- plot_data_detect %>%
-  filter(metric %in% c("bpc", "tic", "tic_q25", "tic_q50", "tic_q75"))
+  filter(metric %in% c("bpc", "tic"))
 
 for (lab_name in unique(plot_data_detect_log$lab)) {
   p <- ggplot(plot_data_detect_log %>% filter(lab == lab_name), aes(x = log(value + 1), fill = metric)) +
@@ -586,10 +630,14 @@ lm_ratio_detect <- lm(bpc_tic_ratio ~ lab + setup, data = metrics_detect)
 cat("\n=== BPC/TIC Ratio Detected Data ===\n")
 summary(lm_ratio_detect)
 
-# TIC Q50 model
-lm_tic_q50_detect <- lm(log(tic_q50) ~ lab + setup, data = metrics_detect)
-cat("\n=== TIC Q50 Detected Data ===\n")
-summary(lm_tic_q50_detect)
+# BPC/TIC Ratio by RT quartiles
+lm_ratio_rt_q2_detect <- lm(ratio_rt_q2 ~ lab + setup, data = metrics_detect)
+cat("\n=== BPC/TIC Ratio RT Q2 (25-50% RT) Detected Data ===\n")
+summary(lm_ratio_rt_q2_detect)
+
+lm_ratio_rt_q3_detect <- lm(ratio_rt_q3 ~ lab + setup, data = metrics_detect)
+cat("\n=== BPC/TIC Ratio RT Q3 (50-75% RT) Detected Data ===\n")
+summary(lm_ratio_rt_q3_detect)
 ```
 
 ## Paired Analysis by Mixture - Detected Data
@@ -670,13 +718,27 @@ metrics_ann <- data.frame(
 
 metrics_ann$bpc_tic_ratio <- metrics_ann$bpc / metrics_ann$tic
 
-# Add TIC quantiles
-tic_quantiles <- lapply(intensity(tic_ann), function(x) {
-  quantile(x, probs = c(0.25, 0.5, 0.75), na.rm = TRUE)
-})
-metrics_ann$tic_q25 <- sapply(tic_quantiles, `[`, 1)
-metrics_ann$tic_q50 <- sapply(tic_quantiles, `[`, 2)
-metrics_ann$tic_q75 <- sapply(tic_quantiles, `[`, 3)
+# Add BPC/TIC ratio by RT quartiles
+rt_quartile_ratios <- mapply(function(bpc_int, tic_int, rt) {
+  rt_range <- range(rt, na.rm = TRUE)
+  rt_breaks <- seq(rt_range[1], rt_range[2], length.out = 5)
+  
+  q1 <- sum(bpc_int[rt >= rt_breaks[1] & rt < rt_breaks[2]], na.rm = TRUE) / 
+        sum(tic_int[rt >= rt_breaks[1] & rt < rt_breaks[2]], na.rm = TRUE)
+  q2 <- sum(bpc_int[rt >= rt_breaks[2] & rt < rt_breaks[3]], na.rm = TRUE) / 
+        sum(tic_int[rt >= rt_breaks[2] & rt < rt_breaks[3]], na.rm = TRUE)
+  q3 <- sum(bpc_int[rt >= rt_breaks[3] & rt < rt_breaks[4]], na.rm = TRUE) / 
+        sum(tic_int[rt >= rt_breaks[3] & rt < rt_breaks[4]], na.rm = TRUE)
+  q4 <- sum(bpc_int[rt >= rt_breaks[4] & rt <= rt_breaks[5]], na.rm = TRUE) / 
+        sum(tic_int[rt >= rt_breaks[4] & rt <= rt_breaks[5]], na.rm = TRUE)
+  
+  c(q1, q2, q3, q4)
+}, intensity(bpc_ann), intensity(tic_ann), rtime(bpc_ann), SIMPLIFY = TRUE)
+
+metrics_ann$ratio_rt_q1 <- rt_quartile_ratios[1, ]
+metrics_ann$ratio_rt_q2 <- rt_quartile_ratios[2, ]
+metrics_ann$ratio_rt_q3 <- rt_quartile_ratios[3, ]
+metrics_ann$ratio_rt_q4 <- rt_quartile_ratios[4, ]
 
 # Add setup information
 metrics_ann <- metrics_ann %>%
@@ -770,7 +832,7 @@ for (lab_name in unique(plot_data_ann$lab)) {
 
 # Histograms on log scale by lab (where applicable)
 plot_data_ann_log <- plot_data_ann %>%
-  filter(metric %in% c("bpc", "tic", "tic_q25", "tic_q50", "tic_q75"))
+  filter(metric %in% c("bpc", "tic"))
 
 for (lab_name in unique(plot_data_ann_log$lab)) {
   p <- ggplot(plot_data_ann_log %>% filter(lab == lab_name), aes(x = log(value + 1), fill = metric)) +
@@ -805,10 +867,14 @@ lm_ratio_ann <- lm(bpc_tic_ratio ~ lab + setup, data = metrics_ann)
 cat("\n=== BPC/TIC Ratio Annotated Data ===\n")
 summary(lm_ratio_ann)
 
-# TIC Q50 model
-lm_tic_q50_ann <- lm(log(tic_q50) ~ lab + setup, data = metrics_ann)
-cat("\n=== TIC Q50 Annotated Data ===\n")
-summary(lm_tic_q50_ann)
+# BPC/TIC Ratio by RT quartiles
+lm_ratio_rt_q2_ann <- lm(ratio_rt_q2 ~ lab + setup, data = metrics_ann)
+cat("\n=== BPC/TIC Ratio RT Q2 (25-50% RT) Annotated Data ===\n")
+summary(lm_ratio_rt_q2_ann)
+
+lm_ratio_rt_q3_ann <- lm(ratio_rt_q3 ~ lab + setup, data = metrics_ann)
+cat("\n=== BPC/TIC Ratio RT Q3 (50-75% RT) Annotated Data ===\n")
+summary(lm_ratio_rt_q3_ann)
 ```
 
 ## Paired Analysis by Mixture - Annotated Data
