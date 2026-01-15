@@ -1,14 +1,19 @@
 ---
 title: "Peak Feature Calculation"
-format: html
+format: 
+  html:
+    toc: true
 execute:
   dir: project
 ---
 
 ### TODO
 
+- Use all detected peaks form the beginning, in the chromData have info wether they are annotated
+  - only keep peaks overlapping the 4 labs to create a common feature set
 - Introduce statistical test for the differences observed.
 - introduce the setups used by each lab and relate to the observed differences.
+- USE TARDIS low level functions for peak detection, metrics calculation, smoothing ?, and flagging bad eics 
 
 # Introduction
 
@@ -51,6 +56,15 @@ Load the TIC full spectra and annotation data:
 load(file.path(base_path, "object/tic_full_spectra.RData"))
 ```
 
+Below need to first load the chrompeaks table, 
+then find a set of consensus peaks across all labs.
+johannes sugest to use mclosest to create some sort of compatibility matrice at first 
+then filter for the chrompeaks that have no NAs (if we filter out too much then keep 3/4 instead)
+
+extract eics from it and then 
+add annotation info to the chromData as extract columns and mapping using chrompeakID. 
+
+
 
 ```{r load-annotations}
 study_group <- "HE"
@@ -85,6 +99,7 @@ peak_table$polarity <- ifelse(peak_table$polarity == "pos", 1, 0)
 ```
 
 Summary of peak table:
+- plot both the detected (total) and annotated (using a columns of the chromData)
 
 ```{r peak-summary}
 ## number of peak per lab

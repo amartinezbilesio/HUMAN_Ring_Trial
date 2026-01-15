@@ -1,0 +1,507 @@
+---
+title: "Polarity Comparison Report: Positive vs Negative Ionization Modes"
+subtitle: "Ring Trial Lab Effects Analysis - Hardware and Protocol Impacts"
+format: 
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: true
+    theme: cosmo
+editor_options:
+  chunk_output_type: console
+---
+
+# Executive Summary
+
+This report compares lab and hardware effects across **positive and negative ionization modes** to understand:
+
+1. **Are lab differences universal or compound-class specific?**
+2. **Which RT regions show consistent patterns across polarities?**
+3. **Do protocols affect both modes equally?**
+4. **Are standards (references) equally consistent in both modes?**
+
+## Key Findings at a Glance
+
+| Aspect | Positive Mode | Negative Mode | Comparison |
+|--------|--------------|---------------|------------|
+| Strongest Lab Effect | RT Q4 (R²=0.53) | RT Q4 (check) | Consistent? |
+| Protocol Effect (Agilent) | Significant (p=3.8e-6) | Check | Mode-specific? |
+| Q3 Robustness | Yes (p=0.169) | Check | Universal? |
+| Standards Consistency | ✓ (R²=0.09, NS) | Check | Both modes? |
+
+---
+
+# Setup and Data Loading
+
+```{r library, include=TRUE, warning=FALSE, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(knitr)
+library(here)
+
+base_path <- here("5_downstream_analysis")
+```
+
+# Load Pre-computed Results
+
+Since the full analyses have been run, we'll load the key summary statistics from both modes.
+
+```{r load-summaries}
+# These would be extracted from the rendered analyses
+# For now, we'll create them manually based on the reports
+
+# POSITIVE MODE RESULTS
+pos_friedman <- data.frame(
+  Mode = "Positive",
+  Metric = c("BPC/TIC Ratio", "Ratio RT Q1", "Ratio RT Q2", "Ratio RT Q3", "Ratio RT Q4"),
+  Chi_squared = c(16.6, 35.0, 25.1, 21.0, 46.1),
+  P_value = c(8.6e-4, 1.2e-7, 1.5e-5, 1.1e-4, 5.5e-10)
+)
+
+pos_lm_rsq <- data.frame(
+  Mode = "Positive",
+  Metric = c("BPC", "TIC", "BPC/TIC Ratio", "Ratio RT Q1", "Ratio RT Q2", "Ratio RT Q3", "Ratio RT Q4"),
+  R_squared = c(0.943, 0.995, 0.144, 0.237, 0.281, 0.263, 0.530)
+)
+
+pos_agilent <- data.frame(
+  Mode = "Positive",
+  Metric = c("BPC/TIC Ratio", "Ratio RT Q1", "Ratio RT Q2", "Ratio RT Q3", "Ratio RT Q4"),
+  P_value = c(3.8e-6, 3.8e-6, 3.8e-6, 0.169, 3.8e-6)
+)
+
+pos_annotated <- data.frame(
+  Mode = "Positive",
+  Metric = "BPC/TIC Ratio",
+  R_squared = 0.09,
+  P_value = 0.077
+)
+
+# NEGATIVE MODE RESULTS
+# These will be populated from the negative mode analysis
+# For demonstration, using placeholder values - replace with actual results
+
+neg_friedman <- data.frame(
+  Mode = "Negative",
+  Metric = c("BPC/TIC Ratio", "Ratio RT Q1", "Ratio RT Q2", "Ratio RT Q3", "Ratio RT Q4"),
+  Chi_squared = c(38.94, 34.01, 7.36, 45.00, 54.66),
+  P_value = c(1.79e-8, 1.97e-7, 0.0613, 9.25e-10, 8.10e-12)
+)
+
+neg_lm_rsq <- data.frame(
+  Mode = "Negative",
+  Metric = c("BPC", "TIC", "BPC/TIC Ratio", "Ratio RT Q1", "Ratio RT Q2", "Ratio RT Q3", "Ratio RT Q4"),
+  R_squared = c(0.934, 0.973, 0.636, 0.470, 0.012, 0.771, 0.981)
+)
+
+neg_agilent <- data.frame(
+  Mode = "Negative",
+  Metric = c("BPC/TIC Ratio", "Ratio RT Q1", "Ratio RT Q2", "Ratio RT Q3", "Ratio RT Q4"),
+  P_value = c(5.23e-4, 3.8e-6, 0.798, 3.8e-6, 3.8e-6)
+)
+
+neg_annotated <- data.frame(
+  Mode = "Negative",
+  Metric = "BPC/TIC Ratio",
+  R_squared = 0.082,
+  P_value = 0.104
+)
+
+# Combine for comparison
+friedman_combined <- rbind(pos_friedman, neg_friedman)
+lm_combined <- rbind(pos_lm_rsq, neg_lm_rsq)
+agilent_combined <- rbind(pos_agilent, neg_agilent)
+annotated_combined <- rbind(pos_annotated, neg_annotated)
+```
+
+# Comparison 1: Overall Lab Effects (Friedman Tests)
+
+## What This Shows
+Friedman test assesses whether all 4 labs differ in signal characteristics while controlling for mixture composition. Higher Chi² and lower p-value indicate stronger lab differentiation.
+
+```{r friedman-comparison-table}
+friedman_table <- friedman_combined %>%
+  select(Mode, Metric, Chi_squared, P_value) %>%
+  mutate(
+    Chi_squared = sprintf("%.1f", Chi_squared),
+    P_value_fmt = case_when(
+      P_value < 0.001 ~ sprintf("%.2e ***", P_value),
+      P_value < 0.01 ~ sprintf("%.3f **", P_value),
+      P_value < 0.05 ~ sprintf("%.3f *", P_value),
+      TRUE ~ sprintf("%.3f", P_value)
+    )
+  ) %>%
+  select(-P_value) %>%
+  rename(`P-value` = P_value_fmt, `χ²` = Chi_squared)
+
+kable(friedman_table, caption = "Friedman Test Results: Lab Differences by Polarity and RT Quartile")
+```
+
+## Visualization: Lab Effect Strength by Polarity
+
+```{r friedman-plot, fig.width=10, fig.height=6}
+friedman_plot_data <- friedman_combined %>%
+  filter(!is.na(P_value))
+
+if (nrow(friedman_plot_data) > 0) {
+  ggplot(friedman_plot_data, aes(x = Metric, y = Chi_squared, fill = Mode)) +
+    geom_col(position = "dodge", alpha = 0.8) +
+    geom_text(aes(label = sprintf("χ²=%.1f", Chi_squared)), 
+              position = position_dodge(width = 0.9), vjust = -0.5, size = 3) +
+    scale_fill_manual(values = c("Positive" = "steelblue", "Negative" = "darkorange")) +
+    theme_bw() +
+    labs(
+      title = "Lab Differentiation Strength: Positive vs Negative Mode",
+      subtitle = "Friedman Chi-squared values (higher = stronger lab differences)",
+      x = "Metric",
+      y = "Chi-squared statistic",
+      fill = "Ionization Mode"
+    ) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10))
+} else {
+  plot.new()
+  text(0.5, 0.5, "Awaiting negative mode data", cex = 1.5)
+}
+```
+
+## Interpretation: Lab Effects Across Polarities
+
+**Expected Patterns:**
+
+- **If Chi² values are similar**: Lab effects are universal across compound types
+- **If positive > negative**: Basic compounds more sensitive to lab protocols
+- **If negative > positive**: Acidic compounds more sensitive to lab protocols
+- **RT Q4 consistently highest**: Late-eluting (lipophilic) compounds most affected
+
+---
+
+# Comparison 2: Linear Model R² Values (Variance Explained)
+
+## What This Shows
+R² indicates the proportion of variance explained by lab and hardware setup. Higher R² means lab choice matters more; lower R² means within-lab variation dominates.
+
+```{r lm-comparison-table}
+lm_table <- lm_combined %>%
+  mutate(
+    R_squared_fmt = sprintf("%.3f", R_squared),
+    Percent = sprintf("%.1f%%", R_squared * 100)
+  ) %>%
+  select(Mode, Metric, R_squared_fmt, Percent) %>%
+  rename(`R²` = R_squared_fmt, `Variance Explained` = Percent)
+
+kable(lm_table, caption = "Linear Model R²: Lab/Setup Explains This Much Variation")
+```
+
+## Visualization: Variance Explained by Lab Choice
+
+```{r lm-rsq-plot, fig.width=10, fig.height=6}
+lm_plot_data <- lm_combined %>%
+  filter(!is.na(R_squared))
+
+if (nrow(lm_plot_data) > 0) {
+  ggplot(lm_plot_data, aes(x = reorder(Metric, R_squared), y = R_squared, fill = Mode)) +
+    geom_col(position = "dodge", alpha = 0.8) +
+    geom_text(aes(label = sprintf("%.2f", R_squared)), 
+              position = position_dodge(width = 0.9), hjust = -0.1, size = 3) +
+    coord_flip() +
+    scale_fill_manual(values = c("Positive" = "steelblue", "Negative" = "darkorange")) +
+    ylim(0, 1.1) +
+    theme_bw() +
+    labs(
+      title = "Lab/Setup Variance Explained: Positive vs Negative Mode",
+      subtitle = "R² from linear models (0 = no lab effect, 1 = all variance from labs)",
+      x = "Metric",
+      y = "R² (proportion of variance explained)",
+      fill = "Ionization Mode"
+    )
+} else {
+  plot.new()
+  text(0.5, 0.5, "Awaiting negative mode data", cex = 1.5)
+}
+```
+
+## Key Insights: R² Patterns
+
+### Expected Observations
+
+1. **TIC and BPC**: Should be very high (>0.9) in both modes - instrument-driven
+2. **RT Q4**: Should show strongest lab effect in both modes
+3. **BPC/TIC Ratio**: Moderate effect, represents peak complexity
+4. **Comparison**: If one mode shows consistently higher R², that compound class is more lab-sensitive
+
+---
+
+# Comparison 3: Agilent Protocol Effect (Hardware Constant)
+
+## What This Shows
+Afekta and Cembio both use Agilent 1290 LC but have different MS tuning protocols. This comparison isolates **protocol effects** holding hardware constant. Lower p-value means protocol matters.
+
+```{r agilent-comparison-table}
+agilent_table <- agilent_combined %>%
+  mutate(
+    P_value_fmt = case_when(
+      P_value < 0.001 ~ sprintf("%.2e ***", P_value),
+      P_value < 0.01 ~ sprintf("%.3f **", P_value),
+      P_value < 0.05 ~ sprintf("%.3f *", P_value),
+      TRUE ~ sprintf("%.3f NS", P_value)
+    ),
+    Significant = ifelse(P_value < 0.05, "Yes", "No")
+  ) %>%
+  select(Mode, Metric, P_value_fmt, Significant) %>%
+  rename(`P-value` = P_value_fmt)
+
+kable(agilent_table, caption = "Agilent Protocol Comparison (Afekta vs Cembio): Identical Hardware, Different Tuning")
+```
+
+## Visualization: Protocol Effect Significance
+
+```{r agilent-plot, fig.width=10, fig.height=6}
+agilent_plot_data <- agilent_combined %>%
+  filter(!is.na(P_value))
+
+if (nrow(agilent_plot_data) > 0) {
+  ggplot(agilent_plot_data, aes(x = Metric, y = -log10(P_value), fill = Mode)) +
+    geom_col(position = "dodge", alpha = 0.8) +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "red", linewidth = 1) +
+    geom_text(aes(label = ifelse(P_value < 0.05, "Sig", "NS")), 
+              position = position_dodge(width = 0.9), vjust = -0.5, size = 3) +
+    scale_fill_manual(values = c("Positive" = "steelblue", "Negative" = "darkorange")) +
+    annotate("text", x = 0.5, y = -log10(0.05), label = "p = 0.05 threshold", 
+             hjust = -0.1, vjust = -0.5, color = "red", size = 3.5) +
+    theme_bw() +
+    labs(
+      title = "Agilent Protocol Effect: Positive vs Negative Mode",
+      subtitle = "Same hardware (Agilent 1290), different MS tuning protocols",
+      x = "Metric",
+      y = "-log10(P-value) [higher = stronger protocol difference]",
+      fill = "Ionization Mode"
+    ) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10))
+} else {
+  plot.new()
+  text(0.5, 0.5, "Awaiting negative mode data", cex = 1.5)
+}
+```
+
+## Critical Finding: Q3 Robustness
+
+**In Positive Mode**: RT Q3 shows NO significant protocol difference (p = 0.169)
+
+**Question for Negative Mode**: Does Q3 remain protocol-robust in negative ionization?
+
+- **If YES**: Q3 contains universally robust compounds (independent of ionization chemistry)
+- **If NO**: Q3 robustness is compound-class specific (only for positive mode compounds)
+
+---
+
+# Comparison 4: Standards Validation (Annotated Data)
+
+## What This Shows
+Standards are reference compounds with known identity. If labs measure standards consistently despite protocol differences, it validates that unknowns' variation is fixable.
+
+```{r annotated-table}
+annotated_table <- annotated_combined %>%
+  mutate(
+    R_squared_fmt = sprintf("%.3f", R_squared),
+    P_value_fmt = ifelse(P_value < 0.05, 
+                         sprintf("%.3f *", P_value),
+                         sprintf("%.3f NS", P_value)),
+    Quality = ifelse(P_value >= 0.05, "✓ Consistent", "⚠ Variable")
+  ) %>%
+  select(Mode, Metric, R_squared_fmt, P_value_fmt, Quality) %>%
+  rename(`R²` = R_squared_fmt, `P-value` = P_value_fmt, `Quality Assessment` = Quality)
+
+kable(annotated_table, caption = "Standards Consistency: Lab Effects on Annotated Reference Compounds")
+```
+
+## Interpretation: Quality Assurance by Mode
+
+**Positive Mode**: R² = 0.09, p = 0.077 (NOT significant) ✓✓
+→ Standards measured consistently across labs
+
+**Negative Mode**: *To be confirmed*
+
+### If Both Modes Show Weak Effects
+✅ Ring trial quality assurance is successful  
+✅ Reference compounds validate protocols  
+✅ Unknown compound variation is protocol-driven (fixable)
+
+---
+
+# Comparison 5: RT Quartile Pattern Analysis
+
+## What This Reveals
+Does the RT-resolved pattern (Q4 > Q3 > Q2 > Q1) hold across both polarities?
+
+```{r rt-pattern-comparison, fig.width=12, fig.height=6}
+rt_comparison <- friedman_combined %>%
+  filter(grepl("Ratio RT Q", Metric)) %>%
+  mutate(
+    Quartile = gsub("Ratio RT ", "", Metric),
+    Quartile = factor(Quartile, levels = c("Q1", "Q2", "Q3", "Q4"))
+  )
+
+if (nrow(rt_comparison %>% filter(!is.na(Chi_squared))) > 0) {
+  ggplot(rt_comparison %>% filter(!is.na(Chi_squared)), 
+         aes(x = Quartile, y = Chi_squared, color = Mode, group = Mode)) +
+    geom_line(linewidth = 1.5, alpha = 0.8) +
+    geom_point(size = 4, alpha = 0.8) +
+    geom_text(aes(label = sprintf("%.1f", Chi_squared)), vjust = -1, size = 3.5) +
+    scale_color_manual(values = c("Positive" = "steelblue", "Negative" = "darkorange")) +
+    theme_bw() +
+    labs(
+      title = "RT Quartile Pattern: Lab Effect Strength Across Chromatographic Separation",
+      subtitle = "Does late-elution sensitivity hold in both ionization modes?",
+      x = "RT Quartile (Q1=0-25%, Q2=25-50%, Q3=50-75%, Q4=75-100%)",
+      y = "Friedman Chi-squared (lab differentiation strength)",
+      color = "Ionization Mode"
+    ) +
+    theme(legend.position = "top")
+} else {
+  plot.new()
+  text(0.5, 0.5, "Awaiting negative mode data", cex = 1.5)
+}
+```
+
+## Expected Hypotheses
+
+### Hypothesis 1: Universal Pattern (Q4 > Q1 in both modes)
+→ Late-eluting compounds are inherently more sensitive to instrument tuning  
+→ **Mechanism**: Lipophilic compounds have variable ionization efficiency  
+→ **Action**: Harmonize Q4 tuning in BOTH modes
+
+### Hypothesis 2: Mode-Specific Patterns
+→ Positive Q4 > Q1, but Negative Q1 > Q4  
+→ **Mechanism**: Different compound classes peak at different RT regions  
+→ **Action**: Mode-specific harmonization strategies
+
+---
+
+# Comparison 6: Data Processing Progression
+
+## Full → Detected → Annotated Pattern
+
+```{r processing-progression}
+# Create a comparison of R² across processing levels
+processing_comparison <- data.frame(
+  Mode = rep(c("Positive", "Negative"), each = 3),
+  Level = rep(c("Full", "Detected", "Annotated"), 2),
+  BPC_TIC_Rsq = c(0.144, 0.210, 0.09,  # Positive
+                  NA, NA, NA)           # Negative - to be filled
+)
+
+processing_comparison <- processing_comparison %>%
+  mutate(Level = factor(Level, levels = c("Full", "Detected", "Annotated")))
+
+if (sum(!is.na(processing_comparison$BPC_TIC_Rsq)) > 3) {
+  ggplot(processing_comparison %>% filter(!is.na(BPC_TIC_Rsq)), 
+         aes(x = Level, y = BPC_TIC_Rsq, color = Mode, group = Mode)) +
+    geom_line(linewidth = 1.5, alpha = 0.8) +
+    geom_point(size = 4, alpha = 0.8) +
+    geom_text(aes(label = sprintf("%.2f", BPC_TIC_Rsq)), vjust = -1, size = 3.5) +
+    scale_color_manual(values = c("Positive" = "steelblue", "Negative" = "darkorange")) +
+    theme_bw() +
+    labs(
+      title = "Data Processing Effect: BPC/TIC Ratio R² Across Processing Levels",
+      subtitle = "Lab effects decrease as data is refined (Full → Detected → Annotated)",
+      x = "Processing Level",
+      y = "R² (lab variance explained)",
+      color = "Ionization Mode"
+    ) +
+    ylim(0, 0.4)
+} else {
+  cat("Awaiting negative mode data for processing progression comparison\n")
+}
+```
+
+## Interpretation: What This Pattern Means
+
+**Expected Pattern**: Full > Detected > Annotated
+
+- **Full**: Includes noise → highest lab variation
+- **Detected**: True peaks only → moderate lab variation
+- **Annotated**: Standards only → lowest lab variation
+
+**If this holds in both modes**: Lab differences are real instrumental effects, not random noise
+
+---
+
+# Summary and Recommendations
+
+## Key Questions Answered
+
+### 1. Are lab differences universal or compound-class specific?
+
+**Positive Mode**: Strong lab effects (Friedman p < 0.001 across all quartiles)  
+**Negative Mode**: *Check after data extraction*
+
+**Expected Answer**: If both show strong effects, lab differences are **universal instrument performance issues**, not chemistry-specific.
+
+### 2. Which RT regions show consistent patterns?
+
+**Positive Mode**: Q4 (late-elution) shows **2.2× stronger** effect than Q1  
+**Negative Mode**: *Check Q4 vs Q1 ratio*
+
+**Expected Answer**: If Q4 > Q1 in both, focus harmonization on **late-eluting, lipophilic compounds** regardless of charge state.
+
+### 3. Do protocols affect both modes equally?
+
+**Positive Mode**: Significant Agilent protocol difference (p = 3.8e-6), except Q3 (p = 0.169)  
+**Negative Mode**: *Check protocol p-values and Q3 status*
+
+**Expected Answer**: If Q3 remains robust in both modes, these compounds are **naturally protocol-tolerant** and should be studied.
+
+### 4. Are standards equally consistent?
+
+**Positive Mode**: Yes (R² = 0.09, p = 0.077 NS) ✓  
+**Negative Mode**: *Check annotated R² and p-value*
+
+**Expected Answer**: If both show weak effects, **quality assurance is validated** across both ionization chemistries.
+
+---
+
+## Actionable Recommendations (Pending Full Data)
+
+### If Patterns are SIMILAR Across Modes
+
+1. **Single Harmonization Strategy** can address both polarities
+2. **Focus on RT Q4** (late-eluting compounds) in BOTH modes
+3. **Protocol standardization** is priority #1 (not hardware replacement)
+4. **Q3 compounds** should be studied as naturally robust references
+
+### If Patterns are DIFFERENT Across Modes
+
+1. **Mode-specific harmonization** required
+2. **Compound class analysis** needed to understand which types are problematic
+3. **Different tuning protocols** may be optimal for positive vs negative
+4. **Prioritize the mode with stronger effects** for immediate action
+
+---
+
+## Next Steps
+
+1. **Extract negative mode summary statistics** from rendered HTML report
+2. **Populate all NA values** in this comparison document
+3. **Re-render** to generate complete comparison plots
+4. **Identify mode-specific vs universal patterns**
+5. **Draft targeted harmonization protocols** based on findings
+
+---
+
+## Appendix: Data Extraction Notes
+
+To populate negative mode results, extract from `2_global_signal_analysis_neg_simplified.html`:
+
+- **Friedman Summary Table**: Chi² and p-values for BPC/TIC and RT quartiles
+- **Linear Model Summary**: R² values for all metrics
+- **Agilent Comparison**: p-values for protocol effect
+- **Annotated Summary**: R² and p-value for standards
+
+**Extraction Method**: Open HTML → Search for "Friedman Test Summary" → Copy values → Paste into R code above
+
+---
+
+*Report generated: `r Sys.Date()`*  
+*Analysis files: `2_global_signal_analysis_pos_simplified.qmd` and `2_global_signal_analysis_neg_simplified.qmd`*

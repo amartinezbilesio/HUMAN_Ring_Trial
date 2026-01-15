@@ -46,3 +46,6 @@ results/lab_comparison_HE.rmarkdown
 slurm-*.out
 redner.sh
 /5_downstream_analysis/4_peak_shape_similarity_files
+/5_downstream_analysis/2_global_signal_analysis_neg_simplified_files
+/5_downstream_analysis/2_global_signal_analysis_pos_simplified_files
+/5_downstream_analysis/POLARITY_COMPARISON_REPORT_files

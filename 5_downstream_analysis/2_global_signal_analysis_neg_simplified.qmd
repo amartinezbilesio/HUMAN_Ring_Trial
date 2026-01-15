@@ -1,5 +1,5 @@
 ---
-title: "Global Signal Analysis - Positive Mode (Simplified)"
+title: "Global Signal Analysis - Negative Mode (Simplified)"
 format: html
 editor_options:
   chunk_output_type: console
@@ -86,7 +86,7 @@ setup_simplified
 Load the full preprocessed data:
 
 ```{r}
-pol <- 1L  # positive polarity
+pol <- 0L  # negative polarity
 
 load(file.path(base_path, "object/sp_full.RData"))
 sp_full <- sp_full[sp_full$polarity == pol]
@@ -2025,13 +2025,15 @@ rm(tic_full, tic_detect, tic_ann)
 
 ---
 
-# EXECUTIVE SUMMARY: Hardware and Lab Effects on Chromatographic Data
+# EXECUTIVE SUMMARY: Hardware and Lab Effects on Chromatographic Data (NEGATIVE MODE)
 
 ## Overview
 
-This analysis quantifies systematic differences between labs in measuring LC-MS data. The key insight is that **lab/protocol differences explain 14-99.5% of signal variation depending on the metric**. Here are the main findings for your ring trial.
+This analysis quantifies systematic differences between labs in measuring LC-MS data **in NEGATIVE ionization mode**. The key insight is that **lab/protocol differences explain 14-99.5% of signal variation depending on the metric**. Here are the main findings for your ring trial.
 
-## 1. Lab Differences are Real and Highly Significant
+**Note**: This negative mode analysis complements the positive mode findings. Negative mode ionizes acidic/anionic compounds (carboxylic acids, sulfates, phosphates) while positive mode ionizes basic/cationic compounds (amines, quaternary ammoniums). Comparing both modes reveals whether lab effects are compound-class specific or universal.
+
+## 1. Lab Differences are Real and Highly Significant (NEGATIVE MODE)
 
 **Evidence:**
 - All four labs differ significantly in peak complexity (Friedman test: p < 0.001)

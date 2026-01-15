@@ -188,6 +188,7 @@ cat(sprintf("Extracted %d MS2 spectra\n", length(test)))
 ```{r prepare-library}
 # Select columns
 base_cols <- c(
+  "chrom_peak_id",
   "mz",
   "rt",
   "mzmin",
@@ -210,6 +211,7 @@ fin$ms2_true_count <- as.logical(fin$ms2_true_count)
 
 # Standardize column names
 standard_cols <- c(
+  "chrom_peak_id",
   "mz",
   "rt",
   "mzmin",
