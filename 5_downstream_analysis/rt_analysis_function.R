@@ -65,7 +65,7 @@ detect_signal <- function(
     ))
 
     cpks <- chromPeaks(a)[
-      res$X,
+      res$chrom_peak_id,
       c("rtmin", "rtmax", "mzmin", "mzmax", "sample")
     ]
   } else {
