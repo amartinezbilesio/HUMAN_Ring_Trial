@@ -261,10 +261,10 @@ if (!file.exists(file.path(base_path, "object/tic_full_spectra.RData"))) {
 
 ```{r peak-table-detected}
 #' where can i extract the chrompeaks info
-cpd_afekta <- read.csv(file.path(base_path, "detected_peaks_afekta_HE.csv"))
-cpd_hmgu <- read.csv(file.path(base_path,"detected_peaks_hmgu_HE.csv"))
-cpd_icl <- read.csv(file.path(base_path,  "detected_peaks_icl_HE.csv"))
-cpd_cembio <- read.csv(file.path(base_path, "detected_peaks_cembio_HE.csv"))
+cpd_afekta <- read.csv(file.path(base_path, "object", "detected_peaks_afekta_HE.csv"))
+cpd_hmgu <- read.csv(file.path(base_path,"object", "detected_peaks_hmgu_HE.csv"))
+cpd_icl <- read.csv(file.path(base_path,  "object", "detected_peaks_icl_HE.csv"))
+cpd_cembio <- read.csv(file.path(base_path, "object", "detected_peaks_cembio_HE.csv"))
 cpd_afekta$lab <- "afekta"
 cpd_hmgu$lab <- "hmgu"
 cpd_icl$lab <- "icl"
