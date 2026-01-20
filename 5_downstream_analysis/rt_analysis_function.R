@@ -76,6 +76,9 @@ detect_signal <- function(
     cpks$polarity <- sampleData(a)$polarity[
       match(cpks$sample, seq_len(nrow(sampleData(a))))
     ]
+    cpks$mixture <- sampleData(a)$mixture[
+      match(cpks$sample, seq_len(nrow(sampleData(a))))
+    ]
     cpks$chrom_peak_id <- row.names(cpks)
 
     # FIX 2: Use here() to save the output CSV correctly
