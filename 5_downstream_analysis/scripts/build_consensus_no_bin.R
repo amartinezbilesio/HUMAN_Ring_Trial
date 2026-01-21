@@ -21,24 +21,68 @@ suppressPackageStartupMessages({
   library(igraph)
 })
 
-args <- commandArgs(trailingOnly = FALSE)
-if (any(grepl("--args", args))) args <- tail(args, -which(grepl("--args", args)))
-parse_arg <- function(name, default=NULL) {
-  pat <- paste0("--", name, "=")
-  a <- args[grepl(pat, args)]
-  if (length(a) == 0) return(default)
-  sub(pat, "", a[1])
+args <- commandArgs(trailingOnly = TRUE)
+message("Command-line args:", if (length(args)) paste(args, collapse = " ") else " <none>")
+
+parse_arg <- function(name, default = NULL) {
+  # Accept both "--name=value" and "--name value" styles
+  eq_pat <- paste0("--", name, "=")
+  space_pat <- paste0("--", name)
+
+  # --name=value
+  m <- args[startsWith(args, eq_pat)]
+  if (length(m) > 0) return(sub(eq_pat, "", m[1]))
+
+  # --name value
+  i <- which(args == space_pat)
+  if (length(i) > 0 && length(args) >= i[1] + 1) return(args[i[1] + 1])
+
+  default
 }
 
-input_dir   <- parse_arg("input_dir", file.path("..", "object"))
-out_prefix  <- parse_arg("out_prefix", file.path("..", "object", "consensus_all"))
+# Defaults assume script is run from repository root
+input_dir  <- parse_arg("input_dir", file.path("5_downstream_analysis", "object"))
+out_prefix <- parse_arg("out_prefix", file.path("5_downstream_analysis", "object", "consensus_all"))
 cores       <- as.integer(parse_arg("cores", Sys.getenv("SLURM_CPUS_ON_NODE", unset = 8)))
 chunk_size  <- as.integer(parse_arg("chunk_size", 5000))
 ppm_tol     <- as.numeric(parse_arg("ppm_tol", 10))
 rt_tol      <- as.numeric(parse_arg("rt_tol", 10))
 
-message("Input dir: ", input_dir)
+input_dir <- normalizePath(input_dir, mustWork = FALSE)
+out_prefix <- normalizePath(out_prefix, mustWork = FALSE)
+message("Resolved input dir: ", input_dir)
 message("Out prefix: ", out_prefix)
+
+# Verify expected input files exist; if not, try to discover them recursively
+expected_files <- paste0("detected_peaks_", labs, "_HE.csv")
+missing <- expected_files[!file.exists(file.path(input_dir, expected_files))]
+if (length(missing) > 0) {
+  message("Some expected files are missing in the provided input_dir: ", input_dir)
+  message("Missing: ", paste(missing, collapse = ", "))
+
+  # Search recursively under current working directory for candidate directories
+  candidates <- list.files(path = ".", pattern = "detected_peaks_.*_HE\\.csv$", recursive = TRUE, full.names = TRUE)
+  if (length(candidates) > 0) {
+    cand_dirs <- unique(dirname(candidates))
+    found <- NULL
+    for (d in cand_dirs) {
+      if (all(file.exists(file.path(d, expected_files)))) { found <- d; break }
+    }
+    if (!is.null(found)) {
+      input_dir <- normalizePath(found)
+      message("Auto-detected input_dir: ", input_dir)
+      missing <- expected_files[!file.exists(file.path(input_dir, expected_files))]
+    } else {
+      message("Did not find a single directory containing all expected files. Found candidates in: ", paste(cand_dirs, collapse = ", "))
+    }
+  } else {
+    message("No candidate detected_peaks files found under current directory (recursive search).")
+  }
+
+  if (length(missing) > 0) {
+    stop("Missing required detected peaks CSV files. Either place them in '", input_dir, "' or provide --input_dir with the correct path. Missing: ", paste(missing, collapse = ", "))
+  }
+}
 message("Cores: ", cores, "  Chunk size: ", chunk_size)
 
 labs <- c("afekta", "hmgu", "icl", "cembio")
