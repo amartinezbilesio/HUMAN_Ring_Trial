@@ -16,9 +16,10 @@ export PATH=/shared/bioinf/R/bin:$PATH
 
 # Candidate paths (adjust if your site uses a different tree)
 R_CANDIDATES=(
-  "/shared/bioinf/R/bin/R-4.5-BioC3.22/bin/Rscript"
+  "/shared/bioinf/R/bin/Rscript-4.5-BioC3.22"
+  "/shared/bioinf/R/bin/R-4.5-BioC3.22"
   "/shared/bioinf/R/bin/Rscript"
-  "/shared/bioinf/R/bin/R-4.5-BioC3.22/Rscript"
+  "/usr/bin/Rscript"
 )
 
 RSCRIPT=""
