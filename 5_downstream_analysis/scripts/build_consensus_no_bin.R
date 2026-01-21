@@ -54,6 +54,7 @@ message("Resolved input dir: ", input_dir)
 message("Out prefix: ", out_prefix)
 
 # Verify expected input files exist; if not, try to discover them recursively
+labs <- c("afekta", "hmgu", "icl", "cembio")
 expected_files <- paste0("detected_peaks_", labs, "_HE.csv")
 missing <- expected_files[!file.exists(file.path(input_dir, expected_files))]
 if (length(missing) > 0) {
