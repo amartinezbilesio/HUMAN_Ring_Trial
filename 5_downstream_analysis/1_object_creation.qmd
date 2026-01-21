@@ -294,15 +294,17 @@ peak_table_detect$polarity <- ifelse(peak_table_detect$polarity == "pos", 1, 0)
 ```
 
 ```{r load-eics-detected}
+#| eval: false
 if (!file.exists(file.path(base_path, "object/eics_detected.RData"))) {
   eics_detected <- chromExtract(
     tic_full,
     peak.table = peak_table_detect,
     by = c("polarity", "lab", "mixture")
   )
-  eics_detected <- setBackend(eics_detected, ChromBackendMemory())
-  eics_detected <- imputePeaksData(eics_detected, method = "linear")
-  eics_detected <- applyProcessing(eics_detected)
+  ## maybe we don't impute for now. it's so much data honestly. We cna filter out to get a smaller set before.  
+#  eics_detected <- setBackend(eics_detected, ChromBackendMemory())
+  #eics_detected <- imputePeaksData(eics_detected, method = "linear")
+ # eics_detected <- applyProcessing(eics_detected)
   save(eics_detected, file = file.path(base_path, "object/eics_detected.RData"))
 } else {
   load(file.path(base_path, "object/eics_detected.RData"))
@@ -336,8 +338,8 @@ if (!file.exists(file.path(base_path, "object/eics_ann.RData"))) {
     by = c("polarity", "lab", "mixture")
   )
   eics <- setBackend(eics, ChromBackendMemory())
-  eics <- imputePeaksData(eics, method = "linear")
-  eics <- applyProcessing(eics)
+#   eics <- imputePeaksData(eics, method = "linear")
+#   eics <- applyProcessing(eics)
   save(eics, file = file.path(base_path, "object/eics_ann.RData"))
 } else {
   load(file.path(base_path, "object/eics_ann.RData"))
