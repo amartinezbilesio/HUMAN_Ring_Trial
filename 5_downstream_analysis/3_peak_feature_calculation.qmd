@@ -13,7 +13,6 @@ execute:
   - only keep peaks overlapping the 4 labs to create a common feature set
 - Introduce statistical test for the differences observed.
 - introduce the setups used by each lab and relate to the observed differences.
-- USE TARDIS low level functions for peak detection, metrics calculation, smoothing ?, and flagging bad eics 
 
 # Introduction
 
