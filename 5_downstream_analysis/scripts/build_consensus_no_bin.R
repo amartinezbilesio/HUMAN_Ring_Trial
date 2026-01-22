@@ -125,8 +125,6 @@ if (length(missing) > 0) {
 }
 message("Cores: ", cores, "  Chunk size: ", chunk_size)
 
-labs <- c("afekta", "hmgu", "icl", "cembio")
-files <- file.path(input_dir, paste0("detected_peaks_", labs, "_HE.csv"))
 names(files) <- labs
 
 for (f in files) {
@@ -135,6 +133,12 @@ for (f in files) {
 
 
 # --- NEW: Per-sample consensus matching ---
+# Assumes all input tables have a 'sample' column (numeric or character)
+
+# Read all input tables into dt_list
+dt_list <- lapply(files, function(f) data.table::fread(f))
+names(dt_list) <- labs
+
 # Assumes all input tables have a 'sample' column (numeric or character)
 all_samples <- Reduce(union, lapply(dt_list, function(dt) unique(dt$sample)))
 all_samples <- sort(all_samples)
