@@ -69,8 +69,11 @@ out_prefix <- normalizePath(out_prefix, mustWork = FALSE)
 message("Resolved input dir: ", input_dir)
 message("Out prefix: ", out_prefix)
 
-# Verify expected input files exist; if not, try to discover them recursively
 labs <- c("afekta", "hmgu", "icl", "cembio")
+files <- file.path(input_dir, paste0("detected_peaks_", labs, "_HE.csv"))
+names(files) <- labs
+
+# Verify expected input files exist; if not, try to discover them recursively
 expected_files <- paste0("detected_peaks_", labs, "_HE.csv")
 missing <- expected_files[!file.exists(file.path(input_dir, expected_files))]
 if (length(missing) > 0) {
@@ -125,7 +128,6 @@ if (length(missing) > 0) {
 }
 message("Cores: ", cores, "  Chunk size: ", chunk_size)
 
-names(files) <- labs
 
 for (f in files) {
   if (!file.exists(f)) stop("Missing input file: ", f)
