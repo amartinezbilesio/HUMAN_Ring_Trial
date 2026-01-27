@@ -42,15 +42,6 @@ source(file.path(base_path, "rt_analysis_function.R"))
 
 We are not computing the eic at the moment because that is justy TOO many peaks
 
-```{r load-eics-detected}
-#| eval: false
-
-load(file.path(base_path, "object/eics_detected.RData"))
-# Impute and apply processing
-eics <- imputePeaksData(eics, method = "linear")
-eics <- applyProcessing(eics)
-```
-
 Before anything let's load all the detected peaks table
 
 ```{r}
@@ -84,41 +75,40 @@ barplot(
 
 # Create Consensus Peak Table Across Labs
 
+Below we will do a test analysis on mixture 1_1 (e.g. sample 1).
+
 ```{r build-consensus-peaks}
 # the table will be generated on the cluster. and loaded below
+# the parameter used for mclosest are: ppm tol = 10 and rt tol = 10
+# 
 
 # in the meantime i need an example of the table structure to build the rest
 # of the code.
 
 # Example structure of the consensus_matches table, with nas too
-consensus_matches <- data.frame(
-  idx_afekta = c(12, 34, 56, 78, 91, 101, 202, 303, 404, 501, 502, 503, 504, NA, NA, 601, 602, 603, 604, 605),
-  idx_hmgu   = c(23, 35, 57, 79, 92, 110, 210, 304, 405, 511, NA, NA, NA, 89, 90, 611, 612, NA, NA, NA),
-  idx_icl    = c(34, 36, 58, 80, 93, 120, 220, 305, 406, 521, 522, NA, NA, 99, NA, 621, NA, 623, 624, NA),
-  idx_cembio = c(56, 37, 59, 81, 94, 130, 230, 306, 407, 531, 532, 533, NA, 109, 110, 641, 642, 643, NA, NA)
-)
-# Correct n_labs_matched: count non-NA indices per row
-consensus_matches$n_labs_matched <- rowSums(!is.na(consensus_matches[, c("idx_afekta", "idx_hmgu", "idx_icl", "idx_cembio")]))
+# consensus_matches <- data.frame(
+#   idx_afekta = c(12, 34, 56, 78, 91, 101, 202, 303, 404, 501, 502, 503, 504, NA, NA, 601, 602, 603, 604, 605),
+#   idx_hmgu   = c(23, 35, 57, 79, 92, 110, 210, 304, 405, 511, NA, NA, NA, 89, 90, 611, 612, NA, NA, NA),
+#   idx_icl    = c(34, 36, 58, 80, 93, 120, 220, 305, 406, 521, 522, NA, NA, 99, NA, 621, NA, 623, 624, NA),
+#   idx_cembio = c(56, 37, 59, 81, 94, 130, 230, 306, 407, 531, 532, 533, NA, 109, 110, 641, 642, 643, NA, NA)
+# )
 
+consensus_matches_1 <- read.csv(file.path(base_path, "object/consensus_tables/consensus_all_sample1.csv"))
 
-# Vectorized mapping of chrom_peak_id columns for all labs
-consensus_matches <- consensus_matches |>
-  mutate(
-    afekta = ifelse(!is.na(idx_afekta), pt_afekta$chrom_peak_id[idx_afekta], NA_character_),
-    hmgu   = ifelse(!is.na(idx_hmgu),   pt_hmgu$chrom_peak_id[idx_hmgu],     NA_character_),
-    icl    = ifelse(!is.na(idx_icl),    pt_icl$chrom_peak_id[idx_icl],       NA_character_),
-    cembio = ifelse(!is.na(idx_cembio), pt_cembio$chrom_peak_id[idx_cembio], NA_character_)
-  )
+head(consensus_matches_1)
 
+nrow(consensus_matches_1) 
+```
 
+The chrompeak_id are already there, as well as the n_lab_matched
 
-
+```{r}
 # Analyze lab overlap before filtering
 
 ## Summary statistics
 
 # Add detection flags to consensus_matches
-consensus_matches <- consensus_matches |>
+consensus_matches_1 <- consensus_matches_1 |>
   mutate(
     afekta_detected = !is.na(idx_afekta),
     hmgu_detected = !is.na(idx_hmgu),
@@ -128,12 +118,16 @@ consensus_matches <- consensus_matches |>
 
 cat(
   "Peaks matched in consensus (before filtering):",
-  nrow(consensus_matches),
+  nrow(consensus_matches_1),
   "\n\n"
 )
 cat("Peak counts by number of labs detected:\n")
-print(table(consensus_matches$n_labs_matched))
+print(table(consensus_matches_1$n_labs_matched))
 ```
+
+mm very little overlap for all 4 labs. CCould consider increasing the mz and rt ranges.
+should I increase the ppm tol ? Discuss this
+
 
 ## Upset Plot - Lab Overlap
 
@@ -141,7 +135,7 @@ print(table(consensus_matches$n_labs_matched))
 library(UpSetR)
 
 # Prepare binary matrix for upset plot
-upset_data <- consensus_matches |>
+upset_data <- consensus_matches_1 |>
   select(afekta_detected, hmgu_detected, icl_detected, cembio_detected) |>
   mutate(
     afekta = as.integer(afekta_detected),
@@ -151,14 +145,20 @@ upset_data <- consensus_matches |>
   ) |>
   select(afekta, hmgu, icl, cembio)
 
-upset(as.data.frame(upset_data),
+# Convert to data frame with rownames for upset function
+upset_data_df <- as.data.frame(upset_data)
+rownames(upset_data_df) <- paste0("peak_", seq_len(nrow(upset_data_df)))
+
+# Only plot intersections with at least 1 peak (exclude empty combinations)
+upset(upset_data_df,
       sets = c("afekta", "hmgu", "icl", "cembio"),
       order.by = "freq",
+      empty.intersections = "on",
       main.bar.color = "steelblue",
       sets.bar.color = "darkred",
-      text.scale = c(2, 2, 2, 2, 2, 2),
-      point.size = 5,
-      line.size = 1)
+      text.scale = c(1.5, 1.5, 1.5, 1, 1.5, 1),
+      point.size = 4,
+      line.size = 1.2)
 ```
 
 ## Pairwise Lab Comparisons
@@ -177,9 +177,9 @@ for (i in seq_along(labs)) {
       col1 <- paste0(lab1, "_detected")
       col2 <- paste0(lab2, "_detected")
 
-      both <- sum(consensus_matches[[col1]] & consensus_matches[[col2]])
-      only_lab1 <- sum(consensus_matches[[col1]] & !consensus_matches[[col2]])
-      only_lab2 <- sum(!consensus_matches[[col1]] & consensus_matches[[col2]])
+      both <- sum(consensus_matches_1[[col1]] & consensus_matches_1[[col2]])
+      only_lab1 <- sum(consensus_matches_1[[col1]] & !consensus_matches_1[[col2]])
+      only_lab2 <- sum(!consensus_matches_1[[col1]] & consensus_matches_1[[col2]])
 
       pairwise_summary <- rbind(pairwise_summary, data.frame(
         lab1 = lab1,
@@ -188,8 +188,8 @@ for (i in seq_along(labs)) {
         only_lab1 = only_lab1,
         only_lab2 = only_lab2,
         overlap_percent = round(100 * both / max(
-          sum(consensus_matches[[col1]]),
-          sum(consensus_matches[[col2]])
+          sum(consensus_matches_1[[col1]]),
+          sum(consensus_matches_1[[col2]])
         ), 1)
       ))
     }
@@ -203,7 +203,7 @@ knitr::kable(pairwise_summary, caption = "Pairwise Lab Overlap")
 
 ```{r detection-patterns}
 # Count peaks by detection pattern
-detection_patterns <- consensus_matches |>
+detection_patterns <- consensus_matches_1 |>
   group_by(afekta_detected, hmgu_detected, icl_detected, cembio_detected) |>
   summarize(n_peaks = n(), .groups = "drop") |>
   arrange(desc(n_peaks)) |>
@@ -227,13 +227,13 @@ Below decide on the threshold to study a peak. Would start with 4 at the beginni
 ```{r}
 thres <- 4
 
-consensus_matches_filtered <- consensus_matches |>
+consensus_matches_1_filtered <- consensus_matches_1 |>
   filter(n_labs_matched == 4)
 
-cat("Consensus peaks retained:", nrow(consensus_matches_filtered), "\n")
+cat("Consensus peaks retained:", nrow(consensus_matches_1_filtered), "\n")
 cat(
   "Percentage of detected peaks:",
-  round(100 * nrow(consensus_matches_filtered) / nrow(consensus_matches), 1),
+  round(100 * nrow(consensus_matches_1_filtered) / nrow(consensus_matches_1), 1),
   "%\n"
 )
 ```
@@ -247,8 +247,8 @@ Save the consensus table for downstream analysis:
 write.csv(consensus_peaks,
           file = file.path(base_path, "object/consensus_peaks.csv"),
           row.names = FALSE)
-write.csv(consensus_matches_filtered,
-          file = file.path(base_path, "object/consensus_matches_filtered.csv"),
+write.csv(consensus_matches_1_filtered,
+          file = file.path(base_path, "object/consensus_matches_1_filtered.csv"),
           row.names = FALSE)
 ```
 
@@ -260,10 +260,10 @@ write.csv(consensus_matches_filtered,
 cembio_afekta_summary <- data.frame(
   category = c("Both detected", "Only afekta", "Only cembio", "Neither"),
   count = c(
-    sum(consensus_matches$afekta_detected & consensus_matches$cembio_detected),
-    sum(consensus_matches$afekta_detected & !consensus_matches$cembio_detected),
-    sum(!consensus_matches$afekta_detected & consensus_matches$cembio_detected),
-    sum(!consensus_matches$afekta_detected & !consensus_matches$cembio_detected)
+    sum(consensus_matches_1$afekta_detected & consensus_matches_1$cembio_detected),
+    sum(consensus_matches_1$afekta_detected & !consensus_matches_1$cembio_detected),
+    sum(!consensus_matches_1$afekta_detected & consensus_matches_1$cembio_detected),
+    sum(!consensus_matches_1$afekta_detected & !consensus_matches_1$cembio_detected)
   )
 )
 
@@ -290,10 +290,10 @@ for (combo in 0:15) {
   cembio <- as.logical(bitwAnd(combo, 8))
 
   n <- sum(
-    consensus_matches$afekta_detected == afekta &
-    consensus_matches$hmgu_detected == hmgu &
-    consensus_matches$icl_detected == icl &
-    consensus_matches$cembio_detected == cembio
+    consensus_matches_1$afekta_detected == afekta &
+    consensus_matches_1$hmgu_detected == hmgu &
+    consensus_matches_1$icl_detected == icl &
+    consensus_matches_1$cembio_detected == cembio
   )
 
   if (n > 0) {
@@ -307,7 +307,7 @@ for (combo in 0:15) {
     all_labs_summary <- rbind(all_labs_summary, data.frame(
       detection_pattern = pattern,
       n_peaks = n,
-      percent = round(100 * n / nrow(consensus_matches), 1)
+      percent = round(100 * n / nrow(consensus_matches_1), 1)
     ))
   }
 }
@@ -325,13 +325,13 @@ knitr::kable(all_labs_summary,
 
 ```{r prepare-subsets}
 # Subset 1: Peaks present in BOTH cembio AND afekta
-cembio_afekta_both <- consensus_matches |>
+cembio_afekta_both <- consensus_matches_1 |>
   filter(afekta_detected & cembio_detected) ## keep the id for cembio and afekta
 
 cat("Peaks in both cembio & afekta:", nrow(cembio_afekta_both), "\n")
 
 # Subset 2: Peaks present in ALL 4 labs
-all_four_labs <- consensus_matches |>
+all_four_labs <- consensus_matches_1 |>
   filter(afekta_detected & hmgu_detected & icl_detected & cembio_detected)
 
 cat("Peaks in all 4 labs:", nrow(all_four_labs), "\n")

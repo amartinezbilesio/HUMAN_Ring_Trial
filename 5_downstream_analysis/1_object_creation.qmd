@@ -35,7 +35,7 @@ bpparam <- MulticoreParam(workers = parallel::detectCores() - 1)
 Note: 
 
 - the data has been filtered to include only the m/z range of 100 - 1100 Da
-  So that the raw signal is more comparable.
+  So that the raw signal is more comparable. !!!
 
 ```{r load-full-data}
 if (!file.exists(file.path(base_path, "object/sp_full.RData"))) {
@@ -259,7 +259,10 @@ if (!file.exists(file.path(base_path, "object/tic_full_spectra.RData"))) {
 
 ## Extract EICs for Detected Peaks
 
-```{r peak-table-detected}
+This is currently being done in a separate file. in the end i will probably
+remove the code below. It is a bit more complicated than planed.
+
+```{r peak-table-detected, eval=FALSE}
 #' where can i extract the chrompeaks info
 cpd_afekta <- read.csv(file.path(
   base_path,
@@ -293,7 +296,7 @@ peak_table_detect$rtMax <- peak_table_detect$rtMax + 3
 peak_table_detect$polarity <- ifelse(peak_table_detect$polarity == "pos", 1, 0)
 ```
 
-```{r load-eics-detected}
+```{r load-eics-detected, eval=FALSE}
 #| eval: false
 if (!file.exists(file.path(base_path, "object/eics_detected.RData"))) {
   eics_detected <- chromExtract(

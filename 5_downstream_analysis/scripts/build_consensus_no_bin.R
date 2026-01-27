@@ -63,6 +63,7 @@ cores <- as.integer(parse_arg(
 chunk_size <- as.integer(parse_arg("chunk_size", 5000))
 ppm_tol <- as.numeric(parse_arg("ppm_tol", 10))
 rt_tol <- as.numeric(parse_arg("rt_tol", 10))
+test_sample <- parse_arg("test_sample", NULL)
 
 input_dir <- normalizePath(input_dir, mustWork = FALSE)
 out_prefix <- normalizePath(out_prefix, mustWork = FALSE)
@@ -144,7 +145,20 @@ names(dt_list) <- labs
 # Assumes all input tables have a 'sample' column (numeric or character)
 all_samples <- Reduce(union, lapply(dt_list, function(dt) unique(dt$sample)))
 all_samples <- sort(all_samples)
-message("Found ", length(all_samples), " unique samples.")
+
+# Filter to test_sample if specified
+if (!is.null(test_sample)) {
+  test_sample <- as.integer(test_sample)
+  if (test_sample %in% all_samples) {
+    all_samples <- test_sample
+    message("TEST MODE: Processing only sample ", test_sample)
+  } else {
+    stop("Test sample ", test_sample, " not found in data. Available: ", 
+         paste(all_samples, collapse = ", "))
+  }
+} else {
+  message("Found ", length(all_samples), " unique samples.")
+}
 
 # BiocParallel parameter
 BPPARAM <- MulticoreParam(workers = cores)
@@ -269,23 +283,25 @@ for (sample_val in all_samples) {
   consensus_rows <- lapply(seq_len(nrow(consensus_list)), function(i) {
     row <- consensus_list[i]
     members <- row$idxs[[1]]
+    
+    # Extract indices for each lab (use first occurrence if multiple)
     idx_afekta <- if ("afekta" %in% members$lab) {
-      members[idx == min(idx) & lab == "afekta"]$idx[1]
+      members[lab == "afekta"]$idx[1]
     } else {
       NA_integer_
     }
     idx_hmgu <- if ("hmgu" %in% members$lab) {
-      members[idx == min(idx) & lab == "hmgu"]$idx[1]
+      members[lab == "hmgu"]$idx[1]
     } else {
       NA_integer_
     }
     idx_icl <- if ("icl" %in% members$lab) {
-      members[idx == min(idx) & lab == "icl"]$idx[1]
+      members[lab == "icl"]$idx[1]
     } else {
       NA_integer_
     }
     idx_cembio <- if ("cembio" %in% members$lab) {
-      members[idx == min(idx) & lab == "cembio"]$idx[1]
+      members[lab == "cembio"]$idx[1]
     } else {
       NA_integer_
     }

@@ -50,7 +50,7 @@ base_path <- here("5_downstream_analysis")
 Load and prepare the setup metadata:
 
 ```{r load-setup}
-setup <- read.csv(file.path(base_path, "lab_setup_phase1.csv"), skip = 1)
+setup <- read.csv(file.path(base_path, "lab_setup_phase1.csv"), fileEncoding = "latin1")
 
 # Create a combined setup variable from LC and MS instruments
 setup_simplified <- setup %>%
@@ -87,10 +87,6 @@ Load the full preprocessed data:
 
 ```{r}
 pol <- 0L  # negative polarity
-
-load(file.path(base_path, "object/sp_full.RData"))
-sp_full <- sp_full[sp_full$polarity == pol]
-
 load(file.path(base_path, "object/bpc_full.RData"))
 bpc_full <- bpc_full[bpc_full$polarity == pol]
 
@@ -751,9 +747,6 @@ ggplot(agilent_summary_full, aes(x = reorder(Metric, -P_value), y = -log10(P_val
 Load the detected signal data:
 
 ```{r load-detect}
-load(file.path(base_path, "object/sp_full_detect.RData"))
-sp_full_detect <- sp_full_detect[sp_full_detect$polarity == pol]
-
 load(file.path(base_path, "object/bpc_detect.RData"))
 bpc_detect <- bpc_detect[bpc_detect$polarity == pol]
 
@@ -1203,7 +1196,7 @@ ggplot(agilent_summary_detect, aes(x = reorder(Metric, -P_value), y = -log10(P_v
 ```
 
 ```{r clean-detect}
-rm(tic_detect, bpc_detect, sp_full_detect)
+rm(tic_detect, bpc_detect)
 ```
 
 ---
@@ -1214,10 +1207,7 @@ rm(tic_detect, bpc_detect, sp_full_detect)
 
 Load the annotated signal data:
 
-```{r load-ann}
-load(file.path(base_path, "object/sp_full_ann.RData"))
-sp_full_ann <- sp_full_ann[sp_full_ann$polarity == pol]
-
+```{r load-ann, eval=FALSE}
 load(file.path(base_path, "object/bpc_ann.RData"))
 bpc_ann <- bpc_ann[bpc_ann$polarity == pol]
 
@@ -1227,7 +1217,7 @@ tic_ann <- tic_ann[tic_ann$polarity == pol]
 
 ## Compute Metrics
 
-```{r compute-ann-metrics}
+```{r compute-ann-metrics, eval=FALSE}
 metrics_ann <- data.frame(
   lab = bpc_ann$lab,
   mixture = bpc_ann$mixture,
@@ -1268,7 +1258,7 @@ head(metrics_ann)
 
 ## Distribution Assessment
 
-```{r dist-assessment-ann}
+```{r dist-assessment-ann, eval=FALSE}
 distribution_summary_ann <- data.frame(
   metric = character(),
   n = numeric(),
@@ -1311,7 +1301,7 @@ distribution_summary_ann
 
 Violin plots and histograms for all metrics:
 
-```{r plots-ann, fig.width=14, fig.height=12}
+```{r plots-ann, fig.width=14, fig.height=12, eval=FALSE}
 # Prepare data for plotting
 plot_data_ann <- metrics_ann %>%
   pivot_longer(
@@ -1370,7 +1360,7 @@ for (lab_name in unique(plot_data_ann_log$lab)) {
 
 ## Linear Models - Annotated Data
 
-```{r lm-ann}
+```{r lm-ann, eval=FALSE}
 # BPC model
 lm_bpc_ann <- lm(log(bpc) ~ lab + setup, data = metrics_ann)
 cat("\n=== BPC Annotated Data ===\n")
@@ -1398,7 +1388,7 @@ summary(lm_ratio_rt_q3_ann)
 
 ### Summary Tables and Plots - Annotated Data Linear Models
 
-```{r lm-summary-ann, fig.width=12, fig.height=8}
+```{r lm-summary-ann, fig.width=12, fig.height=8, eval=FALSE}
 lm_models_ann <- list(
   BPC = lm_bpc_ann,
   TIC = lm_tic_ann,
@@ -1437,7 +1427,7 @@ ggplot(lm_summary_ann, aes(x = reorder(Metric, R_squared), y = R_squared)) +
 
 ## Paired Analysis by Mixture - Annotated Data
 
-```{r paired-test-ann, fig.width=12, fig.height=8}
+```{r paired-test-ann, fig.width=12, fig.height=8, eval=FALSE}
 # Visualization: Spaghetti plot for annotated data
 ggplot(
   metrics_ann,
@@ -1484,7 +1474,7 @@ print(agilent_diff_ann)
 
 ### Paired Tests for RT Quartile Ratios - Annotated Data
 
-```{r paired-test-rt-quartiles-ann, fig.width=12, fig.height=8}
+```{r paired-test-rt-quartiles-ann, fig.width=12, fig.height=8, eval=FALSE}
 # Note: Annotated data may have NA values in RT quartiles where no compounds were detected
 # We need to filter complete cases for each test
 
@@ -1682,7 +1672,7 @@ if (length(vec_afekta_q4) > 0 && length(vec_cembio_q4) > 0 && length(vec_afekta_
 
 ### Summary of Paired Tests - Annotated Data
 
-```{r paired-summary-ann, fig.width=12, fig.height=8}
+```{r paired-summary-ann, fig.width=12, fig.height=8, eval=FALSE}
 # Handle NA values in test results
 get_stat <- function(test_result) {
   if (is.list(test_result) && !is.null(test_result$statistic)) {
@@ -1781,7 +1771,7 @@ if (nrow(agilent_summary_ann_plot) > 0) {
 
 ### Cross-Level Comparison
 
-```{r cross-level-comparison, fig.width=14, fig.height=10}
+```{r cross-level-comparison, fig.width=14, fig.height=10, eval=FALSE}
 # Combine Agilent comparisons across all data levels
 agilent_combined <- rbind(
   data.frame(Data_Level = "Full", agilent_summary_full[, c("Metric", "P_value")]),
@@ -1831,8 +1821,8 @@ ggplot(friedman_combined, aes(x = Metric, y = -log10(P_value), fill = Data_Level
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
-```{r clean-ann}
-rm(tic_ann, bpc_ann, sp_full_ann)
+```{r clean-ann, eval=FALSE}
+rm(tic_ann, bpc_ann)
 ```
 
 ---
@@ -1841,7 +1831,7 @@ rm(tic_ann, bpc_ann, sp_full_ann)
 
 Compute noise/background signal metrics:
 
-```{r noise-analysis}
+```{r noise-analysis, eval=FALSE}
 # Reload data for noise calculation
 load(file.path(base_path, "object/tic_full.RData"))
 tic_full <- tic_full[tic_full$polarity == pol]
@@ -1886,7 +1876,7 @@ head(noise_metrics)
 
 ## Distribution Assessment - Noise
 
-```{r dist-assessment-noise}
+```{r dist-assessment-noise, eval=FALSE}
 noise_metrics_to_assess <- c("noise_baseline", "noise_unannotated", "noise_total_other",
                               "ratio_detected_to_background", "ratio_annotated_to_other", 
                               "ratio_annotated_to_full")
@@ -1935,7 +1925,7 @@ distribution_summary_noise
 
 Violin plots and histograms for all noise metrics:
 
-```{r plots-noise, fig.width=14, fig.height=12}
+```{r plots-noise, fig.width=14, fig.height=12, eval=FALSE}
 # Prepare data for plotting
 plot_data_noise <- noise_metrics %>%
   pivot_longer(
@@ -1991,7 +1981,7 @@ for (lab_name in unique(plot_data_noise$lab)) {
 
 ## Linear Models - Noise
 
-```{r lm-noise}
+```{r lm-noise, eval=FALSE}
 # Remove rows with infinite or NA values in ratios
 noise_metrics_clean <- noise_metrics %>%
   filter(is.finite(ratio_detected_to_background) & 
@@ -2019,7 +2009,7 @@ cat("\n=== Ratio: Annotated / Other Detected ===\n")
 summary(lm_ratio_ann_other)
 ```
 
-```{r clean-noise}
+```{r clean-noise, eval=FALSE}
 rm(tic_full, tic_detect, tic_ann)
 ```
 
