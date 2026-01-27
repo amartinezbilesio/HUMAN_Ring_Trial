@@ -153,7 +153,7 @@ if (!is.null(test_sample)) {
     all_samples <- test_sample
     message("TEST MODE: Processing only sample ", test_sample)
   } else {
-    stop("Test sample ", test_sample, " not found in data. Available: ", 
+    stop("Test sample ", test_sample, " not found in data. Available: ",
          paste(all_samples, collapse = ", "))
   }
 } else {
@@ -174,19 +174,15 @@ for (sample_val in all_samples) {
     next
   }
 
-  # helper: midpoints for mz and rt
-  get_mid <- function(dt) {
-    mz <- (dt$mzmin + dt$mzmax) / 2
-    rt <- (dt$rtmin + dt$rtmax) / 2
-    list(mz = mz, rt = rt)
-  }
-  peaks_mid <- lapply(dt_sample, get_mid)
+  # Extract mz and rt values for consensus calculation
+  peaks_vals <- lapply(dt_sample, function(dt) {
+    list(mz = dt$mz, rt = dt$rt)
+  })
 
   compute_mclosest_chunks <- function(
     from_lab,
     to_lab,
-    chunk_size,
-    peak_cols = 1:4
+    chunk_size
   ) {
     df_from <- dt_sample[[from_lab]]
     df_to <- dt_sample[[to_lab]]
@@ -200,10 +196,10 @@ for (sample_val in all_samples) {
     res_chunks <- bplapply(
       chunks,
       function(idx_chunk) {
-        x <- as.matrix(df_from[idx_chunk, peak_cols, with = FALSE])
-        y <- as.matrix(df_to[, peak_cols, with = FALSE])
+        x <- cbind(df_from$mz[idx_chunk], df_from$rt[idx_chunk])
+        y <- cbind(df_to$mz, df_to$rt)
         m <- tryCatch(
-          mclosest(x, y, tolerance = c(10, 10, 0, 0), ppm = c(0, 0, 10, 10)),
+          mclosest(x, y, tolerance = c(0, 10), ppm = c(10, 0)),
           error = function(e) rep(NA_integer_, nrow(x))
         )
         data.table(from = idx_chunk, to = ifelse(is.na(m), NA_integer_, m))
@@ -283,7 +279,7 @@ for (sample_val in all_samples) {
   consensus_rows <- lapply(seq_len(nrow(consensus_list)), function(i) {
     row <- consensus_list[i]
     members <- row$idxs[[1]]
-    
+
     # Extract indices for each lab (use first occurrence if multiple)
     idx_afekta <- if ("afekta" %in% members$lab) {
       members[lab == "afekta"]$idx[1]
@@ -309,20 +305,20 @@ for (sample_val in all_samples) {
     mz_vals <- c()
     rt_vals <- c()
     if (!is.na(idx_afekta)) {
-      mz_vals <- c(mz_vals, peaks_mid$afekta$mz[idx_afekta])
-      rt_vals <- c(rt_vals, peaks_mid$afekta$rt[idx_afekta])
+      mz_vals <- c(mz_vals, peaks_vals$afekta$mz[idx_afekta])
+      rt_vals <- c(rt_vals, peaks_vals$afekta$rt[idx_afekta])
     }
     if (!is.na(idx_hmgu)) {
-      mz_vals <- c(mz_vals, peaks_mid$hmgu$mz[idx_hmgu])
-      rt_vals <- c(rt_vals, peaks_mid$hmgu$rt[idx_hmgu])
+      mz_vals <- c(mz_vals, peaks_vals$hmgu$mz[idx_hmgu])
+      rt_vals <- c(rt_vals, peaks_vals$hmgu$rt[idx_hmgu])
     }
     if (!is.na(idx_icl)) {
-      mz_vals <- c(mz_vals, peaks_mid$icl$mz[idx_icl])
-      rt_vals <- c(rt_vals, peaks_mid$icl$rt[idx_icl])
+      mz_vals <- c(mz_vals, peaks_vals$icl$mz[idx_icl])
+      rt_vals <- c(rt_vals, peaks_vals$icl$rt[idx_icl])
     }
     if (!is.na(idx_cembio)) {
-      mz_vals <- c(mz_vals, peaks_mid$cembio$mz[idx_cembio])
-      rt_vals <- c(rt_vals, peaks_mid$cembio$rt[idx_cembio])
+      mz_vals <- c(mz_vals, peaks_vals$cembio$mz[idx_cembio])
+      rt_vals <- c(rt_vals, peaks_vals$cembio$rt[idx_cembio])
     }
 
     consensus_mz <- if (length(mz_vals) > 0) {
