@@ -51,8 +51,8 @@ echo "Rscript version: $($RSCRIPT --version 2>&1 | head -n1)"
 
 # TEST MODE: Run only sample 1 with fewer cores
 "$RSCRIPT" 5_downstream_analysis/scripts/build_consensus_no_bin.R \
-  --input_dir 5_downstream_analysis/object/consensus_tables \
-  --out_prefix 5_downstream_analysis/object/consensus_tables/consensus_test \
+  --input_dir 5_downstream_analysis/object \
+  --out_prefix 5_downstream_analysis/object/consensus_test \
   --cores 4 \
   --chunk_size 5000 \
   --test_sample 1
