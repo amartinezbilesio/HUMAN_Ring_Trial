@@ -69,7 +69,7 @@ detect_signal <- function(
       c("rtmin", "rtmax", "mzmin", "mzmax", "sample")
     ]
   } else {
-    cpks <- chromPeaks(a)[, c("rtmin", "rtmax", "mzmin", "mzmax", "sample")]  ## we ar emissing the chrompeka id
+    cpks <- chromPeaks(a)[, c("rtmin", "rtmax", "mzmin", "mzmax", "rt", "mz", "sample")]  
 
     ## need to map polarity information here
     cpks <- as.data.frame(cpks)
