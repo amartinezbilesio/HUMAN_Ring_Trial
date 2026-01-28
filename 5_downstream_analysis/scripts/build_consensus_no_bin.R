@@ -135,7 +135,7 @@ for (f in files) {
 }
 
 
-# --- NEW: Per-sample consensus matching ---
+# Per-sample consensus matching ---
 # Assumes all input tables have a 'sample' column (numeric or character)
 
 # Read all input tables into dt_list
