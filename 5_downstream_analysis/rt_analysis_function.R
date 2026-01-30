@@ -69,7 +69,7 @@ detect_signal <- function(
       c("rtmin", "rtmax", "mzmin", "mzmax", "sample")
     ]
   } else {
-    cpks <- chromPeaks(a)[, c("rtmin", "rtmax", "mzmin", "mzmax", "rt", "mz", "sample")]  
+    cpks <- chromPeaks(a)[, c("rtmin", "rtmax", "mzmin", "mzmax", "rt", "mz", "sample", "into", "intb", "maxo")]  
 
     ## need to map polarity information here
     cpks <- as.data.frame(cpks)
@@ -80,8 +80,6 @@ detect_signal <- function(
       match(cpks$sample, seq_len(nrow(sampleData(a))))
     ]
     cpks$chrom_peak_id <- row.names(cpks)
-
-    # FIX 2: Use here() to save the output CSV correctly
     write.csv(
       cpks,
       file = here::here(

@@ -1,0 +1,1692 @@
+---
+title: "Global analysis"
+format: html
+---
+
+# Introduction
+
+This analysis evaluates QC metrics across 4 laboratories using positive
+and negative ionization modes. Instrumental setup, sample preparation, and
+data processing all affect chromatographic metrics on both full and
+detected signal data.
+
+Data: 38 standard mixtures (HUMAN endosome, different compounds) from 4
+labs with harmonized LC systems.
+
+Limitations: No technical replicates; laboratory identity is confounded
+with instrumental parameters. Observed differences reflect combined effects
+of lab environment, operator expertise, and equipment configuration.
+
+
+## Load Libraries
+
+```{r library, include=TRUE, warning=FALSE, message=FALSE}
+library(Chromatograms)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(purrr)
+library(here)
+
+base_path <- here("5_downstream_analysis")
+```
+
+## Setup Information
+
+```{r load-setup}
+setup <- read.csv(file.path(base_path, "lab_setup_phase1.csv"))
+
+setup_simplified <- setup %>%
+  filter(details == "harmonized") %>%
+  select(lab, `LC.Instrument`, `MS.Instrument`, `Inj.vol..uL..pos`, `Inj.vol..uL..neg`) %>%
+  distinct() %>%
+  mutate(
+    platform = case_when(
+      grepl("Agilent 1290", `LC.Instrument`) ~ "Agilent",
+      grepl("Acquity", `LC.Instrument`) ~ "Waters",
+      grepl("ExionLC", `LC.Instrument`) ~ "Sciex",
+      grepl("Bruker", `LC.Instrument`) ~ "Bruker",
+      TRUE ~ "Other"
+    ),
+    ms_instrument = case_when(
+      grepl("6546", `MS.Instrument`) ~ "Agilent_6546",
+      grepl("6545", `MS.Instrument`) ~ "Agilent_6545",
+      grepl("Synapt", `MS.Instrument`) ~ "Waters_Synapt",
+      grepl("Zeno", `MS.Instrument`) ~ "Sciex_Zeno",
+      grepl("TIMS", `MS.Instrument`) ~ "Bruker_TIMS",
+      TRUE ~ "Other"
+    ),
+    inj_vol_pos = `Inj.vol..uL..pos`,
+    inj_vol_neg = `Inj.vol..uL..neg`
+  ) %>%
+  select(lab, platform, ms_instrument, inj_vol_pos, inj_vol_neg)
+
+setup_simplified
+```
+
+Each lab's protocol is unique; lab identity is completely confounded with
+instrumental setup. Notable variations: MS1 scan rate, injection volume, and
+solvent brand.
+
+# Metrics
+
+Three main chromatographic metrics:
+- **TIC**: Sum of all ion intensities
+- **BPC**: Max intensity per scan
+- **BPC/TIC Ratio**: Peak sharpness; naturally normalized
+
+Two data levels:
+- **Full Signal**: Raw profile including baseline
+- **Detected Signal**: Peaks from centWave; isolates compound signal from
+  baseline
+
+```{r load-data-both-modes}
+# Function to compute metrics for a given polarity and data level
+compute_metrics <- function(polarity, polarity_name, data_level = "full") {
+  # Load BPC and TIC data based on data level
+  if (data_level == "full") {
+    load(file.path(base_path, "object/bpc_full.RData"))
+    bpc <- bpc_full[bpc_full$polarity == polarity]
+
+    load(file.path(base_path, "object/tic_full.RData"))
+    tic <- tic_full[tic_full$polarity == polarity]
+  } else {
+    load(file.path(base_path, "object/bpc_detect.RData"))
+    bpc <- bpc_detect[bpc_detect$polarity == polarity]
+
+    load(file.path(base_path, "object/tic_detect.RData"))
+    tic <- tic_detect[tic_detect$polarity == polarity]
+  }
+
+  # Compute base metrics
+  metrics <- data.frame(
+    lab = bpc$lab,
+    mixture = bpc$mixture,
+    polarity = polarity_name,
+    bpc = vapply(intensity(bpc), sum, numeric(1), na.rm = TRUE),
+    tic = vapply(intensity(tic), sum, numeric(1), na.rm = TRUE)
+  )
+
+  metrics$bpc_tic_ratio <- metrics$bpc / metrics$tic
+
+  # Add setup information and data level
+  metrics <- metrics %>%
+    left_join(setup_simplified, by = "lab") %>%
+    mutate(data_level = ifelse(data_level == "full", "Full Signal", "Detected Signal")) %>%
+    group_by(lab, polarity) %>%
+    mutate(
+      # Calculate the median signal for this specific lab
+      median_bpc = median(bpc, na.rm = TRUE),
+      median_tic = median(tic, na.rm = TRUE),
+
+      # Normalize to median (center around 1.0)
+      bpc_norm = bpc / median_bpc,
+      tic_norm = tic / median_tic,
+      bpc_tic_ratio_norm = bpc_tic_ratio
+    ) %>%
+    ungroup()
+
+  return(metrics)
+}
+
+# Helper: Run function for both polarities and combine results
+run_for_polarities <- function(fn, data_level = NULL) {
+  pos_result <- fn(1L, "Positive", data_level)
+  neg_result <- fn(0L, "Negative", data_level)
+  bind_rows(pos_result, neg_result)
+}
+
+# Helper: Run function for both polarities with polarity name (no data_level)
+run_for_polarities_names <- function(fn) {
+  pos_result <- fn(1L, "Positive")
+  neg_result <- fn(0L, "Negative")
+  bind_rows(pos_result, neg_result)
+}
+
+# Helper: Run function for both polarities (single polarity argument)
+run_for_polarities_simple <- function(fn) {
+  pos_result <- fn(1L)
+  neg_result <- fn(0L)
+  bind_rows(pos_result, neg_result)
+}
+
+# Compute metrics for both data levels
+metrics_full <- run_for_polarities(compute_metrics, "full")
+metrics_detect <- run_for_polarities(compute_metrics, "detect")
+
+# Combine all
+metrics_combined <- bind_rows(metrics_full, metrics_detect) %>%
+  group_by(lab, polarity, data_level) %>%
+  mutate(
+    # Median scaling (divide by median)
+    bpc_median_scaled = bpc / median(bpc, na.rm = TRUE),
+    tic_median_scaled = tic / median(tic, na.rm = TRUE),
+
+    # Autoscaling (mean center, then divide by MAD)
+    bpc_autoscaled = (bpc - mean(bpc, na.rm = TRUE)) / mad(bpc, na.rm = TRUE),
+    tic_autoscaled = (tic - mean(tic, na.rm = TRUE)) / mad(tic, na.rm = TRUE),
+
+    # Apply scaling to ratio as well
+    bpc_tic_ratio_median_scaled = bpc_tic_ratio / median(bpc_tic_ratio, na.rm = TRUE),
+    bpc_tic_ratio_autoscaled = (bpc_tic_ratio - mean(bpc_tic_ratio, na.rm = TRUE)) / mad(bpc_tic_ratio, na.rm = TRUE)
+  ) %>%
+  ungroup()
+```
+
+
+# Data distribution
+
+I want to plot violin plots for the distribution of raw metrics.
+
+```{r}
+# Plotting function
+plot_violin <- function(data, metric) {
+  # Log-transform absolute intensity metrics
+  if (metric %in% c("bpc", "tic")) {
+    p <- ggplot(data, aes_string(x = "lab", y = metric, fill = "polarity")) +
+      geom_violin(trim = FALSE, alpha = 0.6) +
+      geom_jitter(aes(color = as.factor(mixture)), width = 0.2, size = 1.5, 
+      alpha = 0.7) +
+      scale_color_viridis_d(option = "turbo") +
+      scale_y_continuous(trans = "log2") +
+      facet_wrap(~ data_level) +
+      theme_minimal() +
+      labs(title = paste("Violin plot of", metric, "(log2 scale)"),
+           x = "Laboratory",
+           y = paste(metric, "(log2)"),
+           color = "Mixture")
+  } else {
+    p <- ggplot(data, aes_string(x = "lab", y = metric, fill = "polarity")) +
+      geom_violin(trim = FALSE, alpha = 0.6) +
+      geom_jitter(aes(color = as.factor(mixture)), width = 0.2, size = 1.5, alpha = 0.7) +
+      scale_color_viridis_d(option = "turbo") +
+      facet_wrap(~ data_level) +
+      theme_minimal() +
+      labs(title = paste("Violin plot of", metric),
+           x = "Laboratory",
+           y = metric,
+           color = "Mixture")
+  }
+  return(p)
+}
+
+# Generate and display plots for each metric separately
+for (metric in c("bpc", "tic", "bpc_tic_ratio")) {
+  print(plot_violin(metrics_combined, metric))
+}
+```
+
+Detected signal recenters the negative and positive distributions. The bimodal shape is evident:
+
+```{r}
+ggplot(metrics_combined %>% filter(data_level == "Full Signal"),
+       aes(x = log2(tic), fill = polarity)) +
+  geom_density(alpha = 0.3) +
+  facet_grid(lab ~ polarity) +
+  theme_minimal()
+
+ggplot(metrics_combined %>% filter(data_level == "Detected Signal"),
+       aes(x = log2(tic), fill = polarity)) +
+  geom_density(alpha = 0.3) +
+  facet_grid(lab ~ polarity) +
+  theme_minimal()
+```
+
+Full signal is more compressed than detected signal, likely because
+each mixture has different numbers of compounds.
+
+ ```{r}
+plot_mixture_distribution <- function(data, metric) {
+  if (metric %in% c("bpc", "tic")) {
+    p <- ggplot(
+      data,
+      aes_string(x = "mixture", y = metric, color = "lab", group = "lab")
+    ) +
+      geom_line(alpha = 0.7) +
+      scale_y_continuous(trans = "log2") +
+      facet_grid(data_level ~ polarity) +
+      theme_minimal() +
+      labs(
+        title = paste("Mixture distribution across labs -", metric, "(log2)")
+      )
+  } else {
+    p <- ggplot(
+      data,
+      aes_string(x = "mixture", y = metric, color = "lab", group = "lab")
+    ) +
+      geom_line(alpha = 0.7) +
+      facet_grid(data_level ~ polarity) +
+      theme_minimal() +
+      labs(title = paste("Mixture distribution across labs -", metric))
+  }
+  return(p)
+}
+
+for (metric in c("bpc", "tic", "bpc_tic_ratio")) {
+  print(plot_mixture_distribution(metrics_combined, metric))
+}
+ ```
+
+There is good agreement between Cembio and Afekta, and some with ICL.
+However, HMGU is consistently lower intensity. Let's run linear models to
+evaluate mixture effects and batch effects.
+
+Compare distribution before and after normalization:
+
+```{r}
+## run simple linear model
+testdata <- metrics_combined %>%
+  filter(polarity == "Positive", data_level == "Full Signal")
+
+model <- lm(log2(tic) ~ lab + mixture, data = testdata)
+
+plot(model$coefficients) ## add some legend ?
+plot(model$residuals) ## here need to chekc hte dsitribution is random and the R2 is high .
+```
+
+ANOVA aggregates coefficients into Sum of Squares (SS) to quantify
+the relative power of each factor. Here, lab variance dominates while
+mixture variance is much lower.
+
+```{r}
+an <- anova(model)
+
+## make a lil pie chart
+ss_total <- sum(an[, "Sum Sq"])
+ss_lab <- (an["lab", "Sum Sq"] / ss_total) * 100
+ss_mix <- (an["mixture", "Sum Sq"] / ss_total) * 100
+ss_res <- (an["Residuals", "Sum Sq"] / ss_total) * 100
+# Prepare data for pie chart
+pie_data <- data.frame(
+  Source = c("Lab Variance", "Mixture Variance", "Residual Variance"),
+  Percentage = c((ss_lab / ss_total) * 100, (ss_mix / ss_total) * 100, (ss_res / ss_total) * 100)
+)
+
+# Plot pie chart
+ggplot(pie_data, aes(x = "", y = Percentage, fill = Source)) +
+  geom_col() +
+  coord_polar(theta = "y") +
+  labs(title = "Variance Contribution by Source") +
+  theme_void()
+```
+
+Raw TIC shows massive lab variance, making it unsuitable for comparing
+biology across labs.
+
+```{r}
+# Runs on TIC across all data levels and polarities
+check_metric_quality <- function(data, metric_name) {
+  # Run linear model with log2 transformation for intensity metrics
+  if (metric_name %in% c("tic", "bpc")) {
+    model <- lm(log2(get(metric_name)) ~ lab + mixture, data = data)
+  } else {
+    model <- lm(get(metric_name) ~ lab + mixture, data = data)
+  }
+
+  # Calculate R-squared
+  r_squared <- summary(model)$r.squared
+
+  # ANOVA for variance decomposition
+  an <- anova(model)
+  ss_total <- sum(an[, "Sum Sq"])
+
+  # Extract variance components
+  ss_lab <- as.numeric(an["lab", "Sum Sq"])
+  ss_mix <- as.numeric(an["mixture", "Sum Sq"])
+  ss_res <- as.numeric(an["Residuals", "Sum Sq"])
+
+  # Percentages
+  pct_lab <- (ss_lab / ss_total) * 100
+  pct_mix <- (ss_mix / ss_total) * 100
+  pct_res <- (ss_res / ss_total) * 100
+
+  # Create variance data
+  variance_data <- data.frame(
+    Source = c("Lab Variance", "Mixture Variance", "Residual Variance"),
+    Percentage = c(pct_lab, pct_mix, pct_res)
+  )
+
+  # Residual plot
+  residual_plot <- data.frame(
+    Fitted = fitted(model),
+    Residuals = residuals(model)
+  ) %>%
+    ggplot(aes(x = Fitted, y = Residuals)) +
+    geom_point(alpha = 0.6) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+    labs(
+      title = paste("Residual Plot -", metric_name),
+      x = "Fitted Values",
+      y = "Residuals"
+    ) +
+    theme_minimal()
+
+  # Return list with all outputs
+  list(
+    model = model,
+    r_squared = r_squared,
+    residual_plot = residual_plot,
+    variance_table = variance_data
+  )
+}
+
+# Run analysis for TIC across all data levels and polarities
+results_table <- data.frame()
+residual_plots <- list()
+
+for (pol in c("Positive", "Negative")) {
+  for (level in c("Full Signal", "Detected Signal")) {
+    data_subset <- metrics_combined %>%
+      filter(polarity == pol, data_level == level)
+
+    message("Processing: ", pol, " - ", level)
+    result <- check_metric_quality(data_subset, "tic")
+
+    # Store residual plots
+    residual_plots[[paste(pol, level, sep = " - ")]] <- result$residual_plot
+
+    # Store summary in table
+    results_table <- rbind(results_table, data.frame(
+      Polarity = pol,
+      Data_Level = level,
+      R_squared = result$r_squared,
+      Lab_Variance_Pct = result$variance_table$Percentage[1],
+      Mixture_Variance_Pct = result$variance_table$Percentage[2],
+      Residual_Variance_Pct = result$variance_table$Percentage[3]
+    ))
+  }
+}
+
+# Prepare data for stacked bar chart
+variance_long <- results_table %>%
+  select(Polarity, Data_Level, R_squared, ends_with("_Pct")) %>%
+  pivot_longer(
+    cols = ends_with("_Pct"),
+    names_to = "Source",
+    values_to = "Percentage"
+  ) %>%
+  mutate(
+    Source = gsub("_Variance_Pct", "", Source),
+    Source = gsub("_Pct", "", Source),
+    Label = paste(Polarity, Data_Level, sep = "\n"),
+    R2_label = paste("R² =", round(R_squared, 3))
+  )
+
+# Create text labels data (one per condition)
+text_labels <- variance_long %>%
+  distinct(Label, R2_label)
+
+# Create single stacked bar chart with all 4 combinations
+stacked_bar_plot <- ggplot(
+  variance_long,
+  aes(x = Label, y = Percentage, fill = Source)
+) +
+  geom_col(alpha = 0.8) +
+  geom_text(
+    aes(x = Label, label = R2_label, y = 105),
+    data = text_labels,
+    size = 3,
+    inherit.aes = FALSE
+  ) +
+  labs(
+    title = "Variance Decomposition: TIC across all conditions",
+    x = "Polarity & Data Level",
+    y = "Variance Contribution (%)",
+    fill = "Source"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 10),
+    legend.position = "top"
+  ) +
+  ylim(0, 110)
+
+print(stacked_bar_plot)
+
+# Create combined residual plots with all 4 conditions
+residual_data <- data.frame()
+
+for (pol in c("Positive", "Negative")) {
+  for (level in c("Full Signal", "Detected Signal")) {
+    data_subset <- metrics_combined %>%
+      filter(polarity == pol, data_level == level)
+
+    result <- check_metric_quality(data_subset, "tic")
+
+    # Extract residuals and add condition info, including lab
+    residual_df <- data.frame(
+      Fitted = fitted(result$model),
+      Residuals = residuals(result$model),
+      Polarity = pol,
+      Data_Level = level,
+      Lab = data_subset$lab
+    )
+
+    residual_data <- rbind(residual_data, residual_df)
+  }
+}
+
+# Create faceted residual plots with lab legend
+combined_residual_plot <- ggplot(
+  residual_data,
+  aes(x = Fitted, y = Residuals, shape = Lab)
+) +
+  geom_point(alpha = 0.6, size = 2.5, color = "steelblue") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  facet_wrap(~ paste(Polarity, Data_Level, sep = "\n"), nrow = 2, ncol = 2) +
+  labs(
+    title = "Faceted Residual Plots: TIC across all conditions",
+    x = "Fitted Values",
+    y = "Residuals",
+    shape = "Laboratory"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    strip.text = element_text(size = 10)
+  )
+
+print(combined_residual_plot)
+
+# Display summary table
+print(results_table)
+```
+
+The residual plot clearly shows separation between labs vs HMGU and
+still lab separation in others. Lab separation remains unexplained by
+mixture. We cannot compare labs directly.
+
+Next: Apply normalization or standardization across labs to account for
+these differences. Test methods and examine effects on linear models.
+
+What could be tested:
+- Median normalization: Adjusting each lab's data to have the same median could
+ help account for systematic differences. In that case we take the median of 
+ that measure by that lab to correct each mixture.
+    - this is safe as the experimental design is balanced. every lab measures
+     the same 38 mixture, heir intensity distributions should be identical in 
+     shape, just shifted up or down.
+    - this would be wrong if the mixture were different across labs
+- Auto scaling: forces the lab to have the same dynamic change.
+    - stronger scaling. will remove any instrument bias.
+
+What i am not testing:
+- max: ESI are subject to random electrical spike/detector saturation, 
+       therefore max could be an outlier and crush other signal to 0
+    - generally not used for entire run.
+
+I can decided what would be better also based on violin plot shape (that i made
+ above actually).
+
+- if similar : median scaling should be fine
+- if not : auto-scaling may be required
+
+The violin plot and density plot above actually are a bit hard to be definitive
+about. The positive data is fairly similar in shape, but the negative data
+shows more variation. I would test both and see how the model are affected. 
+and if we manage to drop the variance due to lab to acceptable levels.
+
+Let's see the differnece in results between the different scaling methods.
+
+```{r}
+# Visualize distribution before and after scaling
+# Create violin plots comparing raw vs median scaled TIC
+plot_scaling_comparison <- function(data, metric_raw, metric_scaled, metric_label) {
+  # Prepare data for plotting - combine raw and scaled into long format
+  plot_data <- data %>%
+    select(lab, polarity, data_level, mixture,
+           raw = all_of(metric_raw),
+           scaled = all_of(metric_scaled)) %>%
+    pivot_longer(cols = c(raw, scaled), names_to = "Scaling",
+     values_to = "Value") %>%
+    mutate(Scaling = ifelse(Scaling == "raw", "Unscaled", "Median Scaled"))
+
+  # Create plot with free y-axis scales
+  p <- ggplot(plot_data, aes(x = lab, y = log2(Value), fill = polarity)) +
+    geom_violin(trim = FALSE, alpha = 0.6) +
+    geom_jitter(aes(color = as.factor(mixture)), width = 0.2, size = 1.5,
+     alpha = 0.7) +
+    scale_color_viridis_d(option = "turbo") +
+    facet_grid(Scaling ~ data_level, scales = "free_y") +
+    theme_minimal() +
+    labs(title = paste("Before vs After Median Scaling:", metric_label),
+         subtitle = "Distribution shape should remain similar, but scale shifts",
+         x = "Laboratory",
+         y = paste(metric_label, "(log2)"),
+         color = "Mixture") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+  return(p)
+}
+
+# Generate comparison plots for TIC and BPC
+print(plot_scaling_comparison(metrics_combined, "tic", "tic_median_scaled", "TIC"))
+print(plot_scaling_comparison(metrics_combined, "bpc", "bpc_median_scaled", "BPC"))
+
+# Compare the different scaling methods
+test_data <- metrics_combined %>%
+  filter(polarity == "Positive", data_level == "Detected Signal")
+
+# Run check_metric_quality on each normalization
+result_raw <- check_metric_quality(test_data, "tic")
+result_median_scaled <- check_metric_quality(test_data, "tic_median_scaled")
+result_autoscaled <- check_metric_quality(test_data, "tic_autoscaled")
+
+# Compile results (extracting variance_table and r_squared from each result list)
+normalization_results <- bind_rows(
+  result_raw$variance_table %>% mutate(Normalization = "Raw TIC", 
+  R_squared = result_raw$r_squared),
+  result_median_scaled$variance_table %>% mutate(Normalization = "Median Scaled", 
+  R_squared = result_median_scaled$r_squared),
+  result_autoscaled$variance_table %>% mutate(Normalization = "Autoscaled (MAD)", 
+  R_squared = result_autoscaled$r_squared)
+)
+
+print("=== TIC Variance Decomposition: Effect of Normalization ===")
+print(normalization_results)
+
+# Visualize
+normalization_results %>%
+  ggplot(aes(x = Normalization, y = Percentage, fill = Source)) +
+  geom_col(alpha = 0.8) +
+  labs(title = "Effect of Normalization on Variance Decomposition (TIC)",
+       subtitle = "Positive Mode, Detected Signal",
+       x = "Normalization Method",
+       y = "Variance Contribution (%)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+Noise likely reflects injection variability and ionization
+fluctuation—factors we cannot isolate with this experimental design.
+
+
+```{r}
+# Re-run the models to extract Absolute Sum of Squares and create residual plots
+# (Assuming your previous code setup)
+
+# 1. Raw Model
+mod_raw <- lm(log2(tic) ~ lab + factor(mixture), data = test_data)
+ss_raw <- anova(mod_raw)$"Sum Sq"
+
+# 2. Median Scaled Model
+mod_median_scaled <- lm(log2(tic_median_scaled) ~ lab + factor(mixture), data = test_data)
+ss_median_scaled <- anova(mod_median_scaled)$"Sum Sq"
+
+# 3. Autoscaled Model
+mod_autoscaled <- lm(tic_autoscaled ~ lab + factor(mixture), data = test_data) ## no log bc scaled
+ss_autoscaled <- anova(mod_autoscaled)$"Sum Sq"
+
+# 4. Compare the "Noise" (Residuals are the 3rd item in ANOVA)
+print(paste("Raw Absolute Noise:", round(ss_raw[3], 2)))
+print(paste("Median Scaled Absolute Noise:", round(ss_median_scaled[3], 2)))
+print(paste("Autoscaled Absolute Noise:", round(ss_autoscaled[3], 2)))
+
+print(paste("Raw Total Variance:", round(sum(ss_raw), 2)))
+print(paste("Median Scaled Total Variance:", round(sum(ss_median_scaled), 2)))
+print(paste("Autoscaled Total Variance:", round(sum(ss_autoscaled), 2)))
+
+# Plot residuals vs fitted for each normalization method
+residual_plots_comparison <- list(
+  raw = ggplot(data.frame(Fitted = fitted(mod_raw), Residuals = residuals(mod_raw)),
+               aes(x = Fitted, y = Residuals)) +
+    geom_point(alpha = 0.6, size = 2) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+    labs(title = "Raw TIC (log2)", x = "Fitted Values", y = "Residuals") +
+    theme_minimal(),
+
+  median_scaled = ggplot(data.frame(Fitted = fitted(mod_median_scaled), Residuals = residuals(mod_median_scaled)),
+                         aes(x = Fitted, y = Residuals)) +
+    geom_point(alpha = 0.6, size = 2) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+    labs(title = "Median Scaled TIC", x = "Fitted Values", y = "Residuals") +
+    theme_minimal(),
+
+  autoscaled = ggplot(data.frame(Fitted = fitted(mod_autoscaled), Residuals = residuals(mod_autoscaled)),
+                      aes(x = Fitted, y = Residuals)) +
+    geom_point(alpha = 0.6, size = 2) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+    labs(title = "Autoscaled TIC (MAD)", x = "Fitted Values", y = "Residuals") +
+    theme_minimal()
+)
+
+# Display side by side (requires gridExtra or patchwork)
+library(patchwork)
+residual_plots_comparison$raw / residual_plots_comparison$median_scaled / residual_plots_comparison$autoscaled +
+  plot_layout(ncol = 1) +
+  plot_annotation(title = "Residual Plots: Comparison of Normalization Methods")
+
+print(paste("Median Scaled Total Variance:", round(sum(ss_median_scaled), 2)))
+```
+
+Noise magnitude matters less than residual variance stability. Biological
+variance (mixture) changed as expected.
+
+Conclusions:
+- Use median scaling
+- Noise level acceptable; does not significantly impact biological
+  variance
+- Focus on biological signals without technical variability obscuring
+  them
+
+To focus on instrument variability, we remove the mixture effect:
+
+```{r}
+# 1. Isolate Lab Effects
+#    Center each mixture at 0 to reveal only lab differences
+inst_focus_data <- metrics_combined %>%
+  filter(data_level == "Detected Signal") %>%
+  group_by(mixture, polarity) %>%
+  mutate(
+    # Log2 transform, then subtract mixture median to isolate instrument variation
+    log_tic = log2(tic),
+    tic_mix_centered = log_tic - median(log_tic, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# 2. Fit Model
+model <- lm(tic_mix_centered ~ lab + factor(mixture), data = inst_focus_data)
+an <- anova(model)
+total_ss <- sum(an$`Sum Sq`)
+
+# 3. Create the Result Table
+result <- data.frame(
+  Source = c("Instrument (Lab)", "Biology (Mixture)", "Noise (Residual)"),
+  Percentage = c(
+    (an["lab", "Sum Sq"] / total_ss) * 100,
+    (an["factor(mixture)", "Sum Sq"] / total_ss) * 100,
+    (an["Residuals", "Sum Sq"] / total_ss) * 100
+  )
+)
+
+print(result)
+
+# Visualize instrument effect (biological signal removed)
+ggplot(inst_focus_data, aes(x = lab, y = tic_mix_centered, fill = lab)) +
+  geom_boxplot() +
+  facet_wrap(~polarity) +
+  labs(title = "Pure Instrument Variance",
+       subtitle = "Relative sensitivity of each lab on log2 scale.",
+       y = "Relative Sensitivity (Log2 Scale)") +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+
+Mixture-centered analysis isolates instrument effects. No single metric
+reveals both instrument and biological variance; side-by-side comparison
+is needed.
+
+# Reproducibility: Full Signal vs Detected
+
+Normalization addresses sensitivity differences across labs, but
+lab-dependent noise remains. The intraclass correlation coefficient (ICC)
+tests this. ICC repeats earlier variance analysis but provides scale-
+invariant comparability across papers—unlike raw Sum of Squares, it's
+more meaningful for visualization.
+
+ICC = variance_between_mixtures / (variance_between_mixtures +
+variance_within_mixtures)
+
+High ICC confirms measurements reflect biological differences, not
+technical noise.
+
+## Normalization Effects
+
+```{r metric-stability-all-labs}
+compute_icc <- function(data, metric_name) {
+  # ICC = variance_between_mixtures / (variance_between_mixtures + variance_within_mixtures)
+  # Log-transform absolute metrics (TIC, BPC); ratios use natural scale
+  if (grepl("ratio", metric_name, ignore.case = TRUE)) {
+    data$value <- data[[metric_name]] # Keep ratios on natural 0-1 scale
+  } else {
+    data$value <- log2(data[[metric_name]]) # Log-transform absolute intensities
+  }
+  # Calculate variances
+  between_mixture_var <- data %>%
+    group_by(mixture) %>%
+    summarise(mean_val = mean(value, na.rm = TRUE), .groups = "drop") %>%
+    pull(mean_val) %>%
+    var(na.rm = TRUE)
+  within_mixture_var <- data %>%
+    group_by(mixture) %>%
+    summarise(var_val = var(value, na.rm = TRUE), .groups = "drop") %>%
+    pull(var_val) %>%
+    mean(na.rm = TRUE)
+  icc <- between_mixture_var / (between_mixture_var + within_mixture_var)
+  return(data.frame(
+    Metric = metric_name,
+    ICC = icc,
+    Between_mixture_var = between_mixture_var,
+    Within_mixture_var = within_mixture_var
+  ))
+}
+
+# Compute ICC for BOTH absolute and normalized metrics in one loop
+icc_all_results <- data.frame()
+
+for (pol in c("Positive", "Negative")) {
+  for (level in c("Full Signal", "Detected Signal")) {
+    data_subset <- metrics_combined %>%
+      filter(polarity == pol, data_level == level)
+
+    # Absolute metrics
+    icc_tic_abs <- compute_icc(data_subset, "tic") %>% mutate(Type = "Absolute")
+    icc_bpc_abs <- compute_icc(data_subset, "bpc") %>% mutate(Type = "Absolute")
+    icc_ratio_abs <- compute_icc(data_subset, "bpc_tic_ratio") %>%
+      mutate(Type = "Absolute")
+
+    # Normalized metrics
+    icc_tic_norm <- compute_icc(data_subset, "tic_norm") %>%
+      mutate(Type = "Normalized", Metric = "tic")
+    icc_bpc_norm <- compute_icc(data_subset, "bpc_norm") %>%
+      mutate(Type = "Normalized", Metric = "bpc")
+    icc_ratio_norm <- compute_icc(data_subset, "bpc_tic_ratio_norm") %>%
+      mutate(Type = "Normalized", Metric = "bpc_tic_ratio")
+
+    results <- bind_rows(
+      icc_tic_abs,
+      icc_bpc_abs,
+      icc_ratio_abs,
+      icc_tic_norm,
+      icc_bpc_norm,
+      icc_ratio_norm
+    ) %>%
+      mutate(
+        Polarity = pol,
+        Data_Level = level,
+        Metric_Label = case_when(
+          Metric == "tic" ~ "TIC",
+          Metric == "bpc" ~ "BPC",
+          Metric == "bpc_tic_ratio" ~ "BPC/TIC Ratio",
+          TRUE ~ Metric
+        )
+      )
+
+    icc_all_results <- bind_rows(icc_all_results, results)
+  }
+}
+
+print(
+  "=== Metric Reproducibility: Absolute vs Normalized (ICC: 0=poor, 1=perfect) ==="
+)
+icc_all_results %>%
+  select(Polarity, Data_Level, Metric_Label, Type, ICC) %>%
+  arrange(desc(ICC)) %>%
+  print()
+```
+
+
+```{r icc-comparison-plots}
+#| code-fold: true
+# Direct comparison of absolute vs normalized ICC
+ggplot(icc_all_results, aes(x = Metric_Label, y = ICC, fill = Type)) +
+  geom_col(position = "dodge", alpha = 0.8) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "red") +
+  facet_grid(Data_Level ~ Polarity) +
+  labs(
+    title = "Reproducibility Comparison: Absolute vs Normalized Metrics",
+    subtitle = "ICC by Polarity and Data Level"
+  )
+```
+
+```{r variance-decomposition}
+#| code-fold: true
+## Plot 3A: Variance decomposition for TIC and BPC (log2 scale)
+variance_plot_intensity <- icc_all_results %>%
+  filter(Metric_Label != "BPC/TIC Ratio") %>%
+  select(Polarity, Data_Level, Metric_Label, Type, Between_mixture_var, Within_mixture_var) %>%
+  pivot_longer(cols = c(Between_mixture_var, Within_mixture_var),
+               names_to = "Source", values_to = "Variance") %>%
+  mutate(
+    Source = case_when(
+      Source == "Between_mixture_var" ~ "Between mixtures (signal)",
+      Source == "Within_mixture_var" ~ "Within mixtures (lab noise)",
+      TRUE ~ Source
+    )
+  )
+
+ggplot(variance_plot_intensity, aes(x = Metric_Label, y = Variance, fill = Source)) +
+  geom_col(position = "stack", alpha = 0.8, width = 0.7) +
+  facet_grid(Data_Level + Type ~ Polarity, scales = "free_y") +
+  labs(
+    title = "Variance Decomposition: TIC and BPC",
+    subtitle = "Higher 'between mixtures' = more signal; Higher 'within mixtures' = more lab noise",
+    x = "Metric",
+    y = "Variance (log2 scale)",
+    fill = "Source of Variation"
+  ) +
+  scale_fill_manual(values = c("Between mixtures (signal)" = "#619CFF",
+                                "Within mixtures (lab noise)" = "#F8766D")) +
+  theme_bw() +
+  theme(legend.position = "top",
+        axis.text.x = element_text(angle = 30, hjust = 1))
+
+# Plot 3B: Variance decomposition for BPC/TIC Ratio (natural scale)
+variance_plot_ratio <- icc_all_results %>%
+  filter(Metric_Label == "BPC/TIC Ratio") %>%
+  select(Polarity, Data_Level, Metric_Label, Type, Between_mixture_var, Within_mixture_var) %>%
+  pivot_longer(cols = c(Between_mixture_var, Within_mixture_var),
+               names_to = "Source", values_to = "Variance") %>%
+  mutate(
+    Source = case_when(
+      Source == "Between_mixture_var" ~ "Between mixtures (signal)",
+      Source == "Within_mixture_var" ~ "Within mixtures (lab noise)",
+      TRUE ~ Source
+    )
+  )
+
+ggplot(variance_plot_ratio, aes(x = Type, y = Variance, fill = Source)) +
+  geom_col(position = "stack", alpha = 0.8, width = 0.7) +
+  facet_grid(Data_Level ~ Polarity, scales = "free_y") +
+  labs(
+    title = "Variance Decomposition: BPC/TIC Ratio",
+    subtitle = "Ratio is on natural scale (0-1), not log-transformed",
+    x = "Normalization Type",
+    y = "Variance (natural scale)",
+    fill = "Source of Variation"
+  ) +
+  scale_fill_manual(values = c("Between mixtures (signal)" = "#619CFF",
+                                "Within mixtures (lab noise)" = "#F8766D")) +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+The overall goal is that we end up with Value = Biology.
+
+Starting point: Value = (Biology × Sensitivity) + Background Noise
+
+With detected signal and normalization: Value ≈ Biology
+
+Findings: Normalized TIC shows highest ICC. Detected signal (ICC 0.5–0.6)
+substantially beats full signal (ICC 0.3) because peak detection removes
+vendor-specific solvent noise. Median normalization improved ICC from 0.05
+to 0.55—crossing the threshold from poor to moderate reproducibility. The
+remaining ~0.5 ICC gap likely reflects ionization preferences and
+platform-specific sensitivities.
+
+```{r peak-detection-validation}
+# Compare Reproducibility: Full vs Detected Signal (using the best metric: Normalized TIC)
+
+# 1. ICC Improvement Table
+icc_comparison_tic <- icc_all_results %>%
+  filter(Type == "Normalized", Metric == "tic") %>%
+  select(Polarity, Data_Level, ICC) %>%
+  pivot_wider(names_from = Data_Level, values_from = ICC) %>%
+  mutate(
+    # Calculate how much better Detected is compared to Full
+    ICC_Improvement = `Detected Signal` - `Full Signal`,
+    Percent_Gain = (`Detected Signal` - `Full Signal`) / `Full Signal` * 100
+  )
+
+print("=== Value of Peak Detection: ICC Improvement (Normalized TIC) ===")
+print(icc_comparison_tic)
+```
+
+
+```{r}
+#| code-fold: true
+# 2. Visualization: The "Before & After" Plot
+ggplot(icc_all_results %>% filter(Type == "Normalized", Metric == "tic"),
+       aes(x = Polarity, y = ICC, fill = Data_Level)) +
+  geom_col(position = "dodge", alpha = 0.8) +
+  geom_text(aes(label = round(ICC, 2)),
+            position = position_dodge(0.9), vjust = -0.5) +
+  labs(
+    title = "Impact of Peak Detection on Reproducibility",
+    subtitle = "Comparison of Normalized TIC Stability (Full vs. Detected)",
+    y = "Intraclass Correlation Coefficient (ICC)",
+    x = "Polarity",
+    fill = "Processing Level",
+    caption = "Higher ICC = Better Agreement between labs.\nPeak detection doubles reproducibility in Negative Mode."
+  ) +
+  theme_bw() +
+  theme(legend.position = "top") +
+  ylim(0, 1)
+```
+
+Peak detection substantially improves reproducibility:
+
+- Negative mode: ICC increased from 0.275 to 0.556 (102% improvement)
+- Positive mode: ICC increased from 0.375 to 0.503 (34% improvement)
+
+Conclusion: All subsequent analyses use detected signal exclusively.
+Peak detection removes instrument-specific baseline noise obscuring
+biological signal. Full signal contains too much vendor-specific noise
+for meaningful inter-lab comparisons.
+
+For comparison, two labs (CEMBIO and AFEKTA) share the same LC-MS
+platform (Agilent Q-TOF). ICC of 0.83 (TIC) and 0.92 (BPC) for these labs
+proves selectivity matches when vendor matches. The 0.5–0.8 gap reflects
+instrument-specific and ionization differences.
+
+```{r}
+# Compute ICC for Agilent Labs Only
+agilent_labs <- c("afekta", "cembio")
+
+# Filter metrics_combined to only include Agilent labs
+agilent_data <- metrics_combined %>%
+  filter(lab %in% agilent_labs, polarity == "Positive", data_level == "Detected Signal")
+
+# Compute ICC for Agilent labs only
+icc_agilent_tic <- compute_icc(agilent_data, "tic_norm")
+icc_agilent_bpc <- compute_icc(agilent_data, "bpc_norm")
+
+print("=== Ceiling ICC Estimate (Agilent Labs Only, Positive Mode, Detected Signal) ===")
+print(paste("ICC for Normalized TIC:", round(icc_agilent_tic$ICC, 3)))
+print(paste("ICC for Normalized BPC:", round(icc_agilent_bpc$ICC, 3)))
+```
+
+```{r agilent-effect-size-detected}
+# Effect size between Agilent labs using normalized TIC and BPC (Detected Signal)
+agilent_effect_size <- metrics_combined %>%
+  filter(lab %in% c("afekta", "cembio"), data_level == "Detected Signal") %>%
+  select(lab, mixture, polarity, tic_norm, bpc_norm) %>%
+  pivot_wider(
+    names_from = lab,
+    values_from = c(tic_norm, bpc_norm)
+  ) %>%
+  mutate(
+    log_diff_tic = log2(tic_norm_cembio / tic_norm_afekta),
+    log_diff_bpc = log2(bpc_norm_cembio / bpc_norm_afekta)
+  )
+
+effect_summary <- agilent_effect_size %>%
+  group_by(polarity) %>%
+  summarise(
+    TIC_Mean_Log = mean(log_diff_tic, na.rm = TRUE),
+    TIC_Median_Log = median(log_diff_tic, na.rm = TRUE),
+    TIC_Percent_Diff = (2^abs(TIC_Mean_Log) - 1) * 100,
+    BPC_Mean_Log = mean(log_diff_bpc, na.rm = TRUE),
+    BPC_Median_Log = median(log_diff_bpc, na.rm = TRUE),
+    BPC_Percent_Diff = (2^abs(BPC_Mean_Log) - 1) * 100,
+    .groups = "drop"
+  )
+
+effect_summary
+```
+
+PROOF THAT MEDIAN DIFF MEAN IN OUR DATA
+
+TIC_Median_Log (-0.014):
+
+Effectively zero. Median normalization worked perfectly for the
+"typical" mixture. Labs agree within ~1%.
+
+TIC_Mean_Log (-0.093):
+
+Not zero (approx. 6.6% difference). The average is pulled down by
+outliers.
+
+
+Negative mode: Mean (-0.12) and Median (-0.13) nearly identical but
+non-zero. Why? Distributions differ in shape. Even after aligning centers
+(global median), different shapes create point-by-point offsets. Negative
+mode ionization creates ~9% bias that median normalization cannot erase.
+
+Positive mode discrepancy (Mean -0.09 vs Median -0.01) indicates skewness
+in dynamic range. Negative mode shows consistent ~9% bias after
+normalization.
+
+Conclusion: Agilent Q-TOF generations (6546 vs 6545) can be compared for
+trends (high ICC) but need non-linear correction for absolute quantitation.
+
+Afekta (6546) has flatter distribution (smaller median-max difference).
+Cembio (6545) has spikier distribution (larger difference).
+
+**6545 (Cembio)**: "Swarm Autotune" optics; optimized for resolution &
+sensitivity to small molecules.
+
+**6546 (Afekta)**: "Simultaneous Dynamic Range"; sees bright AND dim
+signals without saturation.
+
+Why higher TIC in Afekta? 6546 has massive dynamic range (5 orders).
+It captures low-level ions ("grass") and high-level ions ("trees"), seeing
+more total biological signal.
+
+Why higher ratio in Cembio? Ratio = Height / Area. Afekta's huge TIC
+(wide dynamic range) makes denominator large, shrinking ratio. Cembio's
+cleaner baseline (less background sensitivity) has lower TIC, inflating
+the ratio.
+
+"The systematic difference between the two Agilent labs can be attributed
+to the specific architectural goals of the instrument generations. The
+Agilent 6546 (Afekta) prioritizes wide dynamic range, resulting in higher
+integrated TIC (due to enhanced detection of low-abundance background
+ions).
+
+In contrast, the Agilent 6545 (Cembio), utilizing 'Swarm Autotune'
+optics, produces a 'cleaner' spectral profile with a higher BPC/TIC
+ratio—not necessarily because the peaks are sharper, but because the total
+integrated current (TIC) is lower due to reduced dynamic range coverage
+compared to the 6546."
+
+Summary table:
+| Metric   | Pattern           | Explanation |
+|----------|-------------------|---------------------------------------------|
+| TIC_norm | Afekta Higher     | 6546 superior dynamic range; integrates |
+|          |                   | more low-abundance signals |
+| BPC_norm | Cembio Higher     | 6545 distribution more top-heavy; peaks |
+|          |                   | appear taller after normalization |
+| Ratio    | Cembio Higher     | 6545 misses background; lower TIC |
+|          |                   | denominator inflates ratio |
+
+### Testing the ionization preference idea
+
+For this we will run a spearman analysis, which will rank the compound 
+intensities and see how well the ranks are preserved across labs.
+
+```{r}
+## detected data for each lab:
+pt_afekta <- read.csv(file.path(
+  base_path,
+  "object/detected_peaks_afekta_HE.csv"
+))
+pt_hmgu <- read.csv(file.path(base_path, "object/detected_peaks_hmgu_HE.csv"))
+pt_icl <- read.csv(file.path(base_path, "object/detected_peaks_icl_HE.csv"))
+pt_cembio <- read.csv(file.path(
+  base_path,
+  "object/detected_peaks_cembio_HE.csv"
+))b
+lab_counts <- c(
+  afekta = nrow(pt_afekta),
+  hmgu = nrow(pt_hmgu),
+  icl = nrow(pt_icl),
+  cembio = nrow(pt_cembio)
+)
+barplot(
+  lab_counts,
+  main = "Number of detected peaks per lab",
+  ylab = "Number of detected peaks",
+  xlab = "Labs",
+  col = "steelblue"
+)
+## load consensus table: peaks that are present in each 4 labs.
+ct_filtered <- read.csv(file.path(base_path, "object/ct_filtered4.csv"))
+## i need to intyensity values for each lab
+#whic can be found for each peaks here:
+## but what should the table looks like exaclty.
+## It should have columns for consensus_id, sample, intensity for each lab, 
+## and RT for each lab.
+## Create a named vector for counts.
+lab_counts <- c(
+  afekta = nrow(pt_afekta),
+  icl = nrow(pt_icl),
+  hmgu = nrow(pt_hmgu), # Replace with nrow(pt_hmgu) when available
+  cembio = nrow(pt_cembio) # Replace with nrow(pt_cembio) when available
+)
+# Plot
+barplot(
+  lab_counts,
+  main = "Number of detected peaks per lab",
+  ylab = "Number of detected peaks",
+  xlab = "Labs",
+  col = "steelblue",
+  ylim = c(0, max(lab_counts) * 1.2) # Add some space at the top
+)
+
+# We join the consensus table with each lab's peak table.
+# We match the specific 'chrom_peak_id' from the consensus table
+# to the 'chrom_peak_id' in the lab's file to get the 'intb' (intensity) and 'rt' (retention time).
+intensity_table <- ct_filtered %>%
+  select(
+    consensus_id,
+    sample,
+    idx_afekta,
+    chrom_peak_id_afekta,
+    chrom_peak_id_icl,
+    chrom_peak_id_hmgu,
+    chrom_peak_id_cembio
+  ) %>%
+
+  # Join Afekta Intensity and RT
+  left_join(
+    pt_afekta %>% select(chrom_peak_id, intb, rt),
+    by = c("chrom_peak_id_afekta" = "chrom_peak_id")
+  ) %>%
+  rename(intensity_afekta = intb, rt_afekta = rt) %>%
+
+  # Join ICL Intensity and RT
+  left_join(
+    pt_icl %>% select(chrom_peak_id, intb, rt),
+    by = c("chrom_peak_id_icl" = "chrom_peak_id")
+  ) %>%
+  rename(intensity_icl = intb, rt_icl = rt) %>%
+
+  # Join HMGU Intensity and RT
+  left_join(
+    pt_hmgu %>% select(chrom_peak_id, intb, rt),
+    by = c("chrom_peak_id_hmgu" = "chrom_peak_id")
+  ) %>%
+  rename(intensity_hmgu = intb, rt_hmgu = rt) %>%
+
+  # Join CEMBIO Intensity and RT
+  left_join(
+    pt_cembio %>% select(chrom_peak_id, intb, rt),
+    by = c("chrom_peak_id_cembio" = "chrom_peak_id")
+  ) %>%
+  rename(intensity_cembio = intb, rt_cembio = rt)
+
+# Preview the table structure you asked about
+print("Intensity and RT Table Preview:")
+print(head(
+  intensity_table %>%
+    select(consensus_id, sample, starts_with("intensity"), starts_with("rt"))
+))
+```
+
+```{r}
+# Select only the intensity columns for correlation
+intensity_matrix <- intensity_table %>%
+  select(starts_with("intensity"))
+
+# Calculate Spearman correlation
+# use="pairwise.complete.obs" handles missing values (NAs) by ignoring them
+cor_results <- cor(
+  intensity_matrix,
+  method = "spearman",
+  use = "pairwise.complete.obs"
+)
+
+print("Spearman Correlation Matrix:")
+print(cor_results)
+```
+
+Check this using Spearman correlation between raw data of each lab.
+Approach:
+- Analyze mixture by mixture
+- Use common peaks across all labs to assess ionization preference
+- Use Spearman to check if rank order of intensities preserved
+- Answer: Which labs prioritize certain ionization pathways?
+
+This would explain some ICC differences observed above.
+
+Different labs 
+
+It seems that againcembio and afekta are the most similar, with a spearman
+correlation of 0.77. and hmgu has the lowest correlation with all the labs
+
+
+
+## Retention time analysis and biological differences
+
+How do the labs agree?
+
+First, check if raw data is appropriate for this analysis. Compare global
+vs local normalization.
+
+Median scaling using the overall median: What fraction of total metabolic
+payload elutes in Q1 vs Q2? This preserves quartile relationships and tests
+if labs agree on gradient "shape." This only works if metabolite
+distribution is similar across gradient—check this below.
+
+Raw data check: Look at instrument sensitivity profile.
+- Flat line: global normalization fine
+- Sloped line: local normalization needed
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# Define helpers for polarity iteration
+run_for_polarities <- function(fn, data_level = NULL) {
+  pos_result <- fn(1L, "Positive", data_level)
+  neg_result <- fn(0L, "Negative", data_level)
+  bind_rows(pos_result, neg_result)
+}
+
+run_for_polarities_simple <- function(fn) {
+  pos_result <- fn(1L)
+  neg_result <- fn(0L)
+  bind_rows(pos_result, neg_result)
+}
+
+compute_consortium_sensitivity <- function(polarity) {
+
+  # 1. Load Data (All Labs)
+  load(file.path(base_path, "object/tic_detect.RData"))
+  tic_data <- tic_detect[tic_detect$polarity == polarity]
+
+  # 2. Define Breaks
+  all_rts <- unlist(rtime(tic_data))
+  breaks <- quantile(all_rts, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = TRUE)
+
+  # 3. Compute Raw Sums per Quartile per Lab
+  raw_stats <- t(vapply(seq_along(tic_data), function(i) {
+      rt <- rtime(tic_data[i])[[1]]
+      int <- intensity(tic_data[i])[[1]]
+
+      c(sum(int[rt >= breaks[1] & rt < breaks[2]], na.rm=TRUE),
+        sum(int[rt >= breaks[2] & rt < breaks[3]], na.rm=TRUE),
+        sum(int[rt >= breaks[3] & rt < breaks[4]], na.rm=TRUE),
+        sum(int[rt >= breaks[4] & rt <= breaks[5]], na.rm=TRUE))
+  }, numeric(4)))
+
+  df <- data.frame(lab = tic_data$lab,
+                   Q1 = raw_stats[,1], Q2 = raw_stats[,2],
+                   Q3 = raw_stats[,3], Q4 = raw_stats[,4])
+
+  # 4. Calculate Deviation from Consortium Median
+  # First, get the "Grand Median" for each quartile across ALL labs
+  grand_medians <- df %>%
+    summarise(across(starts_with("Q"), median, na.rm = TRUE))
+
+  # Then normalize each lab to this grand median
+  sensitivity_profile <- df %>%
+    group_by(lab) %>%
+    summarise(across(starts_with("Q"), median, na.rm = TRUE)) %>%
+    pivot_longer(-lab, names_to = "Quartile", values_to = "Intensity") %>%
+    mutate(
+      # Log2 Ratio vs The Group Average
+      Consensus = case_when(
+        Quartile == "Q1" ~ grand_medians$Q1,
+        Quartile == "Q2" ~ grand_medians$Q2,
+        Quartile == "Q3" ~ grand_medians$Q3,
+        Quartile == "Q4" ~ grand_medians$Q4
+      ),
+      Log2_Deviation = log2(Intensity / Consensus),
+      Polarity = ifelse(polarity == 1, "Positive", "Negative")
+    )
+
+  return(sensitivity_profile)
+}
+
+# Compute sensitivity profiles for both polarities
+all_profiles <- run_for_polarities_simple(compute_consortium_sensitivity)
+```
+
+```{r}
+# 5. Plot
+ggplot(all_profiles, aes(x = Quartile, y = Log2_Deviation, group = lab, color = lab)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  facet_wrap(~Polarity) +
+  labs(
+    title = "Justification for Local Normalization",
+    subtitle = "Lab sensitivity varies by retention time (Slopes = Non-linear Bias)",
+    y = "Log2 Deviation from Consortium Median",
+    x = NULL
+  ) +
+  theme_minimal()
+```
+
+Sensitivity slopes are non-linear: ICL shows progressive loss from Q1
+(+0.23) to Q4 (-0.78); Agilents show inverse trend. Cembio exhibits
+distinct hyper-sensitivity to lipids in Q3 (+1.55 log deviation). These
+retention-time-specific biases cannot be corrected with global
+normalization. Solution: Apply Local Median Normalization, computing
+scaling factors independently for each RT quartile.
+
+**Local Normalization Analysis**
+
+Distribution of biological signal (TIC and BPC) across RT quartiles:
+
+```{r}
+# Compute quartiles for linear model analysis (Detected Signal - Biological)
+compute_rt_quartiles_biological <- function(polarity, polarity_name) {
+
+  # 1. Load Data (Use Detected Signal as it's the harmonized standard)
+  load(file.path(base_path, "object/tic_detect.RData"))
+  tic_data <- tic_detect[tic_detect$polarity == polarity]
+
+  load(file.path(base_path, "object/bpc_detect.RData"))
+  bpc_data <- bpc_detect[bpc_detect$polarity == polarity]
+
+  # 2. Compute median TIC for each lab for normalization
+  tic_medians <- data.frame(
+    lab = tic_data$lab,
+    tic_total = vapply(intensity(tic_data), sum, numeric(1), na.rm = TRUE)
+  ) %>%
+    group_by(lab) %>%
+    summarise(median_tic = median(tic_total, na.rm = TRUE), .groups = "drop")
+
+  # 3. Compute median BPC for each lab for normalization
+  bpc_medians <- data.frame(
+    lab = bpc_data$lab,
+    bpc_total = vapply(intensity(bpc_data), sum, numeric(1), na.rm = TRUE)
+  ) %>%
+    group_by(lab) %>%
+    summarise(median_bpc = median(bpc_total, na.rm = TRUE), .groups = "drop")
+
+  # 4. Determine GLOBAL Fixed Breaks (Average RT across all labs)
+  all_rts <- unlist(rtime(tic_data))
+  if(length(all_rts) == 0) return(NULL)
+
+  # Global quartiles: 0-25%, 25-50%, etc. of the total run time
+  global_breaks <- quantile(all_rts, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = TRUE)
+
+  # Helper: Compute normalized quartile sums for a metric
+  compute_quartile_sums <- function(intensity_vec, rt_vec, breaks, lab_median) {
+    vapply(1:4, function(q) {
+      lower <- breaks[q]
+      upper <- breaks[q + 1]
+      sum(intensity_vec[rt_vec >= lower & rt_vec < upper], na.rm = TRUE) / lab_median
+    }, numeric(1))
+  }
+
+  # Helper to compute normalized fractions in fixed windows
+  compute_window_stats <- function(tic_chr, bpc_chr, breaks, lab_name,
+                                   tic_medians_df, bpc_medians_df) {
+    # Extract RT and intensity
+    rt <- rtime(tic_chr)[[1]]
+    int_tic <- intensity(tic_chr)[[1]]
+    int_bpc <- intensity(bpc_chr)[[1]]
+
+    # Get lab-specific medians
+    lab_tic_median <- tic_medians_df$median_tic[tic_medians_df$lab == lab_name]
+    lab_bpc_median <- bpc_medians_df$median_bpc[bpc_medians_df$lab == lab_name]
+
+    # Compute normalized quartile sums
+    tic_quartiles <- compute_quartile_sums(int_tic, rt, breaks, lab_tic_median)
+    bpc_quartiles <- compute_quartile_sums(int_bpc, rt, breaks, lab_bpc_median)
+
+    return(c(tic_quartiles, bpc_quartiles))
+  }
+
+  # Apply to all samples
+  stats <- t(vapply(seq_along(tic_data), function(i) {
+    compute_window_stats(tic_data[i], bpc_data[i], global_breaks,
+                        tic_data$lab[i], tic_medians, bpc_medians)
+  }, numeric(8)))
+
+  colnames(stats) <- c(
+    paste0("TIC_Frac_Q", 1:4),
+    paste0("BPC_Frac_Q", 1:4)
+  )
+
+  result <- data.frame(
+    lab = tic_data$lab,
+    mixture = tic_data$mixture,
+    polarity = polarity_name,
+    stats
+  )
+
+  return(result)
+}
+
+# Compute biological quartile distributions for both polarities
+bio_combined_quartiles <- run_for_polarities_names(compute_rt_quartiles_biological)
+
+# Function to get Variance stats from LM
+get_variance <- function(data, value_col) {
+  # Log2 transform to handle intensity scale
+  f <- as.formula(paste0("log2(", value_col, ") ~ lab + mixture"))
+  an <- anova(lm(f, data = data))
+
+  ss_total <- sum(an[, "Sum Sq"])
+  return(data.frame(
+    Mixture_Var = (an["mixture", "Sum Sq"] / ss_total) * 100,
+    Lab_Var     = (an["lab", "Sum Sq"] / ss_total) * 100
+  ))
+}
+
+# Run linear models on quartile data
+quartile_results <- data.frame()
+
+for (pol in c("Positive", "Negative")) {
+  data_subset <- bio_combined_quartiles %>% filter(polarity == pol)
+
+  # Analyze each TIC quartile
+  for (q in 1:4) {
+    col_name <- paste0("TIC_Frac_Q", q)
+    var_result <- get_variance(data_subset, col_name)
+
+    quartile_results <- rbind(quartile_results, data.frame(
+      Polarity = pol,
+      Metric = col_name,
+      Mixture_Var = var_result$Mixture_Var,
+      Lab_Var = var_result$Lab_Var
+    ))
+  }
+
+  # Analyze each BPC quartile
+  for (q in 1:4) {
+    col_name <- paste0("BPC_Frac_Q", q)
+    var_result <- get_variance(data_subset, col_name)
+
+    quartile_results <- rbind(quartile_results, data.frame(
+      Polarity = pol,
+      Metric = col_name,
+      Mixture_Var = var_result$Mixture_Var,
+      Lab_Var = var_result$Lab_Var
+    ))
+  }
+}
+
+quartile_results
+```
+
+```{r}
+# Helper: Create and plot quartile variance distribution
+plot_quartile_variance <- function(data, metric_type = "TIC") {
+  quartile_map <- c(
+    "Q1" = "Q1 (Polar)",
+    "Q2" = "Q2 (Semi-polar)",
+    "Q3" = "Q3 (Lipids)",
+    "Q4" = "Q4 (Wash)"
+  )
+
+  plot_data <- data %>%
+    mutate(Residual_Var = 100 - (Mixture_Var + Lab_Var)) %>%
+    filter(grepl(metric_type, Metric)) %>%
+    mutate(
+      Quartile = case_when(
+        grepl("Q1", Metric) ~ quartile_map["Q1"],
+        grepl("Q2", Metric) ~ quartile_map["Q2"],
+        grepl("Q3", Metric) ~ quartile_map["Q3"],
+        grepl("Q4", Metric) ~ quartile_map["Q4"]
+      )
+    ) %>%
+    pivot_longer(cols = c(Mixture_Var, Lab_Var, Residual_Var),
+                 names_to = "Source", values_to = "Variance") %>%
+    mutate(Source = factor(Source,
+                          levels = c("Residual_Var", "Lab_Var", "Mixture_Var"),
+                          labels = c("Unexplained (Noise)", "Laboratory Bias", "Mixture (Biology)")))
+
+  ggplot(plot_data, aes(x = Quartile, y = Variance, fill = Source)) +
+    geom_col(width = 0.7, color = "white") +
+    facet_wrap(~Polarity) +
+    scale_fill_manual(values = c("gray85", "#E7B800", "#00AFBB")) +
+    labs(
+      title = paste(metric_type, "Distribution Across Retention Time Quartiles"),
+      y = "Variance Contribution (%)",
+      x = NULL
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "top",
+      panel.grid.major.x = element_blank()
+    )
+}
+
+# Plot both metrics
+print(plot_quartile_variance(quartile_results, "TIC"))
+print(plot_quartile_variance(quartile_results, "BPC"))
+```
+
+Local normalization by RT quartile reveals instrument-specific biases
+in Q3/Q4 (30–50% residual lab variance). Hydrophobic compounds show
+irreducible differences in selectivity and dynamic range that median
+scaling cannot eliminate. 
+
+### ionization preference accross rt 
+
+Now that we showed that quartile varied highly in lab variance, we can check if
+the ionization preference is also varying across rt quartile.
+
+I want to quartile to be defined on the same axis as before (so using the total 
+data run), so I will use the same function as before to compute the quartile
+ breaks, and pool the peaks (in table within these.
+
+```{r}
+## create quartile boundaries using the total data rt (TICobject) 
+
+## pull the peaks from the intensity_table into these quartiles. there is a rt 
+## for each peak so you can use that.😂
+
+# Load TIC data to get global RT breaks
+load(file.path(base_path, "object/tic_full.RData"))
+tic_detected <- tic_full[tic_full$polarity == 1L]  # Start with positive mode
+
+# Get all RT values from detected signal
+all_rts <- unlist(rtime(tic_detected))
+global_breaks <- quantile(all_rts, probs = c(0, 0.25, 0.5, 0.75, 1), 
+    na.rm = TRUE)
+# Assign quartiles to peaks based on their RT
+intensity_table <- intensity_table %>%
+  mutate(
+    # Use mean of available RTs across labs to assign quartile
+    mean_rt = rowMeans(select(., starts_with("rt_")), na.rm = TRUE),
+    quartile = case_when(
+      mean_rt >= global_breaks[1] & mean_rt < global_breaks[2] ~ "Q1",
+      mean_rt >= global_breaks[2] & mean_rt < global_breaks[3] ~ "Q2",
+      mean_rt >= global_breaks[3] & mean_rt < global_breaks[4] ~ "Q3",
+      mean_rt >= global_breaks[4] & mean_rt <= global_breaks[5] ~ "Q4",
+      TRUE ~ NA_character_
+    )
+  )
+
+# Check quartile distribution
+cat("Quartile Breaks (min, Q1, Q2, Q3, max):\n")
+print(round(global_breaks, 2))
+cat("\nPeaks per quartile:\n")
+print(table(intensity_table$quartile, useNA = "ifany"))
+```
+
+
+```{r}
+# Perform Spearman correlation analysis of intensity values across labs within each quartile
+quartile_correlations <- intensity_table %>%
+  filter(!is.na(quartile)) %>%
+  select(consensus_id, quartile, starts_with("intensity_")) %>%
+  group_by(quartile) %>%
+  summarise(
+    n_peaks = n(),
+    spearman_cor_afekta_icl = cor(intensity_afekta, intensity_icl, 
+     method = "spearman", use = "pairwise.complete.obs"),
+    spearman_cor_afekta_hmgu = cor(intensity_afekta, intensity_hmgu,
+     method = "spearman", use = "pairwise.complete.obs"),
+    spearman_cor_afekta_cembio = cor(intensity_afekta, intensity_cembio, 
+     method = "spearman", use = "pairwise.complete.obs"),
+    spearman_cor_icl_hmgu = cor(intensity_icl, intensity_hmgu, 
+     method = "spearman", use = "pairwise.complete.obs"),
+    spearman_cor_icl_cembio = cor(intensity_icl, intensity_cembio, 
+     method = "spearman", use = "pairwise.complete.obs"),
+    spearman_cor_hmgu_cembio = cor(intensity_hmgu, intensity_cembio, 
+     method = "spearman", use = "pairwise.complete.obs"),
+    .groups = "drop"
+  )
+
+print(quartile_correlations)
+```
+
+
+Notes: i need to check because i see an NA in one of the row. i think i should 
+recalculate the nlab myself in the other script.
+also i think this tells me that i should normalize by quartile and redo the
+global analysis.
+
+
+## Summary
+This analysis assessed LC-MS reproducibility across 4 laboratories
+analyzing 38 standard mixtures. Key findings:
+
+1. **Peak detection improves reproducibility**: Detected signal ICC >0.5
+   vs full signal ICC <0.1. Isolating compound signal from baseline noise
+   is essential.
+
+2. **Same-platform instruments agree better**: Agilent Q-TOF labs
+   (Afekta, Cembio) show ICC 0.83–0.92; different platforms show lower
+   agreement. Suggests instrument design dominates variability.
+
+3. **Normalization strategy matters**: Median normalization improves ICC
+   from 0.05 to 0.55; volume normalization increases differences.
+   Naturally normalized metrics (ratios, percentages) are more stable
+   across labs.
+
+4. **Negative mode bias**: ~9% systematic bias persists after
+   normalization, indicating fundamental ionization differences.
+
+5. **Local normalization**: RT-quartile-specific normalization handles
+   non-linear instrument sensitivity, improving biological signal
+   detection in hydrophobic regions (Q3).
+
+## Future Directions
+
+- Incorporate MsQuality metrics (peak count, baseline intensity, rtIqrChromatograms)
+- Expand to additional chemical classes
+- Test in-house vs. commercial reverse-phase columns within same lab
+- Validate findings on new mixture sets
+
+## Appendix: Technical Notes
+
+Volume normalization increased differences; platform-independent
+intensity scaling is ineffective. Median scaling is preferred. Naturally
+normalized metrics (sensitivity, ratios) remain stable across labs.
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(patchwork) # For side-by-side plots
+
+# 1. Prepare Data
+check_data <- metrics_combined %>%
+  filter(data_level == "Detected Signal") %>%
+  select(lab, polarity, tic, bpc, bpc_tic_ratio) %>%
+  mutate(
+    log_tic = log2(tic),
+    log_bpc = log2(bpc)
+  )
+
+# Test A: Ratio vs TIC (should be independent)
+p_tic <- ggplot(check_data, aes(x = log_tic, y = bpc_tic_ratio)) +
+  geom_point(aes(color = lab), alpha = 0.5, size = 1) +
+  geom_smooth(method = "lm", color = "black", linetype = "dashed") +
+  facet_wrap(~polarity) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(
+    title = "Test A: TIC vs Ratio",
+    subtitle = "Is efficiency affected by total load?",
+    x = "Log2 Total Intensity (TIC)",
+    y = "BPC/TIC Ratio"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Test B: Ratio vs BPC (expected high correlation)
+p_bpc <- ggplot(check_data, aes(x = log_bpc, y = bpc_tic_ratio)) +
+  geom_point(aes(color = lab), alpha = 0.5, size = 1) +
+  geom_smooth(method = "lm", color = "black", linetype = "dashed") +
+  facet_wrap(~polarity) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(
+    title = "Test B: BPC vs Ratio",
+    subtitle = "Is this just autocorrelation?",
+    x = "Log2 Max Intensity (BPC)",
+    y = "BPC/TIC Ratio"
+  ) +
+  theme_minimal()
+
+# Display plots side-by-side
+p_combined <- p_tic + p_bpc
+print(p_combined)
+
+# Compute correlations
+cor_stats <- check_data %>%
+  group_by(polarity, lab) %>%
+  summarise(
+    cor_with_TIC = cor(log_tic, bpc_tic_ratio, method = "spearman"),
+    cor_with_BPC = cor(log_bpc, bpc_tic_ratio, method = "spearman"),
+    .groups = "drop"
+  )
+
+print(cor_stats)
+```
+
+Lab-dependent correlations indicate the ratio cannot serve as a universal
+metric for cross-lab comparisons.
+
+
