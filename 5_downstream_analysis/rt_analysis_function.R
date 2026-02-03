@@ -1,3 +1,5 @@
+library(here)
+
 # Compute median BPC/TIC ratio per RT bin
 compute_bin_ratio <- function(rt, int_tic, int_bpc, n_bins = 30) {
   bins <- cut(rt, breaks = n_bins)
@@ -17,16 +19,14 @@ compute_bin_count <- function(rt, n_bins = 30) {
 #' @return spectra object
 load_data <- function(lab, study_group, return = "sp") {
   ## Load MS1 level data.
-  dr <- file.path("..", lab)
+  dr <- here::here("1_preprocessing", lab, study_group)
   mse <- readMsObject(
     XcmsExperiment(),
-    AlabasterParam(path = file.path(dr, "results", study_group, "mse")),
-    spectraPath = file.path(dr, "HE_mzml")
+    AlabasterParam(path = file.path(dr, "mse")),
+    spectraPath = file.path(dr, "mzml")
   )
-
   sampleData(mse)$mixture <- sub(".*_", "", sampleData(mse)$Sample.Name)
   sampleData(mse)$mixture <- gsub("\\.", "_", sampleData(mse)$mixture)
-
   spectra(mse)$lab <- lab
   spectra(mse)$mixture <- sampleData(mse)[
     match(spectra(mse)$dataOrigin, sampleData(mse)$spectraOrigin),
@@ -53,33 +53,46 @@ detect_signal <- function(
   lab = character(),
   bpparam
 ) {
-  ## lab should be character of length 1.
+
   a <- load_data(lab = lab, study_group = study_group, return = "mse")
-  dr <- file.path("..", lab)
+
   if (annotated) {
-    res <- read.csv(file.path(
+    res <- read.csv(here::here(
       "4_library_generation",
       lab,
       study_group,
       "ring_trial_library_HE.csv"
     ))
+
     cpks <- chromPeaks(a)[
-      res$X,
+      res$chrom_peak_id,
       c("rtmin", "rtmax", "mzmin", "mzmax", "sample")
     ]
   } else {
-    cpks <- chromPeaks(a)[, c("rtmin", "rtmax", "mzmin", "mzmax", "sample")]
+    cpks <- chromPeaks(a)[, c("rtmin", "rtmax", "mzmin", "mzmax", "rt", "mz", "sample", "into", "intb", "maxo")]  
+
+    ## need to map polarity information here
+    cpks <- as.data.frame(cpks)
+    cpks$polarity <- sampleData(a)$polarity[
+      match(cpks$sample, seq_len(nrow(sampleData(a))))
+    ]
+    cpks$mixture <- sampleData(a)$mixture[
+      match(cpks$sample, seq_len(nrow(sampleData(a))))
+    ]
+    cpks$chrom_peak_id <- row.names(cpks)
     write.csv(
-      as.data.frame(cpks),
-      file = file.path(
-        dr,
-        "results",
-        study_group,
-        "detected_chrom_peaks.csv"
+      cpks,
+      file = here::here(
+        "5_downstream_analysis",
+        "object",
+        paste0("detected_peaks_", lab, "_", study_group, ".csv")
       ),
       row.names = FALSE
     )
   }
+
+  # The rest of your processing code is logic-based (not path-based),
+  # so it remains exactly the same.
   spectra(a) <- setBackend(spectra(a), MsBackendMemory())
   cpk_split <- split(as.data.frame(cpks), cpks[, "sample"])
   cpk_split <- lapply(cpk_split, function(df) {
@@ -87,6 +100,7 @@ detect_signal <- function(
       c("rtmin", "rtmax", "mzmin", "mzmax")
     ])
   })
+
   bg <- bpmapply(
     FUN = function(s, pks) {
       s <- Spectra::filterPeaksRanges(
@@ -101,6 +115,7 @@ detect_signal <- function(
     cpk_split,
     BPPARAM = bpparam
   )
+
   bg_full <- concatenateSpectra(bg)
   bg_full <- filterEmptySpectra(bg_full)
   return(bg_full)
@@ -427,6 +442,18 @@ setMethod(
 #'
 #' @return A data frame where each row corresponds to an EIC and each column
 #'   is a calculated metric.
+#'
+#' @note add these below:
+#' Asymmetry factor - ratio of back half to front half width at 10% height (different from tailing at 5%)
+# Peak skewness - third moment of the peak distribution
+# Peak kurtosis - fourth moment (peakedness)
+# Rise time / Fall time - time from 10% to 90% height on each side
+# Modality - number of local maxima (detect shouldering)
+#' Peak area ratio - area above 50% max vs total area
+# # Front - to - back area ratio
+#  sn (signal-to-noise)
+# into / maxo ratio (integrated vs max intensity)
+
 calculatePeakMetrics <- function(df_list) {
   # Check for the 'pracma' package, needed for AUC calculation
   if (!requireNamespace("pracma", quietly = TRUE)) {

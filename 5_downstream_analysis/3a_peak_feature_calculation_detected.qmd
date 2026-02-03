@@ -1,0 +1,800 @@
+---
+title: "Peak Feature Calculation — Detected Peaks"
+format:
+  html:
+    toc: true
+execute:
+  dir: project
+---
+
+# Introduction
+
+This document performs peak feature calculation and analysis for the detected
+ion chromatograms (EICs). It reuses the processed detected EICs, computes peak
+metrics, and runs downstream comparisons and stability analyses.
+
+- Use all detected peaks form the beginning, in the chromData have info wether they are annotated
+  - only keep peaks overlapping the 4 labs to create a common feature set
+
+## Load libraries
+
+```{r library, include=TRUE, warning=FALSE, message=FALSE}
+library(Chromatograms)
+library(Spectra)
+library(xcms)
+library(MsIO)
+library(MsExperiment)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(rstatix)
+library(stringr)
+library(janitor)
+library(pheatmap)
+library(UpSetR)
+
+base_path <- file.path("5_downstream_analysis")
+source(file.path(base_path, "rt_analysis_function.R"))
+```
+
+# Load Detected EICs
+
+We are not computing the eic at the moment because that is justy TOO many peaks
+
+Before anything let's load all the detected peaks table. 
+
+The code of this part and the next one could be moved to the global analysis.
+could use peak count in some part of the global analysis.
+and moved the consensus table to do a spearman analysis.
+
+```{r}
+```
+
+# Create Consensus Peak Table Across Labs
+
+Below we will do a test analysis on mixture 1_1 (e.g. sample 1).
+
+```{r build-consensus-peaks}
+# the table will be generated on the cluster. and loaded below
+# the parameter used for mclosest are: ppm tol = 10 and rt tol = 10
+# 
+
+# Load all consensus_all_sample*.csv files (excluding _edge.csv files)
+consensus_dir <- file.path(base_path, "object/consensus_tables")
+consensus_files <- list.files(consensus_dir, pattern = "^consensus_all_sample[0-9]+\\.csv$", full.names = TRUE)
+
+ct_all_samples <- do.call(rbind, lapply(consensus_files, read.csv))
+rownames(ct_all_samples) <- NULL
+
+nrow(ct_all_samples) 
+```
+
+```{r}
+## split per lab 
+# match the total using the sample and chromPeak and add columns "into", "intb", "maxo" from the pt* of the respective lab
+```
+
+
+```{r}
+# Add detection flags to consensus_matches
+ct_all_samples <- ct_all_samples |>
+  mutate(
+    afekta_detected = !is.na(idx_afekta),
+    hmgu_detected = !is.na(idx_hmgu),
+    icl_detected = !is.na(idx_icl),
+    cembio_detected = !is.na(idx_cembio)
+  )
+
+cat(
+  "Peaks matched in consensus (before filtering):",
+  nrow(ct_all_samples),
+  "\n\n"
+)
+cat("Peak counts by number of labs detected:\n")
+print(table(ct_all_samples$n_labs_matched))
+```
+
+```{r}
+lapply(split(ct_all_samples, ct_all_samples$sample), function(df) {
+  print(paste("Sample:", unique(df$sample)))
+  table(df$n_labs_matched)
+}) ## would be nice to plot this properly. 
+```
+
+Look slike the nlab is fixed.
+
+## Upset Plot - Lab Overlap
+
+```{r upset-plot, message = FALSE, warning = FALSE}
+# Prepare binary matrix for upset plot
+upset_data <- ct_all_samples |>
+  select(afekta_detected, hmgu_detected, icl_detected, cembio_detected) |>
+  mutate(
+    afekta = as.integer(afekta_detected),
+    hmgu = as.integer(hmgu_detected),
+    icl = as.integer(icl_detected),
+    cembio = as.integer(cembio_detected)
+  ) |>
+  select(afekta, hmgu, icl, cembio)
+
+# Convert to data frame with rownames for upset function
+upset_data_df <- as.data.frame(upset_data)
+rownames(upset_data_df) <- paste0("peak_", seq_len(nrow(upset_data_df)))
+
+# Only plot intersections with at least 1 peak (exclude empty combinations)
+upset(upset_data_df,
+      sets = c("afekta", "hmgu", "icl", "cembio"),
+      main.bar.color = "steelblue",
+      sets.bar.color = "darkred",
+      text.scale = c(3,3, 3, 3, 3, 3), # reduce size of font for set size and number above bars
+      point.size = 4,
+      line.size = 1.2) ## need to fix set size 
+```
+
+## Pairwise Lab Comparisons
+
+```{r pairwise-overlap}
+# Create pairwise overlap summary
+labs <- c("afekta", "hmgu", "icl", "cembio")
+pairwise_summary <- data.frame()
+
+for (i in seq_along(labs)) {
+  for (j in seq_along(labs)) {
+    if (i < j) {
+      lab1 <- labs[i]
+      lab2 <- labs[j]
+
+      col1 <- paste0(lab1, "_detected")
+      col2 <- paste0(lab2, "_detected")
+
+      both <- sum(ct_all_samples[[col1]] & ct_all_samples[[col2]])
+      only_lab1 <- sum(ct_all_samples[[col1]] & !ct_all_samples[[col2]])
+      only_lab2 <- sum(!ct_all_samples[[col1]] & ct_all_samples[[col2]])
+
+      total_lab1 <- sum(ct_all_samples[[col1]])
+      total_lab2 <- sum(ct_all_samples[[col2]])
+      
+      pairwise_summary <- rbind(pairwise_summary, data.frame(
+        lab1 = lab1,
+        lab2 = lab2,
+        both_detected = both,
+        only_lab1 = only_lab1,
+        only_lab2 = only_lab2,
+        total_lab1 = total_lab1,
+        total_lab2 = total_lab2,
+        jaccard_index = round(100 * both / (both + only_lab1 + only_lab2), 1),
+        overlap_percent_lab1 = round(100 * both / total_lab1, 1),
+        overlap_percent_lab2 = round(100 * both / total_lab2, 1)
+      ))
+    }
+  }
+}
+
+knitr::kable(pairwise_summary, caption = "Pairwise Lab Overlap - Detailed Metrics")
+```
+
+## Pairwise Overlap Visualization
+
+```{r pairwise-plot}
+# Reshape for visualization
+pairwise_long <- pairwise_summary |>
+  select(lab1, lab2, overlap_percent_lab1, overlap_percent_lab2) |>
+  pivot_longer(
+    cols = starts_with("overlap"),
+    names_to = "metric",
+    names_prefix = "overlap_percent_",
+    values_to = "percent"
+  ) |>
+  mutate(
+    pair = paste0(lab1, " ↔ ", lab2),
+    direction = case_when(
+      metric == "lab1" ~ paste0(lab1, " → ", lab2),
+      metric == "lab2" ~ paste0(lab2, " → ", lab1)
+    )
+  )
+
+# Heatmap-style plot
+ggplot(pairwise_long, aes(x = pair, y = direction, fill = percent)) +
+  geom_tile(color = "white", size = 1) +
+  geom_text(aes(label = paste0(percent, "%")), size = 3, color = "black") +
+  scale_fill_gradient(low = "#fee5d9", high = "#a1d99b", limits = c(0, 100), name = "Overlap %") +
+  labs(
+    title = "Pairwise Peak Overlap Between Labs",
+    subtitle = "Shows % of peaks from each lab found in the other lab",
+    x = "Lab Pair",
+    y = "Direction"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank()
+  )
+
+# Bar plot comparing overlaps
+ggplot(pairwise_long, aes(x = direction, y = percent, fill = metric)) +
+  geom_col(position = "dodge", alpha = 0.8) +
+  facet_wrap(~pair, scales = "free_x", nrow = 2) +
+  labs(
+    title = "Asymmetric Pairwise Overlaps",
+    subtitle = "Shows directional recovery: % of one lab's peaks detected in the other",
+    x = "Direction",
+    y = "Overlap %",
+    fill = "Reference Lab"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "top"
+  ) +
+  ylim(0, 100)
+```
+
+As expected, afekta and cembio have the highest overlap.
+
+
+Could remove column 3:6 in table above
+Below decide on the threshold to study a peak. 
+we could go with 4
+
+```{r}
+thres <- 4
+
+ct_filtered <- ct_all_samples |>
+  filter(n_labs_matched == 4)
+
+cat("Consensus peaks retained:", nrow(ct_filtered), "\n")
+cat(
+  "Percentage of detected peaks:",
+  round(100 * nrow(ct_filtered) / nrow(ct_all_samples), 1),
+  "%\n"
+)
+```
+
+Build the final consensus peak table with chrom_peak_id mapping:
+Save the consensus table for downstream analysis:
+
+```{r save-consensus}
+write.csv(
+  ct_all_samples,
+  file = file.path(base_path, "object/ct_all_samples.csv"),
+  row.names = FALSE
+)
+write.csv(
+  ct_filtered,
+  file = file.path(base_path, "object/ct_filtered4.csv"),
+  row.names = FALSE
+)
+```
+
+## Summary Tables
+
+### Overlap: Cembio vs Afekta
+
+```{r cembio-afekta-overlap}
+cembio_afekta_summary <- data.frame(
+  category = c("Both detected", "Only afekta", "Only cembio", "Neither"),
+  count = c(
+    sum(ct_2samples$afekta_detected & ct_2samples$cembio_detected),
+    sum(ct_2samples$afekta_detected & !ct_2samples$cembio_detected),
+    sum(!ct_2samples$afekta_detected & ct_2samples$cembio_detected),
+    sum(!ct_2samples$afekta_detected & !ct_2samples$cembio_detected)
+  )
+)
+
+cembio_afekta_summary <- cembio_afekta_summary |>
+  mutate(percent = round(100 * count / sum(count), 1))
+
+knitr::kable(cembio_afekta_summary,
+             caption = "Peak Overlap: Cembio vs Afekta")
+```
+
+so we could look at 2526 detected peaks ( for 2 mixture), that's really nice. 
+
+### Overlap: All 4 Labs
+
+```{r all-labs-overlap}
+all_labs_summary <- data.frame(
+  detection_pattern = character(),
+  n_peaks = integer(),
+  percent = numeric()
+)
+
+for (combo in 0:15) {
+  afekta <- as.logical(bitwAnd(combo, 1))
+  hmgu <- as.logical(bitwAnd(combo, 2))
+  icl <- as.logical(bitwAnd(combo, 4))
+  cembio <- as.logical(bitwAnd(combo, 8))
+
+  n <- sum(
+    ct_2samples$afekta_detected == afekta &
+    ct_2samples$hmgu_detected == hmgu &
+    ct_2samples$icl_detected == icl &
+    ct_2samples$cembio_detected == cembio
+  )
+
+  if (n > 0) {
+    pattern <- paste0(
+      if_else(afekta, "A", "-"),
+      if_else(hmgu, "H", "-"),
+      if_else(icl, "I", "-"),
+      if_else(cembio, "C", "-")
+    )
+
+    all_labs_summary <- rbind(all_labs_summary, data.frame(
+      detection_pattern = pattern,
+      n_peaks = n,
+      percent = round(100 * n / nrow(consensus_matches_1), 1)
+    ))
+  }
+}
+
+all_labs_summary <- all_labs_summary |>
+  arrange(desc(n_peaks))
+
+knitr::kable(all_labs_summary,
+             caption = "Peak Detection Patterns: All 4 Labs (A=afekta, H=hmgu, I=icl, C=cembio)")
+```
+
+i think the code above could replace 2 code chunk above it. 
+
+# Peak Feature Summary by Lab (Detected)
+
+## Prepare subsets for downstream analysis
+
+```{r prepare-subsets}
+# Subset 1: Peaks present in BOTH cembio AND afekta
+cembio_afekta_both <- ct_all_samples |>
+  filter(afekta_detected & cembio_detected) ## keep the id for cembio and afekta
+
+cat("Peaks in both cembio & afekta:", nrow(cembio_afekta_both), "\n")
+
+# Subset 2: Peaks present in ALL 4 labs
+all_four_labs <- ct_all_samples |>
+  filter(afekta_detected & hmgu_detected & icl_detected & cembio_detected)
+
+cat("Peaks in all 4 labs:", nrow(all_four_labs), "\n")
+```
+
+All the part above could be cleaned up for redundancy.
+the afekta/cembio overlap is insane. 51000 peaks to analyze...
+
+# Creating eics
+## 4 labs
+
+when i have the full table i will need to add the "sample" info here. 
+```{r}
+pt <- all_four_labs |>
+  mutate(consensus_id = row_number()) |>
+  select(consensus_id, sample, chrom_peak_id_afekta, chrom_peak_id_hmgu, 
+  chrom_peak_id_icl, chrom_peak_id_cembio) |>
+  pivot_longer(
+    cols = c(chrom_peak_id_afekta, chrom_peak_id_hmgu, chrom_peak_id_icl, 
+    chrom_peak_id_cembio),
+    names_to = "lab",
+    names_prefix = "chrom_peak_id_",
+    values_to = "chrom_peak_id"
+  ) |>
+  filter(!is.na(chrom_peak_id))
+```
+
+Get mzmin, mzmax, rtmin, rtmax info from pt_* of each lab USING THE chrom_peak_id column of the peak.table and the lab column  T between the 2 table. probably need to do it sequnetially for eahc lab
+
+```{r}
+# Add mzmin, mzmax, rtmin, rtmax to peak.table by joining with each lab's pt_* table
+pt <- pt |>
+  mutate(
+    mzMin = case_when(
+      lab == "afekta" ~ pt_afekta$mzmin[match(
+        chrom_peak_id,
+        pt_afekta$chrom_peak_id
+      )],
+      lab == "hmgu" ~ pt_hmgu$mzmin[match(
+        chrom_peak_id,
+        pt_hmgu$chrom_peak_id
+      )],
+      lab == "icl" ~ pt_icl$mzmin[match(chrom_peak_id, pt_icl$chrom_peak_id)],
+      lab == "cembio" ~ pt_cembio$mzmin[match(
+        chrom_peak_id,
+        pt_cembio$chrom_peak_id
+      )]
+    ),
+    mzMax = case_when(
+      lab == "afekta" ~ pt_afekta$mzmax[match(
+        chrom_peak_id,
+        pt_afekta$chrom_peak_id
+      )],
+      lab == "hmgu" ~ pt_hmgu$mzmax[match(
+        chrom_peak_id,
+        pt_hmgu$chrom_peak_id
+      )],
+      lab == "icl" ~ pt_icl$mzmax[match(chrom_peak_id, pt_icl$chrom_peak_id)],
+      lab == "cembio" ~ pt_cembio$mzmax[match(
+        chrom_peak_id,
+        pt_cembio$chrom_peak_id
+      )]
+    ),
+    rtMin = case_when(
+      lab == "afekta" ~ pt_afekta$rtmin[match(
+        chrom_peak_id,
+        pt_afekta$chrom_peak_id
+      )],
+      lab == "hmgu" ~ pt_hmgu$rtmin[match(
+        chrom_peak_id,
+        pt_hmgu$chrom_peak_id
+      )],
+      lab == "icl" ~ pt_icl$rtmin[match(chrom_peak_id, pt_icl$chrom_peak_id)],
+      lab == "cembio" ~ pt_cembio$rtmin[match(
+        chrom_peak_id,
+        pt_cembio$chrom_peak_id
+      )]
+    ),
+    rtMax = case_when(
+      lab == "afekta" ~ pt_afekta$rtmax[match(
+        chrom_peak_id,
+        pt_afekta$chrom_peak_id
+      )],
+      lab == "hmgu" ~ pt_hmgu$rtmax[match(
+        chrom_peak_id,
+        pt_hmgu$chrom_peak_id
+      )],
+      lab == "icl" ~ pt_icl$rtmax[match(chrom_peak_id, pt_icl$chrom_peak_id)],
+      lab == "cembio" ~ pt_cembio$rtmax[match(
+        chrom_peak_id,
+        pt_cembio$chrom_peak_id
+      )]
+    ),
+    mz = case_when(
+      lab == "afekta" ~ pt_afekta$mz[match(
+        chrom_peak_id,
+        pt_afekta$chrom_peak_id
+      )],
+      lab == "hmgu" ~ pt_hmgu$mz[match(
+        chrom_peak_id,
+        pt_hmgu$chrom_peak_id
+      )],
+      lab == "icl" ~ pt_icl$mz[match(chrom_peak_id, pt_icl$chrom_peak_id)],
+      lab == "cembio" ~ pt_cembio$mz[match(
+        chrom_peak_id,
+        pt_cembio$chrom_peak_id
+      )]
+    ),
+    polarity = case_when(
+      lab == "afekta" ~ pt_afekta$polarity[match(
+        chrom_peak_id,
+        pt_afekta$chrom_peak_id
+      )],
+      lab == "hmgu" ~ pt_hmgu$polarity[match(
+        chrom_peak_id,
+        pt_hmgu$chrom_peak_id
+      )],
+      lab == "icl" ~ pt_icl$polarity[match(chrom_peak_id, pt_icl$chrom_peak_id)],
+      lab == "cembio" ~ pt_cembio$polarity[match(
+        chrom_peak_id,
+        pt_cembio$chrom_peak_id
+      )]
+    ), 
+    mixture = case_when(
+      lab == "afekta" ~ pt_afekta$mixture[match(
+        chrom_peak_id,
+        pt_afekta$chrom_peak_id
+      )],
+      lab == "hmgu" ~ pt_hmgu$mixture[match(
+        chrom_peak_id,
+        pt_hmgu$chrom_peak_id
+      )],
+      lab == "icl" ~ pt_icl$mixture[match(chrom_peak_id, pt_icl$chrom_peak_id)],
+      lab == "cembio" ~ pt_cembio$mixture[match(
+        chrom_peak_id,
+        pt_cembio$chrom_peak_id
+      )]
+    )
+    into = case_when(
+      lab == "afekta" ~ pt_afekta$into[match(
+        chrom_peak_id,
+        pt_afekta$chrom_peak_id
+      )],
+      lab == "hmgu" ~ pt_hmgu$into[match(
+        chrom_peak_id,
+        pt_hmgu$chrom_peak_id
+      )],
+      lab == "icl" ~ pt_icl$into[match(chrom_peak_id, pt_icl$chrom_peak_id)],
+      lab == "cembio" ~ pt_cembio$into[match(
+        chrom_peak_id,
+        pt_cembio$chrom_peak_id
+      )],
+    intb = case_when(
+      lab == "afekta" ~ pt_afekta$intb[match(
+        chrom_peak_id,
+        pt_afekta$chrom_peak_id
+      )],
+      lab == "hmgu" ~ pt_hmgu$intb[match(
+        chrom_peak_id,
+        pt_hmgu$chrom_peak_id
+      )],
+      lab == "icl" ~ pt_icl$intb[match(chrom_peak_id, pt_icl$chrom_peak_id)],
+      lab == "cembio" ~ pt_cembio$intb[match(
+        chrom_peak_id,
+        pt_cembio$chrom_peak_id
+      )],
+    maxo = case_when(
+      lab == "afekta" ~ pt_afekta$maxo[match(
+        chrom_peak_id,
+        pt_afekta$chrom_peak_id
+      )],
+      lab == "hmgu" ~ pt_hmgu$maxo[match(
+        chrom_peak_id,
+        pt_hmgu$chrom_peak_id
+      )],
+      lab == "icl" ~ pt_icl$maxo[match(chrom_peak_id, pt_icl$chrom_peak_id)],
+      lab == "cembio" ~ pt_cembio$maxo[match(
+        chrom_peak_id,
+        pt_cembio$chrom_peak_id
+      )]
+    )
+  )
+
+write.csv(
+  pt,
+  file = file.path(base_path, "object/peak_table_detected_all4labs.csv"),
+  row.names = FALSE
+#rename rtmin ot rtMin, .. and add/remove 5s to each rt size and 0.001 to each mz side
+
+pt <- pt |>
+  mutate(
+    rtMin = rtMin - 5,
+    rtMax = rtMax + 5,
+    mzMin = mzMin - 0.001,
+    mzMax = mzMax + 0.001
+  )
+
+pt$polarity[pt$sample %in% 1:19] <- 1L
+pt$polarity[pt$sample %in% 20:38] <- 0L
+pt 
+```
+
+
+
+
+```{r}
+library(Chromatograms)
+
+if (!exists("object/eics_detected_all4labs.RData")) {
+    load(file.path(base_path, "object/sp_full.RData"))
+    tic_full <- Chromatograms(sp_full, summarize.method = "sum",
+                       factorize.by= "dataOrigin",
+                       spectraVariables = c("mixture", "lab"))
+    eics <- chromExtract(tic_full, peak.table = pt, by = c("polarity", "mixture", "lab"))
+    nrow(pt) == length(eics)
+    eics <- setBackend(eics, ChromBackendMemory())
+    save(eics, file = file.path(base_path, "object/eics_detected_all4labs.RData"))
+} else {
+    load(file.path(base_path, "object/eics_detected_all4labs.RData"))
+}
+```
+
+
+```{r}
+plotChromatograms(eics[eics$consensus_id == 10],
+main= eics$lab[eics$consensus_id == 10]) #nb of datapoint change is quite high. 
+
+
+plotChromatograms(eics[eics$consensus_id == 1204],
+main= eics$lab[eics$consensus_id == 1204]) #a good example
+
+## ok there is something weird with the id 1000 
+peaksData(eics[eics$consensus_id == 1000]) ## ok something is weird. I need to 
+# check if maybe this was there before i move the data to mem. or its a 
+# splitting issue, anyway that is very weird.
+```
+
+Ok next do that on all the table and build a big object table. 
+but continue testing the metrics calculation just with 2 samples.
+
+
+# Downstream Peak Feature Analysis (Detected)
+
+## RT Stability - Cembio vs Afekta (Both Labs)
+
+```{r rt - stability - cembio - afekta}
+# Filter full_peak_report_detected to only cembio & afekta peaks that are in both labs
+
+cembio_afekta_peak_ids <- c(
+  cembio_afekta_both$afekta,
+  cembio_afekta_both$cembio
+)
+
+peak_report_cembio_afekta <- full_peak_report_detected |>
+  filter(chrom_peak_id %in% cembio_afekta_peak_ids)
+
+rt_report_ca <- peak_report_cembio_afekta |>
+  group_by(compound_name, mixture) |>
+  summarize(
+    mean_rt = mean(rt_apex, na.rm = TRUE),
+    sd_rt = sd(rt_apex, na.rm = TRUE),
+    cv_rt = sd_rt / mean_rt,
+    n_detect = n(),
+    .groups = "drop"
+  ) |>
+  arrange(desc(cv_rt))
+
+head(rt_report_ca, 10)
+
+ggplot(rt_report_ca, aes(x = cv_rt)) +
+  geom_histogram(bins = 30, fill = "steelblue", alpha = 0.8) +
+  labs(
+    title = "Distribution of Retention Time CVs (Cembio & Afekta)",
+    x = "CV of RT (per compound)",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+## Intensity Consistency - Cembio vs Afekta (Both Labs)
+
+```{r intensity-consistency-cembio-afekta}
+intensity_report_ca <- peak_report_cembio_afekta |>
+  group_by(compound_name, mixture) |>
+  summarize(
+    mean_auc = mean(auc, na.rm = TRUE),
+    sd_auc = sd(auc, na.rm = TRUE),
+    cv_auc = sd_auc / mean_auc,
+    mean_height = mean(apex_intensity, na.rm = TRUE),
+    sd_height = sd(apex_intensity, na.rm = TRUE),
+    cv_height = sd_height / mean_height,
+    n_detect = n(),
+    .groups = "drop"
+  ) |>
+  arrange(desc(cv_auc))
+
+head(intensity_report_ca, 10)
+
+ggplot(intensity_report_ca, aes(x = cv_auc)) +
+  geom_histogram(bins = 30, fill = "darkred", alpha = 0.8) +
+  labs(
+    title = "Distribution of Peak Area (AUC) CVs (Cembio & Afekta)",
+    x = "CV of AUC (per compound)",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+## RT Stability - All 4 Labs
+
+```{r rt-stability-all-four}
+# Filter full_peak_report_detected to only peaks present in all 4 labs
+
+all_four_peak_ids <- c(
+  all_four_labs$afekta,
+  all_four_labs$hmgu,
+  all_four_labs$icl,
+  all_four_labs$cembio
+)
+
+peak_report_all_four <- full_peak_report_detected |>
+  filter(chrom_peak_id %in% all_four_peak_ids)
+
+rt_report_all4 <- peak_report_all_four |>
+  group_by(compound_name, mixture) |>
+  summarize(
+    mean_rt = mean(rt_apex, na.rm = TRUE),
+    sd_rt = sd(rt_apex, na.rm = TRUE),
+    cv_rt = sd_rt / mean_rt,
+    n_detect = n(),
+    .groups = "drop"
+  ) |>
+  arrange(desc(cv_rt))
+
+head(rt_report_all4, 10)
+
+ggplot(rt_report_all4, aes(x = cv_rt)) +
+  geom_histogram(bins = 30, fill = "steelblue", alpha = 0.8) +
+  labs(
+    title = "Distribution of Retention Time CVs (All 4 Labs)",
+    x = "CV of RT (per compound)",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+## Intensity Consistency - All 4 Labs
+
+```{r intensity-consistency-all-four}
+intensity_report_all4 <- peak_report_all_four |>
+  group_by(compound_name, mixture) |>
+  summarize(
+    mean_auc = mean(auc, na.rm = TRUE),
+    sd_auc = sd(auc, na.rm = TRUE),
+    cv_auc = sd_auc / mean_auc,
+    mean_height = mean(apex_intensity, na.rm = TRUE),
+    sd_height = sd(apex_intensity, na.rm = TRUE),
+    cv_height = sd_height / mean_height,
+    n_detect = n(),
+    .groups = "drop"
+  ) |>
+  arrange(desc(cv_auc))
+
+head(intensity_report_all4, 10)
+
+ggplot(intensity_report_all4, aes(x = cv_auc)) +
+  geom_histogram(bins = 30, fill = "darkred", alpha = 0.8) +
+  labs(
+    title = "Distribution of Peak Area (AUC) CVs (All 4 Labs)",
+    x = "CV of AUC (per compound)",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+## Inter-Lab Statistical Comparison
+
+```{r fwhm-analysis}
+p1 <- ggviolin(full_peak_report_detected_meta, x = "lab", y = "fwhm", fill = "lab",
+         add = "boxplot", add.params = list(fill = "white")) +
+  geom_hline(yintercept = median(full_peak_report_detected_meta$fwhm), linetype = 2) +
+  labs(title = "Peak Width (FWHM) by Lab (Detected)", y = "FWHM (s)", x = "Laboratory") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+
+p1
+
+kw_res <- full_peak_report_detected_meta %>% kruskal_test(fwhm ~ lab)
+kw_res
+
+eff_res <- full_peak_report_detected_meta %>% kruskal_effsize(fwhm ~ lab)
+eff_res
+```
+
+## Hardware Impact
+
+```{r lc-impact}
+plot_data <- full_peak_report_detected_meta %>%
+  filter(!is.na(lc_instrument_clean))
+
+ggplot(plot_data, aes(x = lc_instrument_clean, y = fwhm, fill = lc_instrument_clean)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Impact of LC Instrument on Peak Width (Detected)", x = "LC System", y = "FWHM (s)") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Pastel1")
+```
+
+## PCA of Peak Features (Detected)
+
+```{r pca-analysis}
+pca_cols <- c("fwhm", "tailing_factor", "asymmetry", "entropy", "auc", "apex_intensity")
+pca_input <- full_peak_report_detected_meta[, pca_cols]
+
+pca_input$auc <- log10(pca_input$auc + 1)
+pca_input$apex_intensity <- log10(pca_input$apex_intensity + 1)
+pca_input <- na.omit(pca_input)
+
+pca_res <- prcomp(pca_input, center = TRUE, scale. = TRUE)
+
+pca_scores <- as.data.frame(pca_res$x)
+pca_scores$lab <- full_peak_report_detected_meta$lab[rownames(pca_input) %in% rownames(pca_scores)]
+pca_scores$lc_type <- full_peak_report_detected_meta$lc_instrument_clean[rownames(pca_input) %in% rownames(pca_scores)]
+pca_scores$mixture <- full_peak_report_detected_meta$mixture[rownames(pca_input) %in% rownames(pca_scores)]
+
+var_expl <- summary(pca_res)$importance[2, 1:2] * 100
+
+g1 <- ggplot(pca_scores, aes(x = PC1, y = PC2, color = lab)) +
+  geom_point(alpha = 0.7, size = 2) +
+  labs(title = "PCA: Colored by Lab (Detected)",
+       x = sprintf("PC1 (%.1f%%)", var_expl[1]),
+       y = sprintf("PC2 (%.1f%%)", var_expl[2])) +
+  theme_bw()
+
+g2 <- ggplot(pca_scores, aes(x = PC1, y = PC2, color = lc_type)) +
+  geom_point(alpha = 0.7, size = 2) +
+  labs(title = "PCA: Colored by LC System (Detected)",
+       x = sprintf("PC1 (%.1f%%)", var_expl[1]),
+       y = sprintf("PC2 (%.1f%%)", var_expl[2]),
+       color = "LC System") +
+  theme_bw()
+
+ggarrange(g1, g2, ncol = 2, common.legend = FALSE)
+```
+
+## Conclusions (Detected)
+
+Detected peak feature analysis complete. Results saved to `object/full_peak_report_detected.*`.

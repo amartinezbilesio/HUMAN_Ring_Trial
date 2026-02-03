@@ -136,6 +136,7 @@ test <- chromPeakSpectra(
 
 ```{r prepare-library}
 base_cols <- c(
+  "chrom_peak_id",
   "mz", "rt", "mzmin", "mzmax", "rtmin", "rtmax",
   "target_ChEBI.name", "target_ChEBI", "target_InChIKey", "target_formula",
   "adduct", "polarity", "ms2_true_count", "RTI", "mixture"
@@ -145,6 +146,7 @@ fin <- fin[, base_cols]
 fin$ms2_true_count <- as.logical(fin$ms2_true_count)
 
 standard_cols <- c(
+  "chrom_peak_id",
   "mz", "rt", "mzmin", "mzmax", "rtmin", "rtmax",
   "compound_name", "ChEBI", "InChIKey", "formula", "adduct",
   "polarity", "matched_to_library", "RTI", "mixture"
