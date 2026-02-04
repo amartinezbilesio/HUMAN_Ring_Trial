@@ -36,43 +36,50 @@ library(UpSetR)
 
 base_path <- file.path("5_downstream_analysis")
 source(file.path(base_path, "rt_analysis_function.R"))
+source(file.path("1_preprocessing/setup.R"))
 ```
 
-# Load Detected EICs
-
-We are not computing the eic at the moment because that is justy TOO many peaks
-
-Before anything let's load all the detected peaks table. 
-
-The code of this part and the next one could be moved to the global analysis.
-could use peak count in some part of the global analysis.
-and moved the consensus table to do a spearman analysis.
-
-```{r}
-```
 
 # Create Consensus Peak Table Across Labs
 
-Below we will do a test analysis on mixture 1_1 (e.g. sample 1).
+```{r}
+pt_afekta <- read.csv(file.path(
+  base_path,
+  "object/detected_peaks_afekta_HE.csv"
+))
+pt_hmgu <- read.csv(file.path(base_path, "object/detected_peaks_hmgu_HE.csv"))
+pt_icl <- read.csv(file.path(base_path, "object/detected_peaks_icl_HE.csv"))
+pt_cembio <- read.csv(file.path(
+  base_path,
+  "object/detected_peaks_cembio_HE.csv"
+))
+lab_counts <- c(
+  afekta = nrow(pt_afekta),
+  hmgu = nrow(pt_hmgu),
+  icl = nrow(pt_icl),
+  cembio = nrow(pt_cembio)
+)
+barplot(
+  lab_counts,
+  main = "Number of Detected Peaks per Lab",
+  ylab = "Number of detected peaks",
+  xlab = "Labs",
+  col = "steelblue"
+)
+```
 
 ```{r build-consensus-peaks}
 # the table will be generated on the cluster. and loaded below
 # the parameter used for mclosest are: ppm tol = 10 and rt tol = 10
-# 
-
 # Load all consensus_all_sample*.csv files (excluding _edge.csv files)
 consensus_dir <- file.path(base_path, "object/consensus_tables")
-consensus_files <- list.files(consensus_dir, pattern = "^consensus_all_sample[0-9]+\\.csv$", full.names = TRUE)
+consensus_files <- list.files(consensus_dir,
+ pattern = "^consensus_all_sample[0-9]+\\.csv$", full.names = TRUE)
 
 ct_all_samples <- do.call(rbind, lapply(consensus_files, read.csv))
 rownames(ct_all_samples) <- NULL
 
 nrow(ct_all_samples) 
-```
-
-```{r}
-## split per lab 
-# match the total using the sample and chromPeak and add columns "into", "intb", "maxo" from the pt* of the respective lab
 ```
 
 
@@ -86,23 +93,45 @@ ct_all_samples <- ct_all_samples |>
     cembio_detected = !is.na(idx_cembio)
   )
 
-cat(
-  "Peaks matched in consensus (before filtering):",
-  nrow(ct_all_samples),
-  "\n\n"
-)
 cat("Peak counts by number of labs detected:\n")
 print(table(ct_all_samples$n_labs_matched))
 ```
 
 ```{r}
-lapply(split(ct_all_samples, ct_all_samples$sample), function(df) {
-  print(paste("Sample:", unique(df$sample)))
-  table(df$n_labs_matched)
-}) ## would be nice to plot this properly. 
+# Replace mixture column from 1.1 to 1_1
+meta$mixture <- gsub("\\.", "_", meta$Mixture)
+nc_mix <- table(meta$mixture)
+# This shows the number of compounds per mixture.
+
+# Create mapping of sample to mixture name using pt_* data
+sample_to_mixture <- pt_afekta |>
+  select(sample, mixture) |>
+  distinct()
+
+# Below we can summarize the number of peaks detected per sample with compound count
+mixture_summary <- lapply(split(ct_all_samples, ct_all_samples$sample), function(df) {
+  sample_id <- unique(df$sample)
+  mixture_name <- sample_to_mixture$mixture[sample_to_mixture$sample == sample_id]
+  
+  res <- data.frame(
+    sample = sample_id,
+    mixture = mixture_name,
+    detected_4labs = sum(df$n_labs_matched == 4),
+    detected_3labs = sum(df$n_labs_matched == 3),
+    detected_2labs = sum(df$n_labs_matched == 2),
+    detected_1lab = sum(df$n_labs_matched == 1),
+    total_peaks = nrow(df),
+    n_compounds = as.integer(nc_mix[mixture_name])
+  )
+  res
+})
+
+mixture_summary_df <- do.call(rbind, mixture_summary)
+rownames(mixture_summary_df) <- NULL
+
+knitr::kable(mixture_summary_df, caption = "Peak Detection Summary by Mixture")
 ```
 
-Look slike the nlab is fixed.
 
 ## Upset Plot - Lab Overlap
 
@@ -127,9 +156,9 @@ upset(upset_data_df,
       sets = c("afekta", "hmgu", "icl", "cembio"),
       main.bar.color = "steelblue",
       sets.bar.color = "darkred",
-      text.scale = c(3,3, 3, 3, 3, 3), # reduce size of font for set size and number above bars
-      point.size = 4,
-      line.size = 1.2) ## need to fix set size 
+      text.scale = c(2, 2, 2, 1.5, 2, 2),
+      point.size = 3,
+      line.size = 1.2) 
 ```
 
 ## Pairwise Lab Comparisons
@@ -194,23 +223,6 @@ pairwise_long <- pairwise_summary |>
     )
   )
 
-# Heatmap-style plot
-ggplot(pairwise_long, aes(x = pair, y = direction, fill = percent)) +
-  geom_tile(color = "white", size = 1) +
-  geom_text(aes(label = paste0(percent, "%")), size = 3, color = "black") +
-  scale_fill_gradient(low = "#fee5d9", high = "#a1d99b", limits = c(0, 100), name = "Overlap %") +
-  labs(
-    title = "Pairwise Peak Overlap Between Labs",
-    subtitle = "Shows % of peaks from each lab found in the other lab",
-    x = "Lab Pair",
-    y = "Direction"
-  ) +
-  theme_minimal() +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    panel.grid = element_blank()
-  )
-
 # Bar plot comparing overlaps
 ggplot(pairwise_long, aes(x = direction, y = percent, fill = metric)) +
   geom_col(position = "dodge", alpha = 0.8) +
@@ -231,11 +243,6 @@ ggplot(pairwise_long, aes(x = direction, y = percent, fill = metric)) +
 ```
 
 As expected, afekta and cembio have the highest overlap.
-
-
-Could remove column 3:6 in table above
-Below decide on the threshold to study a peak. 
-we could go with 4
 
 ```{r}
 thres <- 4
@@ -275,10 +282,10 @@ write.csv(
 cembio_afekta_summary <- data.frame(
   category = c("Both detected", "Only afekta", "Only cembio", "Neither"),
   count = c(
-    sum(ct_2samples$afekta_detected & ct_2samples$cembio_detected),
-    sum(ct_2samples$afekta_detected & !ct_2samples$cembio_detected),
-    sum(!ct_2samples$afekta_detected & ct_2samples$cembio_detected),
-    sum(!ct_2samples$afekta_detected & !ct_2samples$cembio_detected)
+    sum(ct_all_samples$afekta_detected & ct_all_samples$cembio_detected),
+    sum(ct_all_samples$afekta_detected & !ct_all_samples$cembio_detected),
+    sum(!ct_all_samples$afekta_detected & ct_all_samples$cembio_detected),
+    sum(!ct_all_samples$afekta_detected & !ct_all_samples$cembio_detected)
   )
 )
 
@@ -307,10 +314,10 @@ for (combo in 0:15) {
   cembio <- as.logical(bitwAnd(combo, 8))
 
   n <- sum(
-    ct_2samples$afekta_detected == afekta &
-    ct_2samples$hmgu_detected == hmgu &
-    ct_2samples$icl_detected == icl &
-    ct_2samples$cembio_detected == cembio
+    ct_all_samples$afekta_detected == afekta &
+    ct_all_samples$hmgu_detected == hmgu &
+    ct_all_samples$icl_detected == icl &
+    ct_all_samples$cembio_detected == cembio
   )
 
   if (n > 0) {
@@ -324,7 +331,7 @@ for (combo in 0:15) {
     all_labs_summary <- rbind(all_labs_summary, data.frame(
       detection_pattern = pattern,
       n_peaks = n,
-      percent = round(100 * n / nrow(consensus_matches_1), 1)
+      percent = round(100 * n / nrow(ct_all_samples), 1)
     ))
   }
 }
@@ -336,7 +343,7 @@ knitr::kable(all_labs_summary,
              caption = "Peak Detection Patterns: All 4 Labs (A=afekta, H=hmgu, I=icl, C=cembio)")
 ```
 
-i think the code above could replace 2 code chunk above it. 
+
 
 # Peak Feature Summary by Lab (Detected)
 
@@ -361,8 +368,7 @@ the afekta/cembio overlap is insane. 51000 peaks to analyze...
 
 # Creating eics
 ## 4 labs
-
-when i have the full table i will need to add the "sample" info here. 
+ 
 ```{r}
 pt <- all_four_labs |>
   mutate(consensus_id = row_number()) |>
@@ -488,7 +494,7 @@ pt <- pt |>
         chrom_peak_id,
         pt_cembio$chrom_peak_id
       )]
-    )
+    ),
     into = case_when(
       lab == "afekta" ~ pt_afekta$into[match(
         chrom_peak_id,
@@ -502,7 +508,8 @@ pt <- pt |>
       lab == "cembio" ~ pt_cembio$into[match(
         chrom_peak_id,
         pt_cembio$chrom_peak_id
-      )],
+      )]
+    ),
     intb = case_when(
       lab == "afekta" ~ pt_afekta$intb[match(
         chrom_peak_id,
@@ -516,7 +523,8 @@ pt <- pt |>
       lab == "cembio" ~ pt_cembio$intb[match(
         chrom_peak_id,
         pt_cembio$chrom_peak_id
-      )],
+      )]
+    ),
     maxo = case_when(
       lab == "afekta" ~ pt_afekta$maxo[match(
         chrom_peak_id,
@@ -538,12 +546,15 @@ write.csv(
   pt,
   file = file.path(base_path, "object/peak_table_detected_all4labs.csv"),
   row.names = FALSE
-#rename rtmin ot rtMin, .. and add/remove 5s to each rt size and 0.001 to each mz side
+)
+
+# Rename rtmin to rtMin, rtmax to rtMax and adjust boundaries
+# add/remove 5s to each rt size and 0.001 to each mz side
 
 pt <- pt |>
   mutate(
-    rtMin = rtMin - 5,
-    rtMax = rtMax + 5,
+    rtMin = rtMin - 3,
+    rtMax = rtMax + 3,
     mzMin = mzMin - 0.001,
     mzMax = mzMax + 0.001
   )
@@ -559,7 +570,7 @@ pt
 ```{r}
 library(Chromatograms)
 
-if (!exists("object/eics_detected_all4labs.RData")) {
+if (!file.exists(file.path(base_path, "object/eics_detected_all4labs.RData"))) {
     load(file.path(base_path, "object/sp_full.RData"))
     tic_full <- Chromatograms(sp_full, summarize.method = "sum",
                        factorize.by= "dataOrigin",
@@ -571,13 +582,14 @@ if (!exists("object/eics_detected_all4labs.RData")) {
 } else {
     load(file.path(base_path, "object/eics_detected_all4labs.RData"))
 }
+
+eics
 ```
 
 
 ```{r}
 plotChromatograms(eics[eics$consensus_id == 10],
 main= eics$lab[eics$consensus_id == 10]) #nb of datapoint change is quite high. 
-
 
 plotChromatograms(eics[eics$consensus_id == 1204],
 main= eics$lab[eics$consensus_id == 1204]) #a good example
@@ -591,44 +603,34 @@ peaksData(eics[eics$consensus_id == 1000]) ## ok something is weird. I need to
 Ok next do that on all the table and build a big object table. 
 but continue testing the metrics calculation just with 2 samples.
 
+TODO check the issue with the NA values. 
+
+## Compute metrics
+
+```{r}
+eic1 <- eics[eics$consensus_id == 1204]
+
+## for this we will use my curretn implementation in MsQuality
+#BiocManager::install("philouail/MsQuality", ref = "Chromatograms")
+library(MsQuality)
+metric <- c("xicFwhm") ## change this for classic fwhm calculation.
+## Maybe also do duration above threshold, number of datapoints, etc.
+## could have a generic function in chr that gets the peak boundaries, does fwhm, etc.
+## while also reusing the MSQuality things as much as possible.
+## peak 
+
+test <- calculateMetrics(eic1, metrics = metric)
+rownames(test) <- eic1$lab
+qualityMetrics(eics)
+```
+
+Ok so we have one metric for one peak.
+Todo, check what is this metric giving us. why is it quartile. i feel like i 
+should just get one fwhm value for a peak
+and I also want to know how is the peak detected to get this metric.
 
 # Downstream Peak Feature Analysis (Detected)
 
-## RT Stability - Cembio vs Afekta (Both Labs)
-
-```{r rt - stability - cembio - afekta}
-# Filter full_peak_report_detected to only cembio & afekta peaks that are in both labs
-
-cembio_afekta_peak_ids <- c(
-  cembio_afekta_both$afekta,
-  cembio_afekta_both$cembio
-)
-
-peak_report_cembio_afekta <- full_peak_report_detected |>
-  filter(chrom_peak_id %in% cembio_afekta_peak_ids)
-
-rt_report_ca <- peak_report_cembio_afekta |>
-  group_by(compound_name, mixture) |>
-  summarize(
-    mean_rt = mean(rt_apex, na.rm = TRUE),
-    sd_rt = sd(rt_apex, na.rm = TRUE),
-    cv_rt = sd_rt / mean_rt,
-    n_detect = n(),
-    .groups = "drop"
-  ) |>
-  arrange(desc(cv_rt))
-
-head(rt_report_ca, 10)
-
-ggplot(rt_report_ca, aes(x = cv_rt)) +
-  geom_histogram(bins = 30, fill = "steelblue", alpha = 0.8) +
-  labs(
-    title = "Distribution of Retention Time CVs (Cembio & Afekta)",
-    x = "CV of RT (per compound)",
-    y = "Frequency"
-  ) +
-  theme_minimal()
-```
 
 ## Intensity Consistency - Cembio vs Afekta (Both Labs)
 
