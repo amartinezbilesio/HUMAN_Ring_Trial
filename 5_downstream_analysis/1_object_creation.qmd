@@ -34,7 +34,7 @@ bpparam <- MulticoreParam(workers = parallel::detectCores() - 1)
 
 Note: 
 
-- the data has been filtered to include only the m/z range of 100 - 1100 Da
+- the data has been filtered to include only the m/z range of 50 - 1100 Da
   So that the raw signal is more comparable. !!!
 
 ```{r load-full-data}
@@ -44,7 +44,7 @@ if (!file.exists(file.path(base_path, "object/sp_full.RData"))) {
   sp_icl <- load_data(lab = "icl", study_group = "HE")
   sp_cembio <- load_data(lab = "cembio", study_group = "HE")
   sp_full <- c(sp_afekta, sp_hmgu, sp_icl, sp_cembio)
-  sp_full <- filterMzRange(sp_full, mz = c(100, 1100))
+  sp_full <- filterMzRange(sp_full, mz = c(50, 1100))
   sp_full <- setBackend(sp_full, MsBackendMemory())
   sp_full <- applyProcessing(sp_full)
   save(sp_full, file = file.path(base_path, "object/sp_full.RData"))
