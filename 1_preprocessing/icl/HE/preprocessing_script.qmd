@@ -19,7 +19,7 @@ lab <- "icl"
 lab_path <- file.path(base_path, lab)
 
 study_group <- "HE" #example HE / FE / Others
-study_path <- file.path(base_path, lab, study_group)
+study_path <- here::here(file.path(base_path, lab, study_group))
 
 source(file.path(base_path, "setup.R"))
 ```
@@ -28,11 +28,11 @@ source(file.path(base_path, "setup.R"))
 
 ```{r load-lcms-data, warning=FALSE, message=FALSE}
 # Load pos data
-seq_pos <- read_xlsx(file.path(study_path, "seq_pos.xlsx"), col_names = TRUE) |
+seq_pos <- read_xlsx(file.path(study_path, "seq_pos.xlsx"), col_names = TRUE) |>
   as.data.frame()
 seq_pos$polarity <- "pos"
 # load neg data
-seq_neg <- read_xlsx(file.path(study_path, "seq_neg.xlsx"), col_names = TRUE) |
+seq_neg <- read_xlsx(file.path(study_path, "seq_neg.xlsx"), col_names = TRUE) |>
   as.data.frame()
 seq_neg$polarity <- "neg"
 seq <- rbind(seq_pos, seq_neg)
