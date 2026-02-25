@@ -1,6 +1,6 @@
 ---
 title: "Global Analysis: Inter-Laboratory LC-MS Reproducibility"
-format: 
+format:
     html:
         toc: true
         toc-location: right
@@ -17,7 +17,7 @@ detected signal data.
 Data: 19 standard mixtures (HUMAN endosome, different compounds) from 4
 labs with harmonized LC systems.
 
-Limitations: 
+Limitations:
 
 - No technical replicates
 - Laboratory identity is confounded with instrumental parameters.
@@ -37,6 +37,7 @@ library(purrr)
 library(here)
 library(patchwork)
 library(ggbeeswarm)
+library(pheatmap)
 
 base_path <- here("5_downstream_analysis")
 source(file.path(base_path, "global_analysis_helpers.R"))
@@ -76,7 +77,7 @@ setup_simplified
 ```
 
 Each lab's protocol is unique; lab identity is completely confounded with
-instrumental setup. Notable variations: 
+instrumental setup. Notable variations:
 
 - MS1 scan rate
 - Injection volume
@@ -152,7 +153,7 @@ metrics_combined <- bind_rows(metrics_full, metrics_detect) %>%
 
 # Phase 1: The Problem — Raw Data Assessment {#phase1}
 
-This phase characterizes the raw data to understand the magnitude of 
+This phase characterizes the raw data to understand the magnitude of
 inter-laboratory variability before any corrections are applied.
 
 ## 1.1 Distribution of Raw Metrics
@@ -160,10 +161,11 @@ inter-laboratory variability before any corrections are applied.
 ### 1.1.1 Violin Plots: Overall Intensity Distribution
 
 ```{r violin-plots}
+#| fig-cap: "BPC and TIC distributions by lab, polarity, and data level."
 for (metric in c("bpc", "tic")) print(plot_violin(metrics_combined, metric))
 ```
 
-Detected signal recenters the negative and positive distributions. 
+Detected signal recenters the negative and positive distributions.
 The bimodal shape is evident.
 
 ### 1.1.2 Density Plots: Distribution Shape by Lab
@@ -199,7 +201,7 @@ plot_mixture_distribution <- function(data, metric) {
   } else {
     title_suffix <- ""
   }
-  
+
   ggplot(data, aes(x = mixture, y = .data[[metric]], color = lab, group = lab)) +
     geom_line(alpha = 0.7) +
     facet_grid(data_level ~ polarity) +
@@ -222,7 +224,7 @@ However, HMGU is consistently lower intensity.
 
 Let's run linear models to evaluate mixture effects and batch effects.
 The goal is to quantify how much of the variance is due to lab vs mixture.
-We use ANOVA to aggregate coefficients into Sum of Squares (SS), which 
+We use ANOVA to aggregate coefficients into Sum of Squares (SS), which
 quantifies the relative power of each factor.
 
 We run this analysis across all 4 conditions (positive/negative, full/detected):
@@ -238,7 +240,7 @@ for (pol in c("Positive", "Negative")) {
     result <- check_metric_quality(data_subset, "tic")
 
     residual_plots[[paste(pol, level, sep = " - ")]] <- result$residual_plot
-    all_coefficients <- rbind(all_coefficients, 
+    all_coefficients <- rbind(all_coefficients,
       result$coefficients %>% mutate(Polarity = pol, Data_Level = level))
     results_table <- rbind(results_table, data.frame(
       Polarity = pol, Data_Level = level, R_squared = result$r_squared,
@@ -253,6 +255,7 @@ for (pol in c("Positive", "Negative")) {
 ### 1.2.2 Lab Effect Coefficients
 
 ```{r lab-coefficients}
+#| fig-cap: "Lab effect coefficients from linear models. Deviation from reference lab (Afekta); negative = lower intensity."
 lab_coefs <- all_coefficients %>%
   filter(type == "Lab Effect") %>%
   mutate(lab_name = gsub("lab", "", coefficient))
@@ -272,6 +275,7 @@ ggplot(lab_coefs, aes(x = lab_name, y = estimate, fill = lab_name)) +
 ### 1.2.3 Variance Decomposition Summary
 
 ```{r variance-stacked-bar}
+#| fig-cap: "Variance decomposition of TIC across all conditions. Lab variance dominates in raw data."
 variance_long <- results_table %>%
   select(Polarity, Data_Level, R_squared, ends_with("_Pct")) %>%
   pivot_longer(cols = ends_with("_Pct"), names_to = "Source", values_to = "Percentage") %>%
@@ -285,7 +289,7 @@ text_labels <- variance_long %>% distinct(Label, R2_label)
 
 ggplot(variance_long, aes(x = Label, y = Percentage, fill = Source)) +
   geom_col(alpha = 0.8) +
-  geom_text(aes(x = Label, label = R2_label, y = 105), data = text_labels, 
+  geom_text(aes(x = Label, label = R2_label, y = 105), data = text_labels,
             size = 3, inherit.aes = FALSE) +
   labs(title = "Variance Decomposition: TIC Across All Conditions",
        subtitle = "Raw data shows massive lab variance — the core problem",
@@ -307,7 +311,7 @@ for (pol in c("Positive", "Negative")) {
     result <- check_metric_quality(data_subset, "tic")
     residual_data <- rbind(residual_data, data.frame(
       Fitted = fitted(result$model), Residuals = residuals(result$model),
-      Polarity = pol, Data_Level = level, 
+      Polarity = pol, Data_Level = level,
       Lab = data_subset$lab, Mixture = as.factor(data_subset$mixture)
     ))
   }
@@ -337,7 +341,7 @@ mixture. We cannot compare labs directly without normalization.
 
 # Phase 2: The Solution — Normalization & Data Processing {#phase2}
 
-This phase tests different normalization strategies to reduce 
+This phase tests different normalization strategies to reduce
 inter-laboratory variability.
 
 ## 2.1 Normalization Strategy Selection
@@ -347,10 +351,10 @@ inter-laboratory variability.
 What could be tested:
 
 - **Median scaling**: Adjusting each lab's data to have the same median could
- help account for systematic differences. In that case we take the median of 
+ help account for systematic differences. In that case we take the median of
  that measure by that lab to correct each mixture.
     - This is safe as the experimental design is balanced. Every lab measures
-     the same 38 mixtures, so their intensity distributions should be identical in 
+     the same 38 mixtures, so their intensity distributions should be identical in
      shape, just shifted up or down.
     - This would be wrong if the mixtures were different across labs.
 - **Auto scaling**: Forces the lab to have the same dynamic change.
@@ -358,7 +362,7 @@ What could be tested:
 
 What we are NOT testing:
 
-- **Max scaling**: ESI is subject to random electrical spike/detector saturation, 
+- **Max scaling**: ESI is subject to random electrical spike/detector saturation,
        therefore max could be an outlier and crush other signal to 0.
     - Generally not used for entire run.
 
@@ -404,6 +408,7 @@ to see on the full signal.
 ### 2.2.1 Variance Decomposition by Normalization Method
 
 ```{r normalization-variance-comparison}
+#| fig-cap: "Effect of normalization on variance decomposition for positive mode detected signal."
 test_data <- metrics_combined %>%
   filter(polarity == "Positive", data_level == "Detected Signal")
 
@@ -450,17 +455,17 @@ cat("Autoscaled Total Variance:", round(sum(ss_autoscaled), 2), "\n")
 
 ```{r normalization-residual-comparison}
 #| fig-height: 14
-plot_residuals(mod_raw, "Raw TIC (log2)", test_data) / 
-  plot_residuals(mod_median_scaled, "Median Scaled TIC", test_data) / 
+plot_residuals(mod_raw, "Raw TIC (log2)", test_data) /
+  plot_residuals(mod_median_scaled, "Median Scaled TIC", test_data) /
   plot_residuals(mod_autoscaled, "Autoscaled TIC (MAD)", test_data) +
   plot_annotation(title = "Residual Plots: Comparison of Normalization Methods")
 ```
 
 **Findings:**
 
-- Median scaling removes the residual pattern we could see before. 
+- Median scaling removes the residual pattern we could see before.
 - Autoscaling, in contrast, seems to introduce some pattern in the residuals.
-- Lab variance drops significantly with median scaling. 
+- Lab variance drops significantly with median scaling.
 - Absolute noise values do not change; their overall proportion increases because we got rid of the lab variance.
 
 Noise likely reflects injection variability and ionization
@@ -472,62 +477,11 @@ fluctuation—factors we cannot isolate with this experimental design.
 - Noise level acceptable; does not significantly impact biological variance
 - We "hope" to focus on biological signals without technical variability obscuring them
 
-## 2.3 Pure Instrument Variability (Exploratory)
-
-Just an idea: even though the biological variance is small, we could try to remove it
-to focus on instrument variability. We remove the mixture effect:
-
-```{r instrument-variability}
-inst_focus_data <- metrics_combined %>%
-  filter(data_level == "Detected Signal") %>%
-  group_by(mixture, polarity) %>%
-  mutate(
-    tic_mix_centered = tic - median(tic, na.rm = TRUE),
-    tic_mix_centered = log2(tic_mix_centered + median(tic, na.rm = TRUE))
-  ) %>%
-  ungroup()
-
-model <- lm(tic_mix_centered ~ lab + factor(mixture), data = inst_focus_data)
-an <- anova(model)
-total_ss <- sum(an$`Sum Sq`)
-
-data.frame(
-  Source = c("Instrument (Lab)", "Biology (Mixture)", "Noise (Residual)"),
-  Percentage = c(
-    an["lab", "Sum Sq"] / total_ss * 100,
-    an["factor(mixture)", "Sum Sq"] / total_ss * 100,
-    an["Residuals", "Sum Sq"] / total_ss * 100
-  )
-)
-
-inst_comparison <- inst_focus_data %>%
-  mutate(raw_tic_log2 = log2(tic)) %>%
-  select(lab, polarity, mixture, raw_tic_log2, tic_mix_centered) %>%
-  pivot_longer(cols = c(raw_tic_log2, tic_mix_centered), names_to = "Scaling", values_to = "Value") %>%
-  mutate(Scaling = factor(Scaling, 
-    levels = c("raw_tic_log2", "tic_mix_centered"),
-    labels = c("Raw TIC (log2)", "Mixture-Centered (log2)")))
-
-ggplot(inst_comparison, aes(x = lab, y = Value, fill = polarity)) +
-  geom_violin(trim = FALSE, alpha = 0.6) +
-  geom_jitter(aes(color = as.factor(mixture)), width = 0.2, size = 1.5, alpha = 0.7) +
-  scale_color_viridis_d(option = "turbo") +
-  facet_grid(Scaling ~ polarity) +
-  theme_minimal() +
-  labs(title = "Instrument Variability: Before and After Mixture Centering",
-       subtitle = "Removing biological signal reveals pure laboratory effects",
-       x = "Laboratory", y = "TIC (log2 scale)", color = "Mixture") +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-```
-
-Mixture-centered analysis isolates instrument effects. Not sure if I should 
-do anything with this.
-
 ---
 
 # Phase 3: Reproducibility & Platform Effects {#phase3}
 
-This phase quantifies reproducibility using standard metrics (ICC) and 
+This phase quantifies reproducibility using standard metrics (ICC) and
 investigates platform-specific effects.
 
 ## 3.1 Intraclass Correlation Coefficient (ICC)
@@ -565,7 +519,7 @@ icc_all_results <- data.frame()
 for (pol in c("Positive", "Negative")) {
   for (level in c("Full Signal", "Detected Signal")) {
     data_subset <- metrics_combined %>% filter(polarity == pol, data_level == level)
-    
+
     results <- bind_rows(
       compute_icc(data_subset, "tic") %>% mutate(Type = "Absolute"),
       compute_icc(data_subset, "bpc") %>% mutate(Type = "Absolute"),
@@ -574,7 +528,7 @@ for (pol in c("Positive", "Negative")) {
     ) %>%
       mutate(Polarity = pol, Data_Level = level,
              Metric_Label = case_when(Metric == "tic" ~ "TIC", Metric == "bpc" ~ "BPC", TRUE ~ Metric))
-    
+
     icc_all_results <- bind_rows(icc_all_results, results)
   }
 }
@@ -587,6 +541,7 @@ icc_all_results %>%
 ### 3.1.3 ICC Comparison Plot
 
 ```{r icc-comparison-plot}
+#| fig-cap: "ICC comparison: absolute vs normalized metrics by polarity and data level. Dashed line = 0.5 threshold."
 ggplot(icc_all_results, aes(x = Metric_Label, y = ICC, fill = Type)) +
   geom_col(position = "dodge", alpha = 0.8) +
   geom_hline(yintercept = 0.5, linetype = "dashed", color = "red") +
@@ -627,7 +582,7 @@ The overall goal is that we end up with Value = Biology.
 
 Starting point: Value = (Biology × Sensitivity) + Background Noise
 
-With detected signal and normalization: Value ≈ Biology
+With detected signal and normalization, we hope: Value ≈ Biology
 
 ## 3.2 Impact of Peak Detection on Reproducibility
 
@@ -646,16 +601,17 @@ icc_comparison_tic <- icc_all_results %>%
 icc_comparison_tic
 ```
 
-**Findings:** Normalized TIC shows highest ICC. Detected signal (ICC 0.5–0.6)
-substantially beats full signal (ICC 0.3) because peak detection removes
-vendor-specific solvent noise. Median normalization improved ICC from 0.05
-to 0.55—crossing the threshold from poor to moderate reproducibility. The
-remaining ~0.5 ICC gap likely reflects ionization preferences and
-platform-specific sensitivities.
+**Findings:** Normalized TIC shows highest ICC. Detected signal (ICC 0.50–0.56)
+substantially beats full signal (ICC 0.27–0.36) because peak detection removes
+vendor-specific solvent noise. Median normalization improved ICC from ~0.04
+to ~0.53—crossing the threshold from poor to moderate reproducibility. The
+remaining ~0.3 ICC gap relative to the Agilent ceiling (~0.84) likely reflects
+ionization preferences and platform-specific sensitivities.
 
 ### 3.2.2 Before & After Visualization
 
 ```{r peak-detection-visualization}
+#| fig-cap: "Impact of peak detection on ICC. Detected signal substantially improves reproducibility."
 ggplot(icc_all_results %>% filter(Type == "Normalized", Metric == "tic"),
        aes(x = Polarity, y = ICC, fill = Data_Level)) +
   geom_col(position = "dodge", alpha = 0.8) +
@@ -672,8 +628,8 @@ ggplot(icc_all_results %>% filter(Type == "Normalized", Metric == "tic"),
 
 Peak detection substantially improves reproducibility:
 
-- Negative mode: ICC increased from 0.275 to 0.556 (102% improvement)
-- Positive mode: ICC increased from 0.375 to 0.503 (34% improvement)
+- Negative mode: ICC increased from 0.27 to 0.56 (~105% improvement)
+- Positive mode: ICC increased from 0.36 to 0.50 (~40% improvement)
 
 **Conclusion:** All subsequent analyses use detected signal exclusively.
 Peak detection removes instrument-specific baseline noise obscuring
@@ -686,8 +642,8 @@ for meaningful inter-lab comparisons.
 
 For comparison, two labs (CEMBIO and AFEKTA) share the same LC-MS
 platform (Agilent Q-TOF). ICC of 0.83 (TIC) and 0.92 (BPC) for these labs
-proves selectivity matches when vendor matches. The 0.5–0.8 gap reflects
-instrument-specific and ionization differences. 
+proves selectivity matches when vendor matches. The previously seen 0.5–0.8 gap might therefore reflects
+instrument-specific and ionization differences.
 
 ```{r agilent-ceiling-icc}
 agilent_data <- metrics_combined %>%
@@ -703,14 +659,23 @@ cat("ICC for Normalized BPC:", round(icc_agilent_bpc$ICC, 3), "\n")
 
 ### 3.3.2 Effect Size Between Agilent Labs
 
-**What is effect size and why use it here?**
+**What is effect size?**
 
-Effect size quantifies the *magnitude* of difference between groups, independent 
-of sample size. While ICC tells us how reproducible measurements are, effect size 
-tells us *how much* the labs actually differ. We compute log2 fold-changes 
-between Cembio and Afekta for each mixture, then summarize across all mixtures.
+Effect size measures the *practical magnitude* of a difference between two
+groups. Here, we compute log2 fold-changes between Cembio and Afekta for
+each mixture (i.e., $\log_2(\text{Cembio} / \text{Afekta})$), then
+summarize across all mixtures.
 
-This complements ICC by answering: "When labs disagree, by how much?"
+- A log2 fold-change of **0** means the labs produce identical values.
+- A log2 fold-change of **±0.5** corresponds to a ~41% difference.
+- A log2 fold-change of **±1** corresponds to a 2-fold difference.
+
+**How does this complement ICC?**
+
+ICC answers *"are measurements reproducible?"* — it captures the ratio of
+biological signal to technical noise across all labs. Effect size answers
+*"by how much do two specific labs disagree?"* — it gives a concrete,
+directional estimate of the systematic bias between the two Agilent labs.
 
 ```{r agilent-effect-size}
 agilent_effect_size <- metrics_combined %>%
@@ -737,100 +702,31 @@ agilent_effect_size %>%
 
 **Key findings:**
 
-- **Positive mode**: Median log2 difference ≈ 0 (labs agree within ~1%); mean 
+- **Positive mode**: Median log2 difference ≈ 0 (labs agree within ~1%); mean
   pulled by outliers (~6.6% difference)
-- **Negative mode**: Consistent ~9% systematic bias that median normalization 
+- **Negative mode**: Consistent ~9% systematic bias that median normalization
   cannot fully remove
 
-Summary table:
-| Metric   | Pattern           | Explanation |
-|----------|-------------------|---------------------------------------------|
-| TIC_norm | Afekta Higher     | 6546 superior dynamic range; integrates |
-|          |                   | more low-abundance signals |
-| BPC_norm | Cembio Higher     | 6545 distribution more top-heavy; peaks |
-|          |                   | appear taller after normalization |
-| Ratio    | Cembio Higher     | 6545 misses background; lower TIC |
-|          |                   | denominator inflates ratio |
+```{r agilent-effect-size-table}
+effect_size_summary <- agilent_effect_size %>%
+  group_by(polarity) %>%
+  summarise(
+    TIC_Mean_Log = mean(log_diff_tic, na.rm = TRUE),
+    TIC_Median_Log = median(log_diff_tic, na.rm = TRUE),
+    TIC_Percent_Diff = (2^abs(TIC_Mean_Log) - 1) * 100,
+    BPC_Mean_Log = mean(log_diff_bpc, na.rm = TRUE),
+    BPC_Median_Log = median(log_diff_bpc, na.rm = TRUE),
+    BPC_Percent_Diff = (2^abs(BPC_Mean_Log) - 1) * 100,
+    .groups = "drop"
+  )
 
-The two Agilent Q-TOF generations (6546 vs 6545) can be compared for trends 
+knitr::kable(effect_size_summary,
+             caption = "Effect Size Summary: Cembio vs Afekta (log2 fold-change)",
+             digits = 3)
+```
+
+The two Agilent Q-TOF generations (6546 vs 6545) can be compared for trends
 (high ICC), but would need non-linear correction for absolute quantitation.
-
-## 3.4 Ionization Preference Hypothesis
-
-### 3.4.1 Peak Detection Counts by Lab
-
-One hypothesis for different ICC values across labs is that
-different instruments may prefer different ionization pathways. This would lead to
-systematic differences in peak intensities across labs, which would reduce
-the ICC values.
-
-```{r peak-counts-by-lab}
-pt_afekta <- read.csv(file.path(base_path, "object/detected_peaks_afekta_HE.csv"))
-pt_hmgu <- read.csv(file.path(base_path, "object/detected_peaks_hmgu_HE.csv"))
-pt_icl <- read.csv(file.path(base_path, "object/detected_peaks_icl_HE.csv"))
-pt_cembio <- read.csv(file.path(base_path, "object/detected_peaks_cembio_HE.csv"))
-
-lab_counts <- c(afekta = nrow(pt_afekta), hmgu = nrow(pt_hmgu), 
-                icl = nrow(pt_icl), cembio = nrow(pt_cembio))
-barplot(lab_counts, main = "Number of Detected Peaks per Lab", 
-        ylab = "Number of detected peaks", xlab = "Labs", col = "steelblue")
-```
-
-### 3.4.2 Intensity Rank Correlation (Spearman)
-
-We run a Spearman analysis, which ranks the compound 
-intensities and checks how well the ranks are preserved across labs.
-This is run on a consensus table of detected peaks that are present in all 4 labs.
-
-```{r intensity-correlation-setup}
-ct_filtered <- read.csv(file.path(base_path, "object/ct_filtered4.csv"))
-
-intensity_table <- ct_filtered %>%
-  select(consensus_id, sample, idx_afekta, chrom_peak_id_afekta, 
-         chrom_peak_id_icl, chrom_peak_id_hmgu, chrom_peak_id_cembio) %>%
-  left_join(pt_afekta %>% select(chrom_peak_id, into, rt),
-            by = c("chrom_peak_id_afekta" = "chrom_peak_id")) %>%
-  rename(intensity_afekta = into, rt_afekta = rt) %>%
-  left_join(pt_icl %>% select(chrom_peak_id, into, rt),
-            by = c("chrom_peak_id_icl" = "chrom_peak_id")) %>%
-  rename(intensity_icl = into, rt_icl = rt) %>%
-  left_join(pt_hmgu %>% select(chrom_peak_id, into, rt),
-            by = c("chrom_peak_id_hmgu" = "chrom_peak_id")) %>%
-  rename(intensity_hmgu = into, rt_hmgu = rt) %>%
-  left_join(pt_cembio %>% select(chrom_peak_id, into, rt),
-            by = c("chrom_peak_id_cembio" = "chrom_peak_id")) %>%
-  rename(intensity_cembio = into, rt_cembio = rt)
-
-head(intensity_table %>% select(consensus_id, sample, starts_with("intensity"), starts_with("rt")))
-```
-
-```{r spearman-correlation}
-intensity_matrix <- intensity_table %>% select(starts_with("intensity"))
-cor(intensity_matrix, method = "spearman", use = "pairwise.complete.obs")
-```
-
-**Finding:** Cembio and Afekta are the most similar, with a Spearman
-correlation of 0.77. HMGU has the lowest correlation with all the labs.
-
-### 3.4.3 Peak Overlap Across Labs (UpSet Plot)
-
-```{r upset-plot}
-ct_all_sample <- read.csv(file.path(base_path, "object/ct_all_samples.csv"))
-
-upset_data <- ct_all_sample |>
-  select(afekta_detected, hmgu_detected, icl_detected, cembio_detected) |>
-  mutate(afekta = as.integer(afekta_detected), hmgu = as.integer(hmgu_detected),
-         icl = as.integer(icl_detected), cembio = as.integer(cembio_detected)) |>
-  select(afekta, hmgu, icl, cembio)
-
-upset_data_df <- as.data.frame(upset_data)
-rownames(upset_data_df) <- paste0("peak_", seq_len(nrow(upset_data_df)))
-
-library(UpSetR)
-upset(upset_data_df, sets = c("afekta", "hmgu", "icl", "cembio"),
-      main.bar.color = "steelblue", sets.bar.color = "darkred",
-      text.scale = c(2, 2, 2, 1.5, 2, 2), point.size = 3, line.size = 1.2)
-```
 
 ---
 
@@ -841,7 +737,7 @@ signal variations across the chromatographic gradient.
 
 ## 4.1 Retention Time Range
 
-All the labs had a retention time gradient of 15min. After preprocessing we 
+All the labs had a retention time gradient of 15min. After preprocessing we
 reduced to a common range:
 
 ```{r rt-range}
@@ -869,18 +765,18 @@ for (pol in polarities) {
   for (mix in mixtures) {
     subset_tic <- tic_full[which(tic_full$polarity == pol & tic_full$mixture == mix)]
     if (length(subset_tic) == 0) next
-    
+
     intensity_matrix <- data.frame(afekta = numeric(length(breaks) - 1),
       icl = numeric(length(breaks) - 1), hmgu = numeric(length(breaks) - 1),
       cembio = numeric(length(breaks) - 1))
-    
+
     for (i in seq_along(subset_tic)) {
       lab_name <- subset_tic$lab[i]
       peaks <- peaksData(subset_tic[i])[[1]]
-      intensity_matrix[[lab_name]] <- tapply(peaks$intensity, 
+      intensity_matrix[[lab_name]] <- tapply(peaks$intensity,
         cut(peaks$rtime, breaks = breaks), sum, na.rm = TRUE)
     }
-    
+
     cor_results <- cor(intensity_matrix, method = "pearson", use = "pairwise.complete.obs")
     polarity_label <- ifelse(pol == 1, "pos", "neg")
     correlation_results_full[[paste0(polarity_label, "_", mix)]] <- cor_results
@@ -907,7 +803,7 @@ cor_heatmap_data_full <- pairwise_cors_full |>
 ggplot(cor_heatmap_data_full, aes(x = pair, y = mix, fill = correlation)) +
   geom_tile() +
   geom_text(aes(label = round(correlation, 2)), size = 3) +
-  scale_fill_gradient2(low = "blue", mid = "white", high = "red", 
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red",
                        midpoint = 0.5, limits = c(0, 1)) +
   facet_wrap(~polarity, ncol = 2) +
   theme_minimal() +
@@ -938,26 +834,26 @@ ggplot(cor_heatmap_data_full, aes(x = pair, y = correlation, color = pair)) +
 compute_rt_bin_correlation_full <- function(polarity, mixture) {
   subset_tic <- tic_full[which(tic_full$polarity == polarity & tic_full$mixture == mixture)]
   if (length(subset_tic) == 0) return(NULL)
-  
+
   rt_range <- range(rtime(tic_full[1L])[[1]])
   breaks <- seq(rt_range[1], rt_range[2], by = 5)
-  
+
   intensity_matrix <- data.frame(afekta = numeric(length(breaks) - 1),
     icl = numeric(length(breaks) - 1), hmgu = numeric(length(breaks) - 1),
     cembio = numeric(length(breaks) - 1))
-  
+
   for (i in seq_along(subset_tic)) {
     lab_name <- subset_tic$lab[i]
     peaks <- peaksData(subset_tic[i])[[1]]
     intensity_matrix[[lab_name]] <- tapply(peaks$intensity, cut(peaks$rtime, breaks = breaks), sum, na.rm = TRUE)
   }
-  
+
   rt_centers <- (breaks[-1] + breaks[-length(breaks)]) / 2
   window_size <- 10
   pairs <- list(c("afekta", "cembio"), c("afekta", "hmgu"), c("afekta", "icl"),
                 c("cembio", "hmgu"), c("cembio", "icl"), c("hmgu", "icl"))
   bin_cors <- list()
-  
+
   for (bin_idx in 1:nrow(intensity_matrix)) {
     start_idx <- max(1, bin_idx - window_size %/% 2)
     end_idx <- min(nrow(intensity_matrix), bin_idx + window_size %/% 2)
@@ -987,7 +883,7 @@ if (!is.null(rt_cor_example_full)) {
 }
 ```
 
-Note: This is only one mixture and one polarity. The x-axis should start at the 
+Note: This is only one mixture and one polarity. The x-axis should start at the
 actual RT range start (~17s).
 
 ### 4.2.4 Detected Signal: Pairwise Correlation by Mixture
@@ -1005,17 +901,17 @@ for (pol in polarities) {
   for (mix in mixtures) {
     subset_tic <- tic_detect[which(tic_detect$polarity == pol & tic_detect$mixture == mix)]
     if (length(subset_tic) == 0) next
-    
+
     intensity_matrix <- data.frame(afekta = numeric(length(breaks) - 1),
       icl = numeric(length(breaks) - 1), hmgu = numeric(length(breaks) - 1),
       cembio = numeric(length(breaks) - 1))
-    
+
     for (i in seq_along(subset_tic)) {
       lab_name <- subset_tic$lab[i]
       peaks <- peaksData(subset_tic[i])[[1]]
       intensity_matrix[[lab_name]] <- tapply(peaks$intensity, cut(peaks$rtime, breaks = breaks), sum, na.rm = TRUE)
     }
-    
+
     cor_results <- cor(intensity_matrix, method = "pearson", use = "pairwise.complete.obs")
     polarity_label <- ifelse(pol == 1, "pos", "neg")
     correlation_results[[paste0(polarity_label, "_", mix)]] <- cor_results
@@ -1039,7 +935,7 @@ cor_heatmap_data <- pairwise_cors |>
 ggplot(cor_heatmap_data, aes(x = pair, y = mix, fill = correlation)) +
   geom_tile() +
   geom_text(aes(label = round(correlation, 2)), size = 3) +
-  scale_fill_gradient2(low = "blue", mid = "white", high = "red", 
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red",
                        midpoint = 0.5, limits = c(0, 1)) +
   facet_wrap(~polarity, ncol = 2) +
   theme_minimal() +
@@ -1070,24 +966,24 @@ Note: How can some correlations be negative?
 compute_rt_bin_correlation <- function(polarity, mixture) {
   subset_tic <- tic_detect[which(tic_detect$polarity == polarity & tic_detect$mixture == mixture)]
   if (length(subset_tic) == 0) return(NULL)
-  
+
   rt_range <- range(rtime(tic_detect[1L])[[1]])
   breaks <- seq(rt_range[1], rt_range[2], by = 5)
-  
+
   intensity_matrix <- data.frame(afekta = numeric(length(breaks) - 1),
     icl = numeric(length(breaks) - 1), hmgu = numeric(length(breaks) - 1),
     cembio = numeric(length(breaks) - 1))
-  
+
   for (i in seq_along(subset_tic)) {
     lab_name <- subset_tic$lab[i]
     peaks <- peaksData(subset_tic[i])[[1]]
     intensity_matrix[[lab_name]] <- tapply(peaks$intensity, cut(peaks$rtime, breaks = breaks), sum, na.rm = TRUE)
   }
-  
+
   rt_centers <- (breaks[-1] + breaks[-length(breaks)]) / 2
   window_size <- 10
   bin_cors <- list()
-  
+
   for (bin_idx in 1:nrow(intensity_matrix)) {
     start_idx <- max(1, bin_idx - window_size %/% 2)
     end_idx <- min(nrow(intensity_matrix), bin_idx + window_size %/% 2)
@@ -1119,7 +1015,14 @@ if (!is.null(rt_cor_example)) {
 
 ### 4.2.7 Comparison: Full vs Detected Signal Correlations
 
+This plot directly compares the pairwise TIC correlation distributions from
+the full signal and detected signal analyses above. For each lab pair, the
+boxplots show the spread of Pearson correlations across all 19 mixtures. If
+peak detection successfully removes instrument-specific baseline noise, we
+expect detected signal correlations to be higher and less variable.
+
 ```{r full-vs-detected-correlation}
+#| fig-cap: "Pairwise TIC correlations across 19 mixtures: full signal vs detected signal. Higher medians and tighter distributions in the detected signal indicate that peak detection improves inter-lab agreement."
 comparison_data <- bind_rows(
   cor_heatmap_data_full %>% mutate(signal_type = "Full Signal"),
   cor_heatmap_data %>% mutate(signal_type = "Detected Signal")
@@ -1168,7 +1071,7 @@ compute_consortium_sensitivity <- function(polarity) {
 
   df <- data.frame(lab = tic_data$lab, mixture = tic_data$mixture,
                    Q1 = raw_stats[,1], Q2 = raw_stats[,2], Q3 = raw_stats[,3], Q4 = raw_stats[,4])
-  grand_medians <- df %>% 
+  grand_medians <- df %>%
     summarise(across(starts_with("Q"), \(x) median(x, na.rm = TRUE))) %>%
     pivot_longer(everything(), names_to = "Quartile", values_to = "Consensus")
 
@@ -1188,6 +1091,7 @@ all_profiles <- run_for_polarities_simple(compute_consortium_sensitivity)
 ### 4.3.3 Raw TIC by Quartile
 
 ```{r sensitivity-profile-plots}
+#| fig-cap: "Instrument sensitivity profiles across RT quartiles. Non-parallel lines indicate RT-dependent lab biases."
 # 5a. Raw TIC values per quartile (absolute scale)
 all_profiles %>%
   mutate(Log2_TIC = log2(Intensity)) %>%
@@ -1231,11 +1135,26 @@ all_profiles %>%
 Note: This might be problematic to evaluate like this since every mixture is quite different,
 so we have massive spread within each quartile.
 
-**Findings:** Sensitivity slopes are non-linear: ICL shows progressive loss from Q1
-(+0.23) to Q4 (-0.78); Agilents show inverse trend. Cembio exhibits
-distinct hyper-sensitivity to lipids in Q3 (+1.55 log deviation). These
-retention-time-specific biases cannot be corrected with global
-normalization. 
+```{r sensitivity-findings-table}
+# Summary table: median log2 deviation from consortium median per lab per quartile
+findings_table <- all_profiles %>%
+  mutate(Log2_Dev = log2(Intensity / Consensus)) %>%
+  group_by(lab, Quartile, Polarity) %>%
+  summarise(
+    Median_Log2_Dev = round(median(Log2_Dev, na.rm = TRUE), 2),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(names_from = Quartile, values_from = Median_Log2_Dev)
+
+knitr::kable(findings_table,
+             caption = "Median log2 deviation from consortium median by lab and RT quartile")
+```
+
+**Findings:** Sensitivity slopes are non-linear: in positive mode, ICL shows
+progressive loss from Q1 (+0.24) to Q4 (−0.78); Agilent labs show the
+inverse trend. In negative mode, Cembio exhibits distinct hyper-sensitivity
+in Q3 (+1.55 log2 deviation from consensus). These retention-time-specific
+biases cannot be corrected with global normalization.
 
 **Solution:** Apply Local Median Normalization, computing
 scaling factors independently for each RT quartile.
@@ -1243,6 +1162,20 @@ scaling factors independently for each RT quartile.
 ## 4.4 Variance Decomposition by RT Quartile
 
 ### 4.4.1 Linear Model Analysis by Quartile
+
+Section 4.3 showed that sensitivity profiles are non-linear: labs respond
+differently across the chromatographic gradient. This raises the question:
+**after global median normalization, how much residual lab variance remains
+in each RT region?**
+
+We split the detected signal TIC and BPC into four RT quartiles, then
+apply the same linear model decomposition from Phase 1 to each quartile
+independently. Intensities are median-normalized **within each lab** before
+the split, so this tests whether the *relative* distribution of signal
+across the gradient differs between labs — not whether absolute intensities
+differ. High lab variance in a particular quartile would confirm that
+global normalization is insufficient and local (per-quartile) correction is
+needed.
 
 Distribution of biological signal (TIC and BPC) across RT quartiles:
 
@@ -1316,98 +1249,393 @@ print(plot_quartile_variance(quartile_results, "BPC"))
 **Finding:** Local normalization by RT quartile reveals instrument-specific biases
 in Q3/Q4 (30–50% residual lab variance). Hydrophobic compounds show
 irreducible differences in selectivity and dynamic range that median
-scaling cannot eliminate. 
+scaling cannot eliminate.
 
-## 4.5 Ionization Preference Across RT
+---
 
-### 4.5.1 Quartile Assignment for Peak Intensities
+# Phase 5: Peak Feature Analysis — Consensus Peaks {#phase5}
 
-Now that we showed that quartiles varied highly in lab variance, we can check if
-the ionization preference is also varying across RT quartile.
+This phase extends the global analysis by incorporating peak-level metrics
+computed from EICs of consensus peaks detected across all 4 laboratories.
+This provides a more refined view of inter-lab reproducibility at the
+individual peak level.
 
-```{r quartile-assignment}
-load(file.path(base_path, "object/tic_full.RData"))
-global_breaks <- quantile(unlist(rtime(tic_full[tic_full$polarity == 1L])),
-                          probs = seq(0, 1, 0.25), na.rm = TRUE)
+## 5.1 Data Overview
 
-intensity_table <- intensity_table %>%
-  mutate(
-    mean_rt = rowMeans(select(., starts_with("rt_")), na.rm = TRUE),
-    quartile = cut(mean_rt, breaks = global_breaks, labels = c("Q1", "Q2", "Q3", "Q4"), include.lowest = TRUE)
-  )
+The peak feature data comes from `3a_peak_feature_calculation_detected.qmd`,
+which:
 
-cat("Quartile Breaks:\n"); print(round(global_breaks, 2))
-cat("\nPeaks per quartile:\n"); table(intensity_table$quartile, useNA = "ifany")
+1. Created a consensus peak table matching peaks across labs (mz tol = 10 ppm, rt tol = 10s)
+2. Filtered to peaks detected in all 4 labs (1209 consensus peaks → 871 after QC)
+3. Extracted EICs and computed peak metrics (FWHM, area, SNR, etc.)
+4. Applied quality filters (prominence, peak width, FWHM validity)
+
+```{r load-peak-metrics}
+pk_metrics <- read.csv(file.path(base_path, "object/peak_metrics_detected_all4labs.csv"))
+
+cat("Peak metrics dimensions:", nrow(pk_metrics), "rows x", ncol(pk_metrics), "columns\n")
+cat("Unique consensus peaks:", length(unique(pk_metrics$consensus_id)), "\n")
+cat("Labs represented:", paste(unique(pk_metrics$lab), collapse = ", "), "\n")
 ```
 
-### 4.5.2 Spearman Correlation by Quartile
+## 5.2 Spearman Intensity Rank Correlation
 
-```{r spearman-by-quartile}
-quartile_correlations <- intensity_table %>%
-  filter(!is.na(quartile)) %>%
-  group_by(quartile) %>%
+We use Spearman (rank-based) correlation to test whether peaks that are
+relatively intense in one lab are also relatively intense in another.
+Spearman is robust to the non-linear scale differences across labs without
+requiring explicit normalization — it compares rank order, not absolute
+values.
+
+### 5.2.1 Intensity Correlation Matrix
+
+```{r peak-metrics-correlation}
+# Pivot to wide format for correlation
+intensity_wide <- pk_metrics |>
+  select(consensus_id, lab, areaUnderTic, maxIntensity, mixture, polarity) |>
+  pivot_wider(
+    id_cols = c(consensus_id, mixture, polarity),
+    names_from = lab,
+    values_from = c(areaUnderTic, maxIntensity)
+  )
+
+# Spearman correlation for areaUnderTic
+area_cols <- paste0("areaUnderTic_", c("afekta", "hmgu", "icl", "cembio"))
+area_matrix <- intensity_wide[, area_cols]
+names(area_matrix) <- c("afekta", "hmgu", "icl", "cembio")
+
+cor_area <- cor(area_matrix, method = "spearman", use = "pairwise.complete.obs")
+cat("Spearman Correlation - Area Under TIC:\n")
+print(round(cor_area, 3))
+
+# Spearman correlation for maxIntensity
+max_cols <- paste0("maxIntensity_", c("afekta", "hmgu", "icl", "cembio"))
+max_matrix <- intensity_wide[, max_cols]
+names(max_matrix) <- c("afekta", "hmgu", "icl", "cembio")
+
+cor_max <- cor(max_matrix, method = "spearman", use = "pairwise.complete.obs")
+cat("\nSpearman Correlation - Max Intensity:\n")
+print(round(cor_max, 3))
+```
+
+### 5.2.2 Correlation Heatmap Visualization
+
+```{r peak-correlation-heatmap}
+#| fig-cap: "Spearman rank correlation heatmaps for recalculated peak intensities across 4 labs."
+#| fig-height: 5
+library(pheatmap)
+
+pheatmap(cor_area,
+         main = "Area Under TIC (Spearman)",
+         display_numbers = TRUE,
+         number_format = "%.2f",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE)
+
+pheatmap(cor_max,
+         main = "Max Intensity (Spearman)",
+         display_numbers = TRUE,
+         number_format = "%.2f",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE)
+```
+
+Afekta and Cembio show the strongest rank correlation (ρ ≈ 0.76),
+consistent with their shared Agilent Q-TOF platform. All other pairs
+are moderate (ρ ≈ 0.4–0.5), indicating that relative peak intensity
+rankings are partially conserved across labs but with substantial
+instrument-specific variation.
+
+## 5.3 Peak Metric Distributions Across Labs
+
+The following metrics are computed for each EIC from the filtered consensus
+peaks:
+
+- **Peak Width**: Time span (seconds) between the detected peak boundaries.
+  Reflects chromatographic resolution and column performance.
+- **FWHM** (Full Width at Half Maximum): Width of the peak at half its
+  maximum intensity. A narrower, more symmetric measure of peak shape than
+  peak width.
+- **Signal-to-Noise Ratio (SNR)**: Ratio of peak maximum intensity to the
+  estimated baseline. Higher SNR indicates a cleaner, more confident
+  detection.
+
+### 5.3.1 Peak Width Distribution
+
+```{r peak-width-distribution}
+ggplot(pk_metrics, aes(x = lab, y = peakWidth, fill = lab)) +
+ geom_violin(trim = FALSE, alpha = 0.6) +
+ geom_boxplot(width = 0.15, fill = "white", outlier.size = 0.5) +
+ facet_wrap(~factor(polarity, labels = c("Negative", "Positive"))) +
+ labs(
+   title = "Peak Width Distribution by Lab",
+   subtitle = "Consensus peaks detected in all 4 labs",
+   x = "Laboratory",
+   y = "Peak Width (seconds)"
+ ) +
+ theme_minimal() +
+ theme(legend.position = "none")
+```
+
+### 5.3.2 FWHM Distribution
+
+```{r fwhm-distribution}
+ggplot(pk_metrics |> filter(!is.na(xicFwhm)), aes(x = lab, y = xicFwhm, fill = lab)) +
+ geom_violin(trim = FALSE, alpha = 0.6) +
+ geom_boxplot(width = 0.15, fill = "white", outlier.size = 0.5) +
+ facet_wrap(~factor(polarity, labels = c("Negative", "Positive"))) +
+ labs(
+   title = "FWHM Distribution by Lab",
+   subtitle = "Full Width at Half Maximum of detected peaks",
+   x = "Laboratory",
+   y = "FWHM (seconds)"
+ ) +
+ theme_minimal() +
+ theme(legend.position = "none")
+```
+
+### 5.3.3 Signal-to-Noise Ratio Distribution
+
+```{r snr-distribution}
+ggplot(pk_metrics, aes(x = lab, y = log10(signalToNoiseRatio + 1), fill = lab)) +
+ geom_violin(trim = FALSE, alpha = 0.6) +
+ geom_boxplot(width = 0.15, fill = "white", outlier.size = 0.5) +
+ facet_wrap(~factor(polarity, labels = c("Negative", "Positive"))) +
+ labs(
+   title = "Signal-to-Noise Ratio Distribution by Lab",
+   subtitle = "log10(SNR + 1) scale",
+   x = "Laboratory",
+   y = "log10(SNR + 1)"
+ ) +
+ theme_minimal() +
+ theme(legend.position = "none")
+```
+
+## 5.4 Inter-Lab Variability for Consensus Peaks
+
+For each consensus peak (detected in all 4 labs), we compute the coefficient
+of variation (CV = standard deviation / mean) of each metric across the 4
+labs. CV is inherently scale-normalized: it measures relative spread
+regardless of absolute intensity differences, so no prior normalization of
+intensity metrics is needed.
+
+- **CV < 0.3 (30%)**: Good reproducibility
+- **CV 0.3–0.5**: Moderate variability
+- **CV > 0.5**: High variability
+
+**IQR** (Interquartile Range): the difference between the 75th and 25th
+percentiles of the CV distribution, measuring the spread of the middle 50%
+of values.
+
+### 5.4.1 CV Summary Table
+
+```{r cv-summary-table}
+cv_by_consensus <- pk_metrics |>
+  group_by(consensus_id) |>
   summarise(
-    n_peaks = n(),
-    afekta_icl = cor(intensity_afekta, intensity_icl, method = "spearman", use = "pairwise.complete.obs"),
-    afekta_hmgu = cor(intensity_afekta, intensity_hmgu, method = "spearman", use = "pairwise.complete.obs"),
-    afekta_cembio = cor(intensity_afekta, intensity_cembio, method = "spearman", use = "pairwise.complete.obs"),
-    icl_hmgu = cor(intensity_icl, intensity_hmgu, method = "spearman", use = "pairwise.complete.obs"),
-    icl_cembio = cor(intensity_icl, intensity_cembio, method = "spearman", use = "pairwise.complete.obs"),
-    hmgu_cembio = cor(intensity_hmgu, intensity_cembio, method = "spearman", use = "pairwise.complete.obs"),
+    n_labs = n(),
+    cv_area = sd(areaUnderTic, na.rm = TRUE) / mean(areaUnderTic, na.rm = TRUE),
+    cv_max = sd(maxIntensity, na.rm = TRUE) / mean(maxIntensity, na.rm = TRUE),
+    cv_fwhm = sd(xicFwhm, na.rm = TRUE) / mean(xicFwhm, na.rm = TRUE),
+    cv_peakwidth = sd(peakWidth, na.rm = TRUE) / mean(peakWidth, na.rm = TRUE),
+    cv_snr = sd(signalToNoiseRatio, na.rm = TRUE) / mean(signalToNoiseRatio, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  filter(n_labs == 4)
+
+cv_summary <- cv_by_consensus |>
+  summarise(
+    across(starts_with("cv_"), list(
+      median = ~median(.x, na.rm = TRUE),
+      q25 = ~quantile(.x, 0.25, na.rm = TRUE),
+      q75 = ~quantile(.x, 0.75, na.rm = TRUE)
+    ))
+  )
+
+cv_table <- data.frame(
+  Metric = c("Area Under TIC", "Max Intensity", "FWHM", "Peak Width", "SNR"),
+  Median_CV = c(cv_summary$cv_area_median, cv_summary$cv_max_median,
+                cv_summary$cv_fwhm_median, cv_summary$cv_peakwidth_median,
+                cv_summary$cv_snr_median),
+  IQR = c(cv_summary$cv_area_q75 - cv_summary$cv_area_q25,
+          cv_summary$cv_max_q75 - cv_summary$cv_max_q25,
+          cv_summary$cv_fwhm_q75 - cv_summary$cv_fwhm_q25,
+          cv_summary$cv_peakwidth_q75 - cv_summary$cv_peakwidth_q25,
+          cv_summary$cv_snr_q75 - cv_summary$cv_snr_q25)
+)
+
+knitr::kable(cv_table,
+             caption = "Inter-Lab CV for Consensus Peaks (median and interquartile range)",
+             digits = 3)
+```
+
+### 5.4.2 CV Distribution Visualization
+
+```{r cv-distribution}
+#| fig-cap: "CV distribution across consensus peaks for each metric. Red dashed line = 30% CV threshold."
+cv_long <- cv_by_consensus |>
+ pivot_longer(
+   cols = starts_with("cv_"),
+   names_to = "metric",
+   names_prefix = "cv_",
+   values_to = "cv"
+ ) |>
+ mutate(metric = case_when(
+   metric == "area" ~ "Area Under TIC",
+   metric == "max" ~ "Max Intensity",
+   metric == "fwhm" ~ "FWHM",
+   metric == "peakwidth" ~ "Peak Width",
+   metric == "snr" ~ "SNR"
+ ))
+
+ggplot(cv_long |> filter(!is.na(cv) & cv < 2), aes(x = metric, y = cv, fill = metric)) +
+ geom_violin(trim = FALSE, alpha = 0.6) +
+ geom_boxplot(width = 0.15, fill = "white", outlier.size = 0.5) +
+ geom_hline(yintercept = 0.3, linetype = "dashed", color = "red") +
+ annotate("text", x = 5.3, y = 0.35, label = "CV = 30%", color = "red", size = 3) +
+ labs(
+   title = "Inter-Lab Variability for Consensus Peaks",
+   subtitle = "Lower CV = better reproducibility across labs",
+   x = "Metric",
+   y = "Coefficient of Variation"
+ ) +
+ theme_minimal() +
+ theme(legend.position = "none", axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+Shape metrics (FWHM, peak width) show lower CV than intensity metrics
+(area, max intensity), confirming that chromatographic behavior is more
+reproducible across labs than ionization response. SNR shows the highest
+variability, reflecting differences in baseline estimation across
+instruments.
+
+## 5.5 Peak Shape Similarity
+
+Beyond intensity metrics, we examine the actual chromatographic peak
+profiles to assess shape reproducibility across labs. For each consensus
+peak, EIC profiles are interpolated to a common 0–1 normalized x-axis
+and compared using Pearson correlation (shape agreement) and Tanimoto
+similarity (intensity distribution overlap). Full details of the
+computation are in `3a_peak_feature_calculation_detected.qmd`.
+
+### 5.5.1 Shape Similarity Summary
+
+```{r load-shape-results}
+shape_results <- read.csv(file.path(base_path, "object/peak_shape_similarity.csv"))
+
+shape_summary <- shape_results |>
+  group_by(pair) |>
+  summarise(
+    n = n(),
+    pearson_median = median(pearson, na.rm = TRUE),
+    pearson_mean = mean(pearson, na.rm = TRUE),
+    tanimoto_median = median(tanimoto, na.rm = TRUE),
+    tanimoto_mean = mean(tanimoto, na.rm = TRUE),
     .groups = "drop"
   )
 
-quartile_correlations
+knitr::kable(shape_summary,
+             caption = "Peak Shape Similarity by Lab Pair",
+             digits = 3)
 ```
 
-Notes: There's an NA in one of the rows. Need to recalculate nlab in the other script.
-This also suggests that normalizing by quartile and redoing the global analysis might be valuable.
+Median Pearson correlations range from 0.59 (hmgu:icl) to 0.73
+(afekta:hmgu). Tanimoto values are broadly similar across pairs
+(0.59–0.64), indicating that absolute profile overlap is more uniform
+than linear shape correlation.
+
+### 5.5.2 Pearson Correlation Distribution
+
+The 0.9 threshold is a standard cutoff for high-quality shape agreement
+in chromatographic peak matching.
+
+```{r pearson-distribution-global}
+#| fig-cap: "Pearson correlation distribution by lab pair. Red dashed line = 0.9 threshold."
+#| fig-width: 10
+#| fig-height: 6
+shape_pearson <- shape_results |> filter(!is.na(pearson))
+
+pct_above <- shape_pearson |>
+  group_by(pair) |>
+  summarise(
+    n_comparisons = n(),
+    n_above_0.9 = sum(pearson >= 0.9),
+    pct_above_0.9 = round(100 * mean(pearson >= 0.9), 1),
+    .groups = "drop"
+  )
+
+knitr::kable(pct_above,
+             caption = "Percentage of consensus peaks with Pearson >= 0.9",
+             col.names = c("Lab Pair", "Total Comparisons",
+                           "N above 0.9", "% above 0.9"))
+
+ggplot(shape_pearson, aes(x = pearson, fill = pair)) +
+  geom_histogram(bins = 50, alpha = 0.7, color = "white", linewidth = 0.2) +
+  facet_wrap(~pair, scales = "free_y") +
+  geom_vline(xintercept = 0.9, linetype = "dashed", color = "red") +
+  labs(
+    title = "Pearson Correlation Distribution by Lab Pair",
+    subtitle = "Red dashed line = 0.9 (high-quality shape match)",
+    x = "Pearson Correlation",
+    y = "Count"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+Only 11–20% of consensus peaks reach the 0.9 threshold depending on the
+lab pair, with afekta:hmgu highest (~20%) and afekta:icl lowest (~11%).
+The distributions are left-skewed with a long tail of poorly correlated
+peaks.
 
 ---
 
 # Summary {#summary}
 
 This analysis assessed LC-MS reproducibility across 4 laboratories
-analyzing 19 standard mixtures. Key findings:
+analyzing 19 standard mixtures in positive and negative ionization modes.
 
-1. **Peak detection improves reproducibility**: Detected signal ICC >0.5
-   vs full signal ICC <0.1. Isolating compound signal from baseline noise
-   is essential.
+1. **Peak detection improves reproducibility**: Detected signal ICC
+   0.50–0.56 vs full signal ICC 0.27–0.36. Isolating compound signal
+   from baseline noise is essential.
 
 2. **Same-platform instruments agree better**: Agilent Q-TOF labs
-   (Afekta, Cembio) show ICC 0.83–0.92; different platforms show lower
-   agreement. Suggests instrument design dominates variability.
+   (Afekta, Cembio) show ICC 0.84/0.92 and Spearman ρ ≈ 0.76; different
+   platforms show lower agreement (ρ ≈ 0.4–0.5).
 
 3. **Normalization strategy matters**: Median normalization improves ICC
-   from 0.05 to 0.55; volume normalization increases differences.
-   Naturally normalized metrics (ratios, percentages) are more stable
-   across labs.
+   from ~0.04 to ~0.53 — crossing the threshold from poor to moderate
+   reproducibility. Autoscaling introduces unwanted residual patterns.
 
-4. **Negative mode bias**: Needs further investigation.
+4. **RT-dependent biases**: Instrument sensitivity profiles vary non-linearly
+   across the gradient (e.g., ICL loses sensitivity in late quartiles;
+   Cembio shows lipid hyper-sensitivity). Local normalization by RT
+   quartile may be needed.
 
-5. **Local normalization**: RT-quartile-specific normalization handles
-   non-linear instrument sensitivity.
+5. **Chromatographic shape is more reproducible than ionization**: Shape
+   metrics (FWHM, peak width) show lower inter-lab CV than intensity
+   metrics (area, max intensity), confirming that chromatographic
+   behavior is better conserved across instruments.
+
+6. **Peak shape similarity**: Median Pearson correlations range from 0.59
+   to 0.73 across lab pairs. Only 11–20% of consensus peaks exceed the
+   0.9 high-quality threshold, indicating substantial room for
+   improvement.
+
+7. **Negative mode bias**: Consistent ~9% systematic bias between Agilent
+   labs; needs further investigation.
 
 ---
 
 # Future Directions
 
-- Combine with peak shape results
-- Incorporate more MsQuality metrics (baseline intensity, rtIqrChromatograms)
-- Expand to additional chemical classes: essentially need to run peak detection
-- Test in-house vs. commercial reverse-phase columns within same lab
-    - Afekta is the only lab that has that proper setup for this.
-- Annotated data? We will have it only for the HE data, so maybe not for now.
-
----
-
-# Appendix: Technical Notes
-
-Volume normalization increased differences; platform-independent
-intensity scaling is ineffective. Median scaling is preferred. Naturally
-normalized metrics (sensitivity, ratios) remain stable across labs.
-
-Lab-dependent correlations indicate the ratio cannot serve as a universal
-metric for cross-lab comparisons.
+- Normalize peak intensities at the consensus level and recompute ICC
+- Apply local (RT-quartile) normalization and assess improvement
+- Investigate negative mode bias systematically
+- Expand to Afekta–Cembio overlap analysis (50k+ peaks)
+- Test in-house vs commercial reverse-phase columns (Afekta)
+- Annotated data analysis once available for HE samples
+- Expand analysis to other HUMAN chemical classes (FE, Others) beyond HE
+  endosome mixtures
+- Redo analysis on imputed data using `imputePeaksData(eics, method = "gaussian")`
 
 

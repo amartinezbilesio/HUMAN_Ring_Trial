@@ -19,9 +19,10 @@ library(RSQLite)
 library(MsBackendSql)
 library(MsFeatures)
 library(pander)
+library(here)
 
 meta <- read_xlsx(
-  file.path("1_preprocessing", "standards.xlsx"),
+  here::here("1_preprocessing", "standards.xlsx"),
   col_names = TRUE,
   skip = 1,
   .name_repair = "minimal"
