@@ -1,0 +1,978 @@
+---
+title: "Adduct Grouping Method Development"
+format:
+  html:
+    toc: true
+    code-fold: true
+execute:
+  dir: project
+---
+
+# Introduction
+
+This document explores unsupervised methods to group chromatographic peaks
+that originate from the same compound (adducts, in-source fragments). We
+start with a single lab (afekta) and a file-by-file approach.
+
+**Strategy:**
+
+1. Load all detected peaks for afekta (per file/sample)
+2. Group peaks by RT (co-eluting peaks likely originate from the same compound)
+3. Within each RT group, compute m/z differences and check against known adduct
+   mass differences
+4. Compute peak shape metrics and test whether they can discriminate
+   same-compound vs different-compound peak pairs
+5. Compute peak shape similarity (Pearson correlation on raw EIC data)
+6. Evaluate all approaches against the annotated ground truth
+
+## Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+library(xcms)
+library(MsCoreUtils)
+library(MetaboCoreUtils)
+library(MsFeatures)
+library(Chromatograms)
+library(mclust)
+library(pheatmap)
+library(ggplot2)
+library(MsQuality)
+
+base_path <- here::here("5_downstream_analysis")
+source(file.path(base_path, "rt_analysis_function.R"))
+source(here::here("1_preprocessing/setup.R"))
+```
+
+# 1. Load Data
+
+## 1.1 Detected Peaks (afekta)
+
+```{r load-detected}
+pt_afekta <- read.csv(
+  file.path(base_path, "object/detected_peaks_afekta_HE.csv")
+)
+
+cat("Total detected peaks (afekta):", nrow(pt_afekta), "\n")
+cat("Columns:", paste(colnames(pt_afekta), collapse = ", "), "\n")
+cat("Samples:", length(unique(pt_afekta$sample)), "\n")
+cat("Mixtures:", paste(sort(unique(pt_afekta$mixture)), collapse = ", "), "\n")
+```
+
+## 1.2 Annotations (ground truth)
+
+```{r load-annotations}
+res_afekta <- read.csv(here::here(
+  "4_library_generation", "afekta", "HE", "ring_trial_library_HE.csv"
+))
+
+cat("Annotated peaks (afekta):", nrow(res_afekta), "\n")
+cat("Unique compounds:", length(unique(res_afekta$compound_name)), "\n")
+cat("Adducts used:", paste(unique(res_afekta$adduct), collapse = ", "), "\n")
+```
+
+## 1.3 Merge annotations into detected peaks
+
+We match annotations to detected peaks by `chrom_peak_id` so every detected
+peak knows whether it has been annotated and to which compound it belongs.
+
+```{r merge-annotations}
+ann_cols <- c("chrom_peak_id", "compound_name", "adduct", "formula",
+              "InChIKey")
+
+pt_afekta <- merge(
+  pt_afekta,
+  res_afekta[, ann_cols],
+  by = "chrom_peak_id",
+  all.x = TRUE
+)
+
+pt_afekta$is_annotated <- !is.na(pt_afekta$compound_name)
+
+cat("Annotated peaks in detected table:",
+    sum(pt_afekta$is_annotated), "of", nrow(pt_afekta),
+    "(", round(100 * mean(pt_afekta$is_annotated), 1), "%)\n")
+```
+
+# 2. RT Grouping — Anchored on Annotated Compounds
+
+**Why not `SimilarRtimeParam` / `MsCoreUtils::group()`?** These use
+neighbor-chaining — with dense peak data (~10k peaks across 700s, max
+consecutive gap < 2s), everything chains into a single group. Fixed-width
+binning (`cut()`) works but creates arbitrary boundaries.
+
+**Our approach:** Anchor groups on annotated compounds. For each annotated
+compound, we collect all detected peaks within ±`diffRt_sec` of its RT.
+This:
+
+- Prevents chaining (each group has a fixed center)
+- Guarantees every group has ground truth
+- Produces biologically meaningful groups (centered on real compounds)
+
+A detected peak can appear in multiple compound groups if it falls within
+the RT window of several annotated peaks — this is expected and correct
+(it could be an adduct of any of them).
+
+```{r rt-grouping}
+diffRt_sec <- 2 # seconds — half-width of the RT window around each compound
+
+# Build compound-level anchors: one row per compound × sample × polarity
+# If a compound has multiple annotated peaks (adducts), we use the median RT
+ann_peaks <- pt_afekta[pt_afekta$is_annotated, ]
+anchor_keys <- paste(ann_peaks$compound_name, ann_peaks$sample,
+                     ann_peaks$polarity, ann_peaks$mixture, sep = "|")
+
+anchors <- do.call(rbind, lapply(split(ann_peaks, anchor_keys), function(x) {
+  data.frame(
+    compound_name = x$compound_name[1],
+    sample        = x$sample[1],
+    polarity      = x$polarity[1],
+    mixture       = x$mixture[1],
+    anchor_rt     = median(x$rt),
+    n_adducts     = nrow(x),
+    adducts       = paste(unique(x$adduct), collapse = "; "),
+    stringsAsFactors = FALSE
+  )
+}))
+rownames(anchors) <- NULL
+anchors$group_id <- paste0("s", anchors$sample, "_", anchors$compound_name)
+
+cat("Compound anchors:", nrow(anchors), "\n")
+cat("Unique compounds:", length(unique(anchors$compound_name)), "\n")
+```
+
+```{r assign-groups}
+# For each anchor, pull in all detected peaks within the RT window
+pt_grouped <- do.call(rbind, lapply(seq_len(nrow(anchors)), function(i) {
+  a <- anchors[i, ]
+  idx <- pt_afekta$sample == a$sample &
+    pt_afekta$polarity == a$polarity &
+    abs(pt_afekta$rt - a$anchor_rt) <= diffRt_sec
+
+  if (sum(idx) == 0L) return(NULL)
+
+  out <- pt_afekta[idx, ]
+  out$group_id        <- a$group_id
+  out$anchor_compound <- a$compound_name
+  out$anchor_rt       <- a$anchor_rt
+  out$rt_offset       <- out$rt - a$anchor_rt
+  out
+}))
+
+cat("Total peak-group assignments:", nrow(pt_grouped), "\n")
+cat("Unique groups:", length(unique(pt_grouped$group_id)), "\n")
+cat("Unique peaks assigned:", length(unique(pt_grouped$chrom_peak_id)), "\n")
+
+# How many peaks per group?
+group_sizes <- as.data.frame(table(pt_grouped$group_id),
+                             stringsAsFactors = FALSE)
+colnames(group_sizes) <- c("group_id", "n_peaks")
+
+cat("\nGroup size summary:\n")
+summary(group_sizes$n_peaks)
+
+ggplot(group_sizes, aes(x = n_peaks)) +
+  geom_histogram(binwidth = 5, fill = "steelblue", color = "white") +
+  labs(
+    title = "Peaks per Compound-Anchored RT Group (afekta)",
+    subtitle = paste("RT window = ±", diffRt_sec, "seconds"),
+    x = "Number of peaks per group",
+    y = "Count"
+  ) +
+  theme_minimal()
+```
+
+## 2.1 Ground truth
+
+For each group, the anchor compound defines the "true" group. Any annotated
+peak in the group that matches the anchor compound is a true positive.
+Annotated peaks from *different* compounds are known negatives (co-eluting
+but different).
+
+```{r ground-truth}
+pt_grouped$is_same_compound <- pt_grouped$is_annotated &
+  pt_grouped$compound_name == pt_grouped$anchor_compound
+
+cat("Peaks matching anchor compound:", sum(pt_grouped$is_same_compound), "\n")
+cat("Annotated peaks from different compounds:",
+    sum(pt_grouped$is_annotated & !pt_grouped$is_same_compound), "\n")
+cat("Unannotated peaks:", sum(!pt_grouped$is_annotated), "\n")
+
+# How many groups have co-eluting different compounds?
+ann_grouped <- pt_grouped[pt_grouped$is_annotated, ]
+coeluters <- do.call(rbind, lapply(
+  split(ann_grouped, ann_grouped$group_id), function(x) {
+    data.frame(
+      group_id    = x$group_id[1],
+      n_compounds = length(unique(x$compound_name)),
+      compounds   = paste(unique(x$compound_name), collapse = "; "),
+      stringsAsFactors = FALSE
+    )
+  }
+))
+rownames(coeluters) <- NULL
+
+cat("\nGroups with co-eluting different compounds:",
+    sum(coeluters$n_compounds > 1), "of", nrow(coeluters), "\n")
+
+ggplot(coeluters, aes(x = n_compounds)) +
+  geom_bar(fill = "darkgreen") +
+  labs(
+    title = "Annotated Compounds per Group",
+    subtitle = "Groups anchored on annotated compounds",
+    x = "Number of distinct annotated compounds",
+    y = "Count"
+  ) +
+  theme_minimal()
+```
+
+# 3. Targeted Adduct Matching
+
+we compute the
+*expected m/z* for every plausible adduct and search the group for matches.
+
+We use `MetaboCoreUtils::adducts()` for the full adduct table, filtered to
+singly-charged species (multiply-charged ions are rare for small molecules
+in human metabolomics). We cast a wide net here — false positives from
+unlikely adducts will be filtered downstream by EIC correlation.
+
+**Important:** We only search among *unannotated* peaks. Peaks that already
+have a confirmed annotation are not re-searched — they already have an
+identity. We also skip target adducts that match the compound's
+already-known adduct types. The goal is to discover *new* adduct
+assignments for peaks that are currently unannotated.
+
+## 3.1 Build expected adduct m/z for each anchor
+
+```{r expected-adducts}
+# Get all singly-charged adducts from MetaboCoreUtils (both polarities)
+all_adducts_tbl <- rbind(adducts("positive"), adducts("negative"))
+all_adducts_tbl <- all_adducts_tbl[abs(all_adducts_tbl$charge) == 1, ]
+
+pos_adduct_names <- all_adducts_tbl$name[all_adducts_tbl$positive]
+neg_adduct_names <- all_adducts_tbl$name[!all_adducts_tbl$positive]
+
+# Remove dimer/trimer adducts ([2M…], [3M…]) — unlikely in standard LC-MS
+pos_adduct_names <- pos_adduct_names[!grepl("^\\[2M|^\\[3M", pos_adduct_names)]
+neg_adduct_names <- neg_adduct_names[!grepl("^\\[2M|^\\[3M", neg_adduct_names)]
+
+# Remove adducts requiring reagents/solvents not in standard RP-LC-MS
+# (water/ACN/formic acid mobile phase, aqueous sample matrix)
+implausible <- c(
+  "[M+Li]+",         # lithium not in mobile phase
+
+"[M+2Li-H]+",      # lithium not in mobile phase
+  "[M+Br]-",         # bromine not in solvents
+  "[M+C2F3O2]-",     # TFA — not used as modifier here
+  "[M+C2H6OS+H]+",   # DMSO — not used as solvent
+  "[M+C4H6N2+H]+",   # 1-methylimidazole — exotic
+  "[M+C3H8O+H]+"     # isopropanol — not in mobile phase
+)
+pos_adduct_names <- setdiff(pos_adduct_names, implausible)
+neg_adduct_names <- setdiff(neg_adduct_names, implausible)
+
+# Remove adducts already used during annotation — those matches are known
+annotated_adducts <- unique(res_afekta$adduct)
+pos_adduct_names <- setdiff(pos_adduct_names, annotated_adducts)
+neg_adduct_names <- setdiff(neg_adduct_names, annotated_adducts)
+
+cat("Charge-1 adducts available:\n")
+cat("  Positive:", length(pos_adduct_names), "-",
+    paste(pos_adduct_names, collapse = ", "), "\n")
+cat("  Negative:", length(neg_adduct_names), "-",
+    paste(neg_adduct_names, collapse = ", "), "\n")
+
+# Compute exact neutral mass directly from molecular formula
+compound_mass <- unique(res_afekta[, c("compound_name", "formula")])
+compound_mass$neutral_mass <- calculateMass(compound_mass$formula)
+
+anchor_expected <- merge(
+  anchors[, c("compound_name", "sample", "polarity", "group_id",
+              "anchor_rt", "adducts")],
+  compound_mass,
+  by = "compound_name"
+)
+colnames(anchor_expected)[colnames(anchor_expected) == "adducts"] <- "known_adducts"
+rownames(anchor_expected) <- NULL
+
+cat("\nAnchors with neutral mass:", nrow(anchor_expected), "\n")
+cat("Unique compounds:", length(unique(anchor_expected$compound_name)), "\n")
+```
+
+## 3.2 Search for matching peaks
+
+For each anchor × target adduct, find co-eluting *unannotated* peaks whose
+m/z matches the expected value within tolerance. Already-annotated peaks are
+excluded from the search — they have a confirmed identity.
+
+We use `MetaboAnnotation::matchValues()` with `Mass2MzParam` to perform
+the m/z matching. This converts neutral masses to expected adduct m/z
+values and matches them against observed peak m/z using a ppm tolerance.
+
+```{r adduct-search}
+library(MetaboAnnotation)
+
+# Split pt_grouped by group_id for fast lookup
+grp_split <- split(pt_grouped, pt_grouped$group_id)
+
+ppm_tol <- 5
+param_pos <- Mass2MzParam(adducts = pos_adduct_names, tolerance = 0,
+ ppm = ppm_tol)
+param_neg <- Mass2MzParam(adducts = neg_adduct_names, tolerance = 0,
+ ppm = ppm_tol)
+
+# For each group: match unannotated peaks against anchor's neutral mass
+adduct_hits <- do.call(rbind, lapply(
+  unique(anchor_expected$group_id), function(gid) {
+    grp <- grp_split[[gid]]
+    if (is.null(grp)) return(NULL)
+
+    # Only consider unannotated peaks as candidates
+    grp_unann <- grp[!grp$is_annotated, ]
+    if (nrow(grp_unann) == 0L) return(NULL)
+    ae <- anchor_expected[anchor_expected$group_id == gid, ]
+    if (nrow(ae) == 0L || is.na(ae$neutral_mass)) return(NULL)
+    target_df <- data.frame(exactmass = ae$neutral_mass)
+    query_df <- data.frame(mz = grp_unann$mz)
+    param <- if (ae$polarity == "pos") param_pos else param_neg
+
+    res <- matchValues(query_df, target_df, param)
+    md <- matchedData(res)
+
+    # Keep only matched rows (non-NA adduct)
+    matched_rows <- which(!is.na(md$adduct))
+    if (length(matched_rows) == 0L) return(NULL)
+    md <- md[matched_rows, ]
+
+    # Map back to original peak rows using query index
+    out <- grp_unann[matched_rows, ]
+    out$matched_adduct <- as.character(md$adduct)
+    out$mz_error       <- as.numeric(md$score)
+    out$ppm_error      <- as.numeric(md$ppm_error)
+    out$neutral_mass   <- ae$neutral_mass
+    out
+  }
+))
+rownames(adduct_hits) <- NULL
+
+# All hits are unannotated peaks → status is "maybe" (needs validation)
+adduct_hits$adduct_status <- "maybe"
+
+cat("Total adduct hits (all 'maybe'):", nrow(adduct_hits), "\n")
+cat("Unique groups with hits:", length(unique(adduct_hits$group_id)), "\n")
+cat("Unique peaks matched:", length(unique(adduct_hits$chrom_peak_id)), "\n")
+
+# Summary by adduct type
+adduct_freq <- as.data.frame(table(adduct_hits$matched_adduct),
+                             stringsAsFactors = FALSE)
+colnames(adduct_freq) <- c("matched_adduct", "n")
+adduct_freq <- adduct_freq[order(-adduct_freq$n), ]
+knitr::kable(adduct_freq, caption = "Hits per adduct type", row.names = FALSE)
+```
+
+## 3.3 Hit ambiguity
+
+Since we only searched unannotated peaks, all hits are "maybe" by
+definition. We check whether the same peak was matched to multiple
+anchors (indicating ambiguity that downstream validation must resolve).
+
+```{r adduct-eval}
+# How many peaks are matched to multiple groups/compounds?
+peak_group_counts <- as.data.frame(
+  table(adduct_hits$chrom_peak_id), stringsAsFactors = FALSE
+)
+colnames(peak_group_counts) <- c("chrom_peak_id", "n_assignments")
+
+# Maybe hits per group
+maybe_per_group <- as.data.frame(
+  table(adduct_hits$group_id), stringsAsFactors = FALSE
+)
+colnames(maybe_per_group) <- c("group_id", "n_maybe")
+```
+
+I get reasonable numbers.
+
+```{r candidate-distribution}
+ggplot(maybe_per_group, aes(x = n_maybe)) +
+  geom_histogram(binwidth = 1, fill = "steelblue", color = "white") +
+  labs(
+    title = "'Maybe' Adduct Hits per Compound Group",
+    subtitle = "Unannotated peaks matching expected adduct m/z — need validation",
+    x = "Number of 'maybe' adducts",
+    y = "Number of groups"
+  ) +
+  theme_minimal()
+```
+
+## 3.4 m/z error distribution
+
+```{r mz-error-dist, fig.width=10, fig.height=4}
+library(patchwork)
+
+p1 <- ggplot(adduct_hits, aes(x = mz_error * 1000)) +
+  geom_histogram(bins = 50, fill = "steelblue", color = "white") +
+  labs(title = "Absolute m/z Error", x = "m/z Error (mDa)", y = "Count") +
+  theme_minimal()
+
+p2 <- ggplot(adduct_hits, aes(x = ppm_error)) +
+  geom_histogram(bins = 50, fill = "steelblue", color = "white") +
+  geom_vline(xintercept = c(-ppm_tol, ppm_tol), linetype = "dashed",
+             color = "red") +
+  labs(title = "Relative m/z Error", x = "ppm Error", y = "Count") +
+  theme_minimal()
+
+p1 + p2 + plot_annotation(
+  title = "m/z Error Distribution for Adduct Matches",
+  subtitle = paste("Tolerance:", ppm_tol, "ppm — all hits are 'maybe'")
+)
+```
+
+# 4. Peak Metrics for Adduct Grouping
+
+Peak metrics (FWHM, peak width, tailing, etc.) are computed for **all**
+peaks in the RT-anchored groups. This serves two purposes:
+
+1. Filter low-quality adduct candidates (section 4.4)
+2. Test whether metrics can discriminate same-compound vs different-compound
+   peaks via clustering (section 5)
+
+## 4.1 Extract EICs for all grouped peaks
+
+We extract EICs for all peaks assigned to anchor groups — this includes
+annotated peaks, adduct candidates, and all other co-eluting peaks.
+
+```{r extract-eics}
+annotated_in_groups <- pt_grouped[pt_grouped$is_annotated, ]
+
+# All unique peaks across all anchor groups
+all_peaks_needed <- unique(pt_grouped$chrom_peak_id)
+
+# Build peak table for EIC extraction
+pk_rows <- pt_afekta[pt_afekta$chrom_peak_id %in% all_peaks_needed, ]
+pk_rows <- pk_rows[!duplicated(pk_rows$chrom_peak_id), ]
+
+pk_table <- data.frame(
+  chrom_peak_id = pk_rows$chrom_peak_id,
+  mzMin    = pk_rows$mzmin - 0.003,
+  mzMax    = pk_rows$mzmax + 0.003,
+  rtMin    = pk_rows$rtmin - 3,
+  rtMax    = pk_rows$rtmax + 3,
+  polarity = ifelse(pk_rows$polarity == "pos", 1L, 0L),
+  mixture  = pk_rows$mixture,
+  sample   = pk_rows$sample,
+  stringsAsFactors = FALSE
+)
+
+eics_file <- file.path(base_path, "object/eics_afekta_grouped.RData")
+
+if (!file.exists(eics_file)) {
+  load(file.path(base_path, "object/tic_full_spectra.RData"))
+  tic_afekta <- tic_full[tic_full$lab == "afekta"]
+
+  eics_afekta <- chromExtract(
+    tic_afekta,
+    peak.table = pk_table,
+    by = c("polarity", "mixture")
+  )
+  eics_afekta <- setBackend(eics_afekta, ChromBackendMemory())
+  save(eics_afekta, file = eics_file)
+  rm(tic_full, tic_afekta)
+} else {
+  load(eics_file)
+}
+
+cat("Afekta EICs extracted:", length(eics_afekta), "\n")
+```
+
+## 4.2 Compute peak metrics
+
+```{r compute-metrics}
+metrics <- c(
+  "peakCount",
+  "xicFwhm",
+  "areaUnderTic",
+  "maxIntensity",
+  "baselineIntensity",
+  "signalToNoiseRatio",
+  "peakWidth",
+  "peakBoundary",
+  "peakProminence",
+  "peakBeta"
+)
+
+pk_metrics <- calculateMetrics(
+  eics_afekta,
+  metrics = metrics,
+  na.rm = TRUE,
+  filterEmptyObject = FALSE,
+  f = seq_len(length(eics_afekta)),
+  probs = 0.05,
+  method = "adaptive",
+  minPeakWidth = 3
+)
+
+cd_afekta <- chromData(eics_afekta)
+pk_metrics <- cbind(
+  cd_afekta[, intersect(
+    c("chrom_peak_id", "mixture", "polarity", "mz", "sample"),
+    colnames(cd_afekta)
+  )],
+  pk_metrics
+)
+
+cat("Metrics computed for", nrow(pk_metrics), "peaks\n")
+```
+
+## 4.3 Merge metrics with adduct hits
+
+```{r merge-metrics}
+metric_cols <- c("chrom_peak_id",
+                 "peakCount", "xicFwhm", "areaUnderTic", "maxIntensity",
+                 "baselineIntensity", "signalToNoiseRatio", "peakWidth",
+                 "peakBoundary1", "peakBoundary2", "peakProminence",
+                 "peakBeta1", "peakBeta2")
+metric_cols <- intersect(metric_cols, colnames(pk_metrics))
+
+adduct_hits <- merge(adduct_hits, pk_metrics[, metric_cols],
+                     by = "chrom_peak_id", all.x = TRUE)
+
+cat("Adduct hits with metrics:",
+    sum(!is.na(adduct_hits$xicFwhm)), "of", nrow(adduct_hits), "\n")
+```
+
+## 4.4 Filter bad peaks
+
+Remove candidate adduct peaks with poor quality metrics — same criteria
+as in the detected-peaks analysis (`3a_peak_feature_calculation_detected`).
+
+```{r filter-bad-peaks}
+n_before <- nrow(adduct_hits)
+
+bad_peaks <- is.na(adduct_hits$xicFwhm) |
+  (!is.na(adduct_hits$peakProminence) & adduct_hits$peakProminence < 1.5) |
+  (!is.na(adduct_hits$peakWidth) & adduct_hits$peakWidth < 1) |
+  (!is.na(adduct_hits$peakWidth) & adduct_hits$peakWidth > 30)
+
+adduct_hits <- adduct_hits[!bad_peaks, ]
+rownames(adduct_hits) <- NULL
+
+cat("Removed", sum(bad_peaks), "peaks with poor quality metrics\n")
+cat("Remaining adduct hits:", nrow(adduct_hits), "of", n_before, "\n")
+cat("Unique groups:", length(unique(adduct_hits$group_id)), "\n")
+cat("Unique peaks:", length(unique(adduct_hits$chrom_peak_id)), "\n")
+```
+
+# 5. Clustering Evaluation
+
+
+```{r}
+# ------------------------------------------------------------------
+# 2. STEP 1: Anti-Chaining RT Clustering (Sample-by-Sample)
+# ------------------------------------------------------------------
+cat("\n--- Running Unsupervised RT Clustering (Per Sample) ---\n")
+
+# Initialize an empty vector for our new RT cluster IDs
+pt_clustering$rt_cluster <- NA
+max_rt_width <- 4 # Maximum allowed seconds between any two peaks in a group
+
+# Loop through each sample individually
+for (samp in unique(pt_clustering$sample)) {
+
+  # Get row indices for the current sample
+  idx <- which(pt_clustering$sample == samp)
+
+  # Skip if a sample is empty or has only 1 peak
+  if (length(idx) <= 1) {
+    if (length(idx) == 1) pt_clustering$rt_cluster[idx] <- paste0(samp, "_rt1")
+    next
+  }
+
+  # Calculate distance matrix ONLY for this specific sample
+  # A few thousand peaks per sample uses almost no memory
+  rt_dist <- dist(pt_clustering$rt[idx])
+
+  # Complete linkage: strictly prevents chaining.
+  # No cluster will ever be wider than max_rt_width.
+  rt_hc <- hclust(rt_dist, method = "complete")
+
+  # Cut the tree
+  samp_clusters <- cutree(rt_hc, h = max_rt_width)
+
+  # Assign unique cluster IDs (e.g., "Sample1_rt1", "Sample1_rt2")
+  pt_clustering$rt_cluster[idx] <- paste0(samp, "_rt", samp_clusters)
+}
+
+cat("Created", length(unique(pt_clustering$rt_cluster)), "RT clusters across all samples.\n")
+```
+
+
+```{r}
+cat("\n--- Running Metric Sub-Clustering within RT Groups ---\n")
+
+# Scale the metrics globally so big numbers (Area) don't crush small ones (FWHM)
+scaled_metrics <- scale(pt_clustering[, metric_cols])
+
+# Initialize the final cluster column
+pt_clustering$final_cluster <- NA
+cluster_counter <- 1
+
+# Loop through each of the 420 RT buckets and split them up using peak shapes
+for (rt_id in unique(pt_clustering$rt_cluster)) {
+
+  idx <- which(pt_clustering$rt_cluster == rt_id)
+
+  # If the RT bucket somehow only has 1 peak, it is its own cluster
+  if (length(idx) == 1) {
+    pt_clustering$final_cluster[idx] <- paste0("C", cluster_counter, "_1")
+    cluster_counter <- cluster_counter + 1
+    next
+  }
+
+  # Extract scaled fingerprints for these co-eluting peaks
+  group_fingerprints <- scaled_metrics[idx, , drop = FALSE]
+
+  # Calculate Euclidean distance between peak shapes
+  metric_dist <- dist(group_fingerprints)
+
+  # Cluster based on peak shape
+  metric_hc <- hclust(metric_dist, method = "average")
+
+  # Cut the tree based on peak shape similarity
+  # (h = 1.5 is a starting guess for scaled data; lower means stricter shape matching)
+  metric_threshold <- 1.5
+  sub_clusters <- cutree(metric_hc, h = metric_threshold)
+
+  # Assign the final refined compound IDs
+  pt_clustering$final_cluster[idx] <- paste0("C", cluster_counter, "_", sub_clusters)
+  cluster_counter <- cluster_counter + 1
+}
+
+cat("Created", length(unique(pt_clustering$final_cluster)), "final peak-shape resolved clusters!\n")
+```
+
+
+
+```{r}
+cat("\n--- Evaluating Cluster Quality Against Ground Truth ---\n")
+
+# Isolate only the peaks that have a confirmed annotation
+ann_data <- pt_clustering[!is.na(pt_clustering$compound_name), ]
+
+cat("Total annotated peaks to evaluate:", nrow(ann_data), "\n")
+
+# ---------------------------------------------------------
+# TEST 1: Cluster Purity (Are we mixing different compounds?)
+# ---------------------------------------------------------
+# Group by final_cluster and count unique compound names
+cluster_purity <- aggregate(compound_name ~ final_cluster, data = ann_data,
+                            FUN = function(x) length(unique(x)))
+colnames(cluster_purity)[2] <- "n_compounds"
+
+mixed_clusters <- sum(cluster_purity$n_compounds > 1)
+pure_clusters <- sum(cluster_purity$n_compounds == 1)
+
+cat("\n[1] CLUSTER PURITY:\n")
+cat(" - Pure clusters (1 compound per cluster):", pure_clusters, "\n")
+cat(" - Mixed clusters (>1 compound per cluster):", mixed_clusters, "\n")
+if(nrow(cluster_purity) > 0) {
+  cat(" - Purity Rate:", round((pure_clusters / nrow(cluster_purity)) * 100, 1), "%\n")
+}
+
+# ---------------------------------------------------------
+# TEST 2: Compound Integrity (Are we splitting up adducts?)
+# ---------------------------------------------------------
+# To prevent mixing samples, create a unique ID for each compound-sample pair
+ann_data$compound_sample <- paste(ann_data$compound_name, ann_data$sample, sep = "|")
+
+# Group by compound_sample and count how many final_clusters they got split into
+compound_integrity <- aggregate(final_cluster ~ compound_sample, data = ann_data,
+                                FUN = function(x) length(unique(x)))
+colnames(compound_integrity)[2] <- "n_clusters"
+
+intact_compounds <- sum(compound_integrity$n_clusters == 1)
+split_compounds <- sum(compound_integrity$n_clusters > 1)
+
+cat("\n[2] COMPOUND INTEGRITY:\n")
+cat(" - Intact compounds (all adducts stayed in 1 cluster):", intact_compounds, "\n")
+cat(" - Split compounds (adducts scattered across multiple clusters):", split_compounds, "\n")
+if(nrow(compound_integrity) > 0) {
+  cat(" - Integrity Rate:", round((intact_compounds / nrow(compound_integrity)) * 100, 1), "%\n")
+}
+```
+
+
+```{r}
+cat("\n--- Optimizing Peak Shape Threshold (h) ---\n")
+
+# Store the hclust objects so we don't have to recalculate distances every time
+hc_list <- list()
+idx_list <- list()
+
+for (rt_id in unique(pt_clustering$rt_cluster)) {
+  idx <- which(pt_clustering$rt_cluster == rt_id)
+  if (length(idx) > 1) {
+    # Extract fingerprints and compute hclust once per RT group
+    group_fingerprints <- scaled_metrics[idx, , drop = FALSE]
+    hc_list[[rt_id]] <- hclust(dist(group_fingerprints), method = "average")
+    idx_list[[rt_id]] <- idx
+  }
+}
+
+# Test different h values
+test_h_vals <- c(0.5, 0.8, 1.0, 1.2, 1.5, 1.8, 2.0, 2.5)
+results <- data.frame(h = numeric(), purity = numeric(), integrity = numeric())
+
+for (h_val in test_h_vals) {
+
+  temp_cluster <- rep(NA, nrow(pt_clustering))
+  cluster_counter <- 1
+
+  for (rt_id in unique(pt_clustering$rt_cluster)) {
+    idx <- which(pt_clustering$rt_cluster == rt_id)
+    if (length(idx) == 1) {
+      temp_cluster[idx] <- paste0("C", cluster_counter, "_1")
+    } else {
+      sub_clusters <- cutree(hc_list[[rt_id]], h = h_val)
+      temp_cluster[idx] <- paste0("C", cluster_counter, "_", sub_clusters)
+    }
+    cluster_counter <- cluster_counter + 1
+  }
+
+  # --- Evaluation Section ---
+  temp_ann <- pt_clustering[!is.na(pt_clustering$compound_name), ]
+  temp_ann$test_cluster <- temp_cluster[!is.na(pt_clustering$compound_name)]
+
+  # FIX: Create the compound_sample column here!
+  temp_ann$compound_sample <- paste(temp_ann$compound_name, temp_ann$sample, sep = "|")
+
+  # 1. Purity (Are we mixing different compounds?)
+  pur_agg <- aggregate(compound_name ~ test_cluster, data = temp_ann,
+                       FUN = function(x) length(unique(x)))
+  pur_rate <- (sum(pur_agg$compound_name == 1) / nrow(pur_agg)) * 100
+
+  # 2. Integrity (Are we splitting up adducts?)
+  int_agg <- aggregate(test_cluster ~ compound_sample, data = temp_ann,
+                       FUN = function(x) length(unique(x)))
+  int_rate <- (sum(int_agg$test_cluster == 1) / nrow(int_agg)) * 100
+
+  # Store results
+  results <- rbind(results, data.frame(h = h_val, purity = pur_rate, integrity = int_rate))
+}
+
+print(results)
+```
+
+we could plot this. the user could decide what they want to trade offf on. In
+our case we would focus more on purity as splitting up adducts is less bad than
+ mixing different compounds together.
+
+Below we try to optimize our fingerprint using pure shape metrics
+ (FWHM, peak width) and remove intensity-based metrics that may be more
+ variable across adducts. We test several combinations of metrics to see
+ which best discriminates same-compound vs different-compound peaks.
+
+
+```{r}
+cat("\n--- Testing Different Peak Metric Combinations ---\n")
+
+# 1. Bring in all potential metrics, including the Beta (tailing/fronting) metrics
+all_candidates <- c("xicFwhm", "peakWidth", "peakProminence", "signalToNoiseRatio",
+                    "peakCount", "peakBeta1", "peakBeta2")
+all_candidates <- intersect(all_candidates, colnames(pk_metrics))
+
+# Merge into our base table and drop NAs so all tests are perfectly comparable
+pt_test <- merge(pt_afekta, pk_metrics[, c("chrom_peak_id", all_candidates)],
+                 by = "chrom_peak_id", all.x = TRUE)
+pt_test <- pt_test[complete.cases(pt_test[, all_candidates]), ]
+
+# We need to quickly rebuild the RT clusters for this freshly filtered data
+pt_test <- pt_test[order(pt_test$rt), ]
+pt_test$rt_cluster <- NA
+for (samp in unique(pt_test$sample)) {
+  idx <- which(pt_test$sample == samp)
+  if (length(idx) <= 1) {
+    if (length(idx) == 1) pt_test$rt_cluster[idx] <- paste0(samp, "_rt1")
+    next
+  }
+  rt_hc <- hclust(dist(pt_test$rt[idx]), method = "complete")
+  pt_test$rt_cluster[idx] <- paste0(samp, "_rt", cutree(rt_hc, h = 4))
+}
+
+# 2. Define the different "recipes" to test
+ # 2. Define the updated "recipes" to test
+recipes <- list(
+  "Original" = c("xicFwhm", "peakWidth", "peakProminence", "signalToNoiseRatio", "peakCount"),
+  "Intensity Heavy" = c("peakProminence", "signalToNoiseRatio"),
+  "Pure Shape (Strict)" = c("xicFwhm", "peakWidth"),
+  "Shape + Tailing" = c("xicFwhm", "peakWidth", "peakBeta1")
+)
+
+results_metrics <- data.frame(Recipe = character(), Purity = numeric(), Integrity = numeric(), stringsAsFactors = FALSE)
+
+# Fixed strict threshold for the test
+test_h <- 0.8
+
+# 3. Loop through each recipe
+for (recipe_name in names(recipes)) {
+
+  current_metrics <- recipes[[recipe_name]]
+
+  # Ensure the metrics actually exist in the data
+  current_metrics <- intersect(current_metrics, colnames(pt_test))
+
+  # Scale only the metrics in the current recipe
+  scaled_m <- scale(pt_test[, current_metrics])
+
+  temp_cluster <- rep(NA, nrow(pt_test))
+  cluster_counter <- 1
+
+  for (rt_id in unique(pt_test$rt_cluster)) {
+    idx <- which(pt_test$rt_cluster == rt_id)
+    if (length(idx) == 1) {
+      temp_cluster[idx] <- paste0("C", cluster_counter, "_1")
+    } else {
+      group_fp <- scaled_m[idx, , drop = FALSE]
+      metric_hc <- hclust(dist(group_fp), method = "average")
+      sub_clusters <- cutree(metric_hc, h = test_h)
+      temp_cluster[idx] <- paste0("C", cluster_counter, "_", sub_clusters)
+    }
+    cluster_counter <- cluster_counter + 1
+  }
+
+  # --- Evaluate ---
+  temp_ann <- pt_test[!is.na(pt_test$compound_name), ]
+  temp_ann$test_cluster <- temp_cluster[!is.na(pt_test$compound_name)]
+  temp_ann$compound_sample <- paste(temp_ann$compound_name, temp_ann$sample, sep = "|")
+
+  pur_agg <- aggregate(compound_name ~ test_cluster, data = temp_ann, FUN = function(x) length(unique(x)))
+  pur_rate <- (sum(pur_agg$compound_name == 1) / nrow(pur_agg)) * 100
+
+  int_agg <- aggregate(test_cluster ~ compound_sample, data = temp_ann, FUN = function(x) length(unique(x)))
+  int_rate <- (sum(int_agg$test_cluster == 1) / nrow(int_agg)) * 100
+
+  results_metrics <- rbind(results_metrics, data.frame(Recipe = recipe_name, Purity = pur_rate, Integrity = int_rate))
+}
+
+print(results_metrics)
+```
+
+
+
+in conclusoin:
+
+Step 1: Complete-linkage RT clustering (per-sample) with h = 4 seconds.
+
+Step 2: Average-linkage metric clustering using
+c("xicFwhm", "peakWidth", "peakBeta1") with Z-score scaling and h = 0.8.
+
+
+
+
+```{r}
+library(mclust)
+
+# Assuming temp_ann is your annotated subset from the winning Recipe 4 evaluation
+# True Labels: The actual compound-sample identities
+true_labels <- temp_ann$compound_sample
+
+# Predicted Labels: The unsupervised clusters we generated
+predicted_labels <- temp_ann$test_cluster
+
+# Calculate Adjusted Rand Index
+ari_score <- adjustedRandIndex(true_labels, predicted_labels)
+
+cat("\n--- Formal Clustering Evaluation ---\n")
+cat("Adjusted Rand Index (ARI):", round(ari_score, 3), "\n")
+```
+
+Gemini ha detto
+Here is a perfectly formatted summary you can drop straight into your Quarto document. I wrote it to match the tone of your introduction, balancing the strict machine-learning theory with the practical reality of LC-MS metabolomics.
+
+You can copy and paste this directly into a text section of your project:
+
+Clustering Evaluation Strategy: ARI vs. Domain-Specific Metrics
+To evaluate the performance of our unsupervised adduct clustering against the annotated ground truth, we utilize two complementary approaches: standard machine learning metrics and domain-specific chromatographic metrics.
+
+1. Domain-Specific Metrics: Purity (Homogeneity) and Integrity (Completeness)
+In untargeted LC-MS, clustering errors do not carry equal weight. We manually calculate two specific metrics to understand exactly how the algorithm fails:
+
+Cluster Purity: The percentage of clusters that contain only a single annotated compound. Low purity means the algorithm is grouping different co-eluting compounds together. This is a "fatal" error in metabolomics because it mixes MS1/MS2 spectra, leading to false library annotations.
+
+Compound Integrity: The percentage of true compounds whose adducts were perfectly kept together in a single cluster. Low integrity means the algorithm split a single compound's adducts into multiple clusters. While suboptimal, this is a "safe" error—it merely creates redundant features in the dataset without corrupting the underlying mass spectra.
+
+Strategy: We actively optimize our distance thresholds (e.g., h=0.8) and metric fingerprints to maximize Purity (typically ~90%), even if it costs us some Integrity (typically capping around 80-85% due to the physical intensity differences between major and minor adducts).
+
+2. Statistical Benchmark: Adjusted Rand Index (ARI)
+
+While Purity and Integrity inform our method development, they are highly directional. To provide a rigorously standardized and peer-review-friendly benchmark, we also calculate the Adjusted Rand Index (ARI) using the mclust package.
+
+ARI measures the overall similarity between our unsupervised clusters and the true compound groupings, mathematically adjusted for the baseline chance of random grouping.
+
+While ARI is the gold standard in machine learning, it penalizes false positives (mixing compounds) and false negatives (splitting adducts) equally. Therefore, we expect a moderate ARI score (e.g., 0.65 - 0.80), which reflects our intentional bias toward over-clustering to preserve spectral purity.
+
+
+
+```{r}
+library(mclust)
+
+cat("\n--- Corrected Formal Clustering Evaluation ---\n")
+
+# 1. Count how many peaks each compound has in the ground truth
+compound_counts <- table(temp_ann$compound_sample)
+
+# 2. Identify compounds that actually have multiple adducts (pairs exist!)
+multi_peak_compounds <- names(compound_counts[compound_counts > 1])
+
+# 3. Filter the evaluation data to only those multi-peak compounds
+eval_data <- temp_ann[temp_ann$compound_sample %in% multi_peak_compounds, ]
+
+cat("Number of multi-peak compounds to evaluate:", length(unique(eval_data$compound_sample)), "\n")
+cat("Total peaks in these compounds:", nrow(eval_data), "\n")
+
+# 4. Recalculate Adjusted Rand Index on fair data
+true_labels_filtered <- eval_data$compound_sample
+predicted_labels_filtered <- eval_data$test_cluster
+
+ari_score_corrected <- adjustedRandIndex(true_labels_filtered, predicted_labels_filtered)
+
+cat("Corrected Adjusted Rand Index (ARI):", round(ari_score_corrected, 3), "\n")
+```
+
+is there really such a small amount of multipeak compounds ?
+
+
+```{r}
+cat("\n--- Formal Pairwise Evaluation (Precision / Recall / F1) ---\n")
+
+# We use the eval_data (the 156 peaks from 78 multi-peak compounds)
+# Generate all possible pairs of these 156 peaks
+all_pairs <- combn(eval_data$chrom_peak_id, 2)
+
+# Vectorized check: Are they in the same TRUE compound?
+true_compound_1 <- eval_data$compound_sample[match(all_pairs[1,], eval_data$chrom_peak_id)]
+true_compound_2 <- eval_data$compound_sample[match(all_pairs[2,], eval_data$chrom_peak_id)]
+is_true_pair <- (true_compound_1 == true_compound_2)
+
+# Vectorized check: Are they in the same PREDICTED cluster?
+pred_cluster_1 <- eval_data$test_cluster[match(all_pairs[1,], eval_data$chrom_peak_id)]
+pred_cluster_2 <- eval_data$test_cluster[match(all_pairs[2,], eval_data$chrom_peak_id)]
+is_pred_pair <- (pred_cluster_1 == pred_cluster_2)
+
+# Calculate confusion matrix components
+true_positives <- sum(is_true_pair & is_pred_pair)
+false_positives <- sum(!is_true_pair & is_pred_pair)
+false_negatives <- sum(is_true_pair & !is_pred_pair)
+
+# Calculate Metrics
+precision <- true_positives / (true_positives + false_positives)
+recall <- true_positives / (true_positives + false_negatives)
+f1_score <- 2 * ((precision * recall) / (precision + recall))
+
+cat("Total True Adduct Pairs: ", sum(is_true_pair), "\n")
+cat("Total Predicted Pairs:   ", sum(is_pred_pair), "\n")
+cat("True Positives (Caught): ", true_positives, "\n\n")
+
+cat("Precision (Are predicted groups real?):", round(precision * 100, 1), "%\n")
+cat("Recall (Did we catch all real pairs?): ", round(recall * 100, 1), "%\n")
+cat("F1-Score (Overall Quality, 0 to 1):    ", round(f1_score, 3), "\n")
+
+```
