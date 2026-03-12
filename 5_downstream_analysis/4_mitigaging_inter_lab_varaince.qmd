@@ -11,6 +11,23 @@ execute:
 
 # Introduction
 
+## Input Data
+
+All required input data lives in the `data/` subfolder. These files are
+produced by the upstream pipeline (`1_object_creation.qmd` →
+`2_global_analysis.qmd` → `3a_peak_feature_calculation_detected.qmd`).
+I can also provide them pre-computed.
+
+**RData objects** (chromatographic profiles, from `1_object_creation.qmd`):
+`bpc_full.RData`, `bpc_detect.RData`, `tic_full.RData`, `tic_detect.RData`
+
+**CSV files** (from `1_object_creation.qmd` and `3a_peak_feature_calculation_detected.qmd`):
+`detected_peaks_{afekta,cembio,hmgu,icl}_HE.csv`,
+`peak_metrics_detected_all4labs.csv`, `peak_shape_similarity.csv`
+
+**Helper files** (in `5_downstream_analysis/`):
+`global_analysis_helpers.R`, `lab_setup_phase1.csv`
+
 ## The Epidemiological Imperative and the Technical Barrier
 
 Large-scale epidemiological studies require multi-center designs to achieve
@@ -67,6 +84,9 @@ culminating in a definition of the hardware-imposed reproducibility ceiling.
 ## Load Libraries
 
 ```{r library, include=TRUE, warning=FALSE, message=FALSE}
+##The install belows are temporary and should be replaced with proper dependencies in the future.
+BiocManager::install("RforMassSpectrometry/Chromatograms", ask = FALSE, update = TRUE)
+BiocManager::install(("philouail/MsQuality", ref = "Chromatgorams"), ask = FALSE, update = TRUE)
 library(Chromatograms)
 library(tidyr)
 library(dplyr)
@@ -124,14 +144,14 @@ polarities, along with normalization variants.
 ```{r compute-metrics}
 compute_metrics <- function(polarity, polarity_name, data_level = "full") {
   if (data_level == "full") {
-    load(file.path(base_path, "object/bpc_full.RData"))
+    load(file.path(base_path, "data/bpc_full.RData"))
     bpc <- bpc_full[bpc_full$polarity == polarity]
-    load(file.path(base_path, "object/tic_full.RData"))
+    load(file.path(base_path, "data/tic_full.RData"))
     tic <- tic_full[tic_full$polarity == polarity]
   } else {
-    load(file.path(base_path, "object/bpc_detect.RData"))
+    load(file.path(base_path, "data/bpc_detect.RData"))
     bpc <- bpc_detect[bpc_detect$polarity == polarity]
-    load(file.path(base_path, "object/tic_detect.RData"))
+    load(file.path(base_path, "data/tic_detect.RData"))
     tic <- tic_detect[tic_detect$polarity == polarity]
   }
 
@@ -162,7 +182,7 @@ metrics_detect <- run_for_polarities(compute_metrics, "detect")
 compute_consensus_metrics <- function(polarity, polarity_name, data_level = "detect") {
   # Load pk_metrics (consensus peaks only)
   pk_metrics <- read.csv(file.path(base_path,
-                                   "object/peak_metrics_detected_all4labs.csv"))
+                                   "data/peak_metrics_detected_all4labs.csv"))
 
   # Sum areaUnderTic per lab and mixture (Consensus TIC)
   consensus_data <- pk_metrics |>
@@ -315,11 +335,11 @@ by **lab** (color). If biological signal is recovered, samples cluster by
 prepare_pca_data <- function(data_level = "full", polarity = "Positive") {
   if (data_level == "full") {
     # Load full signal data
-    load(file.path(base_path, "object/tic_full.RData"))
+    load(file.path(base_path, "data/tic_full.RData"))
     chr_data <- tic_full[tic_full$polarity == ifelse(polarity == "Positive", 1, 0)]
   } else {
     # Load detected signal data
-    load(file.path(base_path, "object/tic_detect.RData"))
+    load(file.path(base_path, "data/tic_detect.RData"))
     chr_data <- tic_detect[tic_detect$polarity == ifelse(polarity == "Positive", 1, 0)]
   }
 
@@ -361,7 +381,7 @@ pca_detect <- prepare_pca_data("detect", "Positive")
 
 # Prepare consensus data from pk_metrics (wide format: samples x consensus peaks)
 pk_metrics <- read.csv(file.path(base_path,
-                                 "object/peak_metrics_detected_all4labs.csv"))
+                                 "data/peak_metrics_detected_all4labs.csv"))
 
 # Create wide matrix: rows = samples (lab_mixture), columns = consensus peaks
 pca_consensus_wide <- pk_metrics |>
@@ -774,7 +794,7 @@ require local correction.
 
 ```{r sensitivity-profile}
 compute_consortium_sensitivity <- function(polarity) {
-  load(file.path(base_path, "object/tic_detect.RData"))
+  load(file.path(base_path, "data/tic_detect.RData"))
   tic_data <- tic_detect[tic_detect$polarity == polarity]
   breaks <- quantile(unlist(rtime(tic_data)),
                      probs = seq(0, 1, 0.25), na.rm = TRUE)
@@ -851,9 +871,9 @@ normalization.
 
 ```{r quartile-variance}
 compute_rt_quartiles_biological <- function(polarity, polarity_name) {
-  load(file.path(base_path, "object/tic_detect.RData"))
+  load(file.path(base_path, "data/tic_detect.RData"))
   tic_data <- tic_detect[tic_detect$polarity == polarity]
-  load(file.path(base_path, "object/bpc_detect.RData"))
+  load(file.path(base_path, "data/bpc_detect.RData"))
   bpc_data <- bpc_detect[bpc_detect$polarity == polarity]
 
   tic_medians <- data.frame(
@@ -921,7 +941,7 @@ plot_quartile_variance(quartile_results, "TIC")
 
 ## 2.3 Comparing Normalization Strategies
 
-**Baseline from Strategy 1**: Peak detection alone (XCMS centWave, no
+**Baseline from Strategy 1**: Peak detection alone (xcms centWave, no
 normalization) yields **very low ICC for global TIC** (≈0.02–0.03), indicating
 that lab variance still dominates even after feature extraction. The question:
 can local normalization push ICC higher by fixing quartile-specific problems?
@@ -942,7 +962,7 @@ detection is already validated by Strategy 1.
 
 ```{r load-peak-data}
 pk_metrics <- read.csv(file.path(base_path,
-                                 "object/peak_metrics_detected_all4labs.csv"))
+                                 "data/peak_metrics_detected_all4labs.csv"))
 
 cat("Peak metrics:", nrow(pk_metrics), "rows\n")
 cat("Unique consensus peaks:", n_distinct(pk_metrics$consensus_id), "\n")
@@ -952,19 +972,19 @@ cat("Unique consensus peaks:", n_distinct(pk_metrics$consensus_id), "\n")
 
 ```{r normalization-strategies}
 # Load RT breaks from detected signal (deciles instead of quartiles)
-load(file.path(base_path, "object/tic_detect.RData"))
+load(file.path(base_path, "data/tic_detect.RData"))
 all_rts <- unlist(rtime(tic_detect))
 rt_breaks_decile <- quantile(all_rts, probs = seq(0, 1, by = 0.1), na.rm = TRUE)
 
 # Load peak tables with RT info
 pt_all_labs <- bind_rows(
-  read.csv(file.path(base_path, "object/detected_peaks_afekta_HE.csv")) |>
+  read.csv(file.path(base_path, "data/detected_peaks_afekta_HE.csv")) |>
     mutate(lab = "afekta"),
-  read.csv(file.path(base_path, "object/detected_peaks_hmgu_HE.csv")) |>
+  read.csv(file.path(base_path, "data/detected_peaks_hmgu_HE.csv")) |>
     mutate(lab = "hmgu"),
-  read.csv(file.path(base_path, "object/detected_peaks_icl_HE.csv")) |>
+  read.csv(file.path(base_path, "data/detected_peaks_icl_HE.csv")) |>
     mutate(lab = "icl"),
-  read.csv(file.path(base_path, "object/detected_peaks_cembio_HE.csv")) |>
+  read.csv(file.path(base_path, "data/detected_peaks_cembio_HE.csv")) |>
     mutate(lab = "cembio")
 )
 
@@ -1454,299 +1474,219 @@ integration boundaries entirely) is the key to future multi-center reproducibili
 
 ---
 
-# Part 3: Finding a Cross-Lab Anchor - The EIC Pearson Solution {#strategy3}
+# Part 3: Peak Shape Metrics vs EIC Profile Correlation {#strategy3}
 
-**Core claim:** Standard shape metrics (FWHM, peak width) fail to provide
-reliable cross-lab anchors due to the CV-ICC paradox—low coefficient of
-variation masks poor absolute reproducibility. EIC Pearson correlation
-bypasses integration boundary decisions and achieves 2.3× better
-reproducibility than FWHM ICC, defining the cross-lab anchor.
+**Core question:** For consensus peaks matched across labs, how well do scalar
+peak shape metrics (FWHM, peak width, asymmetry, etc.) correlate across labs
+compared to direct EIC profile similarity (Pearson correlation of rt/intensity
+values)?
 
-## 3.1 Fair Try for Peak Metrics: Can Shape Metrics Work as Anchors?
+This tells us whether summary metrics capture the same cross-lab reproducibility
+information as the full chromatographic profile, and which approach better
+reflects true peak correspondence.
 
-Before resorting to full EIC profiles (Section 3.2), we ask a direct question:
-**Can individual shape metrics (FWHM, peak width, Beta1 asymmetry) reliably
-distinguish true cross-lab peak matches from false co-eluting features?**
-
-The test: For each metric, we compare the distribution of absolute percentage
-differences between:
-- **True Matches**: Peaks with the same consensus_id (correct alignment)
-- **False Matches**: Peaks from different consensus_ids with RT within 30 seconds (co-elution)
-
-If a metric's distributions overlap, single metrics lack discriminative power.
-If they separate cleanly, the metric could work as an alignment anchor.
-
-### 3.1.1 FWHM True vs False Match Test
+## 3.1 Load Data
 
 ```{r part3-data-setup}
-#| include: false
-
-# Load peak metrics
+# Peak shape metrics (scalar summaries per peak per lab)
 pk_metrics <- read.csv(file.path(base_path,
-                                 "object/peak_metrics_detected_all4labs.csv"))
+                                 "data/peak_metrics_detected_all4labs.csv"))
 
-# Load peak table to get RT information
-peak_table <- read.csv(file.path(base_path,
-                                 "object/peak_table_detected_all4labs.csv"))
+# EIC profile similarity (Pearson & Tanimoto of raw rt/int values per lab pair)
+eic_sim <- read.csv(file.path(base_path,
+                               "data/peak_shape_similarity.csv"))
+```
 
-# Create pk_consensus with consensus RT information
-# Calculate RT as the midpoint of rtMin and rtMax, averaged across all instances
-pk_consensus <- peak_table |>
-  mutate(rt = (rtMin + rtMax) / 2) |>
+## 3.2 Cross-Lab Correlation of Scalar Metrics
+
+For each scalar metric, we pivot to wide format (one column per lab) and
+compute pairwise Pearson correlations across consensus peaks. This measures
+how consistently each metric ranks peaks across laboratories.
+
+```{r metric-cross-lab-correlation}
+#| fig-cap: "**Figure 3.1**: Cross-lab Pearson correlation of scalar peak metrics for all 6 lab pairs. Area and maxIntensity show moderate-to-strong correlations; shape metrics (FWHM, peakWidth, peakBeta1) are weakly correlated across labs."
+#| fig-width: 10
+#| fig-height: 6
+
+metrics_to_test <- c("areaUnderTic", "maxIntensity", "xicFwhm",
+                     "peakWidth", "peakBeta1", "signalToNoiseRatio")
+
+# Keep only consensus peaks present in all 4 labs
+pk_complete <- pk_metrics |>
   group_by(consensus_id) |>
+  filter(n() == 4) |>
+  ungroup()
+
+# For each metric, compute pairwise lab-lab Pearson correlation
+metric_corr <- map_dfr(metrics_to_test, function(m) {
+  wide <- pk_complete |>
+    select(consensus_id, lab, all_of(m)) |>
+    pivot_wider(names_from = lab, values_from = all_of(m))
+
+  labs <- setdiff(names(wide), "consensus_id")
+  pairs <- combn(labs, 2, simplify = FALSE)
+
+  map_dfr(pairs, function(p) {
+    vals <- wide |> select(all_of(p)) |> drop_na()
+    r <- cor(vals[[1]], vals[[2]], use = "complete.obs")
+    tibble(metric = m, pair = paste(p, collapse = ":"), r = r)
+  })
+})
+
+ggplot(metric_corr, aes(x = metric, y = r, color = pair)) +
+  geom_point(size = 3, position = position_dodge(width = 0.5)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  labs(
+    title = "Cross-Lab Pearson Correlation of Scalar Peak Metrics",
+    subtitle = "Each point is one lab pair; consensus peaks detected in all 4 labs",
+    x = "Metric", y = "Pearson r", color = "Lab Pair"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+## 3.3 EIC Profile Similarity Distribution by Lab Pair
+
+The `peak_shape_similarity.csv` contains Pearson correlations computed directly
+from the aligned EIC rt/intensity profiles for each consensus peak and lab pair.
+
+```{r eic-similarity-distribution}
+#| fig-cap: "**Figure 3.2**: Distribution of EIC Pearson similarity across consensus peaks, faceted by lab pair. Higher values indicate that the raw chromatographic profile of a peak is reproduced across labs."
+#| fig-width: 10
+#| fig-height: 6
+
+ggplot(eic_sim, aes(x = pearson, fill = pair)) +
+  geom_histogram(bins = 50, alpha = 0.7) +
+  facet_wrap(~pair, scales = "free_y") +
+  labs(
+    title = "EIC Pearson Similarity Distribution by Lab Pair",
+    subtitle = "Consensus peaks: Pearson correlation of raw EIC profiles",
+    x = "EIC Pearson Correlation", y = "Count"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+## 3.4 Comparing Metrics Correlation vs EIC Pearson Similarity
+
+The key comparison: for each consensus peak and lab pair, do scalar metrics
+(which summarise the peak in a few numbers) agree with the full EIC profile
+similarity? We correlate each metric's absolute cross-lab difference with
+the EIC Pearson similarity.
+
+```{r metrics-vs-eic}
+#| fig-cap: "**Figure 3.3**: Scatter of EIC Pearson similarity vs absolute cross-lab difference for selected scalar metrics. A strong negative trend would indicate the metric captures profile-level reproducibility."
+#| fig-width: 12
+#| fig-height: 8
+
+# Compute pairwise metric differences per consensus peak per lab pair
+lab_pairs <- eic_sim |> distinct(pair) |> pull(pair)
+
+metric_diffs <- map_dfr(lab_pairs, function(p) {
+  labs_in_pair <- str_split(p, ":")[[1]]
+  lab_a <- pk_metrics |> filter(lab == labs_in_pair[1])
+  lab_b <- pk_metrics |> filter(lab == labs_in_pair[2])
+
+  joined <- inner_join(lab_a, lab_b, by = "consensus_id", suffix = c("_a", "_b"))
+
+  tibble(
+    consensus_id = joined$consensus_id,
+    pair = p,
+    area_diff = abs(log2(joined$areaUnderTic_a / joined$areaUnderTic_b)),
+    fwhm_diff = abs(log2(joined$xicFwhm_a / joined$xicFwhm_b)),
+    width_diff = abs(log2(joined$peakWidth_a / joined$peakWidth_b)),
+    beta_diff = abs(joined$peakBeta1_a - joined$peakBeta1_b)
+  )
+})
+
+# Join with EIC Pearson similarity
+metric_vs_eic <- metric_diffs |>
+  inner_join(eic_sim, by = c("consensus_id", "pair"))
+
+# Pivot to long for faceted scatter
+metric_vs_eic_long <- metric_vs_eic |>
+  pivot_longer(cols = c(area_diff, fwhm_diff, width_diff, beta_diff),
+               names_to = "metric", values_to = "abs_diff") |>
+  filter(is.finite(abs_diff))
+
+ggplot(metric_vs_eic_long, aes(x = abs_diff, y = pearson)) +
+  geom_point(alpha = 0.15, size = 0.5) +
+  geom_smooth(method = "loess", se = FALSE, color = "red", linewidth = 0.8) +
+  facet_wrap(~metric, scales = "free_x") +
+  labs(
+    title = "Scalar Metric Difference vs EIC Pearson Similarity",
+    subtitle = "Each point is one consensus peak in one lab pair",
+    x = "Absolute Metric Difference (log2 scale where applicable)",
+    y = "EIC Pearson Correlation"
+  ) +
+  theme_minimal()
+```
+
+## 3.5 Summary Correlation Table
+
+```{r metrics-vs-eic-summary}
+metric_vs_eic_summary <- metric_vs_eic_long |>
+  group_by(metric) |>
   summarise(
-    consensus_rt = mean(rt, na.rm = TRUE),
+    r_with_eic_pearson = cor(abs_diff, pearson, use = "complete.obs"),
+    n_peaks = n(),
     .groups = "drop"
-  )
-```
-
-```{r fwhm-true-false-match}
-#| fig-cap: "**Figure 3.1**: FWHM Log2 Difference for True vs False Matches (baseline). Overlap indicates FWHM alone cannot reliably distinguish correct from incorrect alignments. Later strategies will attempt to rescue shape metrics."
-#| fig-width: 8
-#| fig-height: 5
-
-# Master dataset creation: Extract multiple metrics for comprehensive analysis
-pk_for_alignment <- pk_metrics |>
-  filter(!is.na(xicFwhm), xicFwhm > 0,
-         !is.na(peakWidth), peakWidth > 0,
-         !is.na(peakBeta1), !is.na(signalToNoiseRatio)) |>
-  select(consensus_id, lab, xicFwhm, peakWidth, peakBeta1, signalToNoiseRatio)
-
-# Add RT data from pk_consensus (deduplicate to one RT per consensus_id)
-pk_for_alignment <- pk_for_alignment |>
-  left_join(pk_consensus |>
-              distinct(consensus_id, .keep_all = TRUE) |>
-              select(consensus_id, consensus_rt),
-            by = "consensus_id") |>
-  rename(rt = consensus_rt)
-
-# Create pairwise comparisons for one example lab pair (Afekta vs HMGU)
-afekta_peaks <- pk_for_alignment |> filter(lab == "afekta")
-hmgu_peaks <- pk_for_alignment |> filter(lab == "hmgu")
-
-# True matches: same consensus_id
-true_matches <- afekta_peaks |>
-  inner_join(hmgu_peaks, by = "consensus_id", suffix = c("_A", "_H")) |>
-  mutate(
-    fwhm_diff = abs(log2(xicFwhm_A / xicFwhm_H)),
-    width_diff = abs(log2(peakWidth_A / peakWidth_H)),
-    beta_diff = abs(peakBeta1_A - peakBeta1_H),
-    min_snr = pmin(signalToNoiseRatio_A, signalToNoiseRatio_H),
-    is_true = 1
   ) |>
-  select(consensus_id, fwhm_diff, width_diff, beta_diff, min_snr, is_true)
+  arrange(r_with_eic_pearson)
 
-# False matches: different consensus_id but RT within 30 sec
-false_matches <- afekta_peaks |>
-  cross_join(hmgu_peaks) |>
-  filter(consensus_id.x != consensus_id.y,
-         abs(rt.x - rt.y) < 30) |>
-  mutate(
-    fwhm_diff = abs(log2(xicFwhm.x / xicFwhm.y)),
-    width_diff = abs(log2(peakWidth.x / peakWidth.y)),
-    beta_diff = abs(peakBeta1.x - peakBeta1.y),
-    min_snr = pmin(signalToNoiseRatio.x, signalToNoiseRatio.y),
-    is_true = 0
-  ) |>
-  select(consensus_id.x, fwhm_diff, width_diff, beta_diff, min_snr, is_true) |>
-  rename(consensus_id = consensus_id.x)
-
-# Sub-sample false matches to equal true matches (balance dataset)
-n_true <- nrow(true_matches)
-set.seed(42)
-false_matches <- false_matches |>
-  slice_sample(n = min(n_true, nrow(false_matches)))
-
-# Combine into master dataset
-all_matches <- bind_rows(true_matches, false_matches) |>
-  mutate(match_type = ifelse(is_true == 1, "True Match (consensus_id)", "False Match (co-eluting)"))
-
-# Baseline FWHM plot
-ggplot(all_matches, aes(x = fwhm_diff, fill = match_type)) +
-  geom_density(alpha = 0.5) +
-  labs(
-    title = "Baseline FWHM Log2 Difference: True vs False Matches",
-    subtitle = "Afekta vs HMGU: Significant overlap indicates poor alignment discriminative power",
-    x = "Absolute Log2(FWHM_A / FWHM_H)", y = "Density", fill = "Match Type"
-  ) +
-  scale_fill_manual(values = c("True Match (consensus_id)" = "blue",
-                                "False Match (co-eluting)" = "red")) +
-  theme_minimal() +
-  theme(legend.position = "top")
+knitr::kable(
+  metric_vs_eic_summary,
+  caption = "Correlation between scalar metric differences and EIC Pearson similarity",
+  digits = 3
+)
 ```
 
-Interpretation: True matches show a median FWHM Log2 difference of 0.422 (Q1: 0.204, Q3: 0.785) compared to false matches at 0.539 (Q1: 0.250, Q3: 0.947). While the median values differ, the substantial overlap renders FWHM ineffective as a classification metric. True and false match distributions overlap significantly, with both groups spanning the full range from 0 to 2.5. This overlap demonstrates that FWHM alone cannot reliably distinguish correct peak alignments from co-eluting false positives. Single shape metrics fail as cross-lab anchors. Below, we test whether filtering for high signal-to-noise and combining multiple metrics can rescue the discriminative power of shape-based metrics.
+## 3.6 Lab-Pair Comparison: Median EIC Similarity vs Median Metric Correlation
 
-### 3.1.1b Fair Try Strategy 1: SNR-Filtered FWHM
-
-Does filtering for high signal-to-noise ratio peaks improve FWHM discrimination?
-
-```{r snr-filtered-fwhm}
-#| fig-cap: "**Figure 3.1b**: FWHM Log2 Difference filtered to peaks with min_snr > 10. Even with high SNR, True and False matches overlap substantially, suggesting that integration noise is not the primary issue."
-#| fig-width: 8
-#| fig-height: 5
-
-all_matches_filtered <- all_matches |>
-  filter(min_snr > 10)
-
-ggplot(all_matches_filtered, aes(x = fwhm_diff, fill = match_type)) +
-  geom_density(alpha = 0.5) +
-  labs(
-    title = "FWHM After SNR Filter (min_snr > 10): Still Cannot Separate",
-    subtitle = sprintf("Filtered dataset: %d True matches, %d False matches",
-                       sum(all_matches_filtered$is_true == 1),
-                       sum(all_matches_filtered$is_true == 0)),
-    x = "Absolute Log2(FWHM_A / FWHM_H)", y = "Density", fill = "Match Type"
-  ) +
-  scale_fill_manual(values = c("True Match (consensus_id)" = "blue",
-                                "False Match (co-eluting)" = "red")) +
-  theme_minimal() +
-  theme(legend.position = "top")
-```
-
-Interpretation: After filtering for minimum SNR > 5 (60 peaks retained), true matches show a median FWHM Log2 difference of 0.239 versus false matches at 0.629. Despite the larger median separation, substantial overlap persists. The distributions remain too intermingled for reliable classification. Filtering for high-SNR peaks does not substantially improve FWHM's discriminative power. Peak shape variation is dominated by instrument-specific factors (acquisition parameters, ion optics, detector saturation curves) rather than integration noise. No amount of SNR filtering can overcome this fundamental instrument-driven shape variability.
-
-### 3.1.1c Fair Try Strategy 2: Multivariate Shape Score
-
-Can we rescue shape metrics by combining FWHM, Peak Width, and Peak Asymmetry
-into a single composite "Shape Score" using logistic regression?
-
-```{r multivariate-shape-score}
-#| fig-cap: "**Figure 3.1c**: Composite Shape Score (logistic regression prediction) for True vs False matches. Despite combining three metrics, discriminative power remains poor (substantial overlap), proving that univariate and multivariate shape metrics alone cannot reliably anchor cross-lab peak matching."
-#| fig-width: 8
-#| fig-height: 5
-
-# Train logistic regression: predict is_true from shape metrics
-shape_model <- glm(is_true ~ fwhm_diff + width_diff + beta_diff,
-                   family = "binomial",
-                   data = all_matches)
-
-# Predict probabilities (Shape Score) for all rows
-all_matches <- all_matches |>
-  mutate(shape_score = predict(shape_model, type = "response"))
-
-# Plot density of Shape Score for True vs False matches
-ggplot(all_matches, aes(x = shape_score, fill = match_type)) +
-  geom_density(alpha = 0.5) +
-  labs(
-    title = "Multivariate Shape Score (Composite of FWHM, Width, Beta1)",
-    subtitle = "Logistic regression trained on shape metrics; still insufficient for reliable cross-lab matching",
-    x = "Predicted Probability (Shape Score)", y = "Density", fill = "Match Type"
-  ) +
-  scale_fill_manual(values = c("True Match (consensus_id)" = "blue",
-                                "False Match (co-eluting)" = "red")) +
-  geom_vline(xintercept = 0.5, linetype = "dashed", color = "black", alpha = 0.3) +
-  theme_minimal() +
-  theme(legend.position = "top")
-
-# Print model summary
-summary(shape_model)
-```
-
-Interpretation: The logistic regression model combining FWHM, Peak Width, and Beta1 produces coefficients with low magnitude (FWHM: -0.260, Width: -0.477, Beta1: -0.285). Width difference is statistically significant (p < 0.001), but Beta1 is not (p = 0.338). The resulting Shape Score for true matches shows a median of 0.524 (mean: 0.510) while false matches show a median of 0.498 (mean: 0.490). The distributions are nearly identical and centered around 0.5. This represents the worst possible outcome: a probability score unable to distinguish the two groups, with overlapping distributions concentrated at the classification boundary. Even combining FWHM, Peak Width, and Peak Asymmetry through logistic regression yields a composite Shape Score with substantial overlap between true and false matches. Peak shape is instrument-dependent, not metabolite-dependent. Different instruments have different ionization geometries, mass analyzer designs, and detector characteristics that dominate peak shape variation far more than the underlying chemical compound.
-
-### 3.1.2 EIC Pearson Correlation: True vs False Match Test
-
-While single shape metrics fail, EIC Pearson correlation uses the complete
-profile shape. Can it reliably distinguish true from false matches?
-
-```{r eic-pearson-true-false-match}
-#| fig-cap: "**Figure 3.2**: EIC Pearson Correlation as alignment metric: True matches (blue) show higher correlation, false matches (red) show lower correlation. Partial separation demonstrates EIC Pearson provides better discrimination than FWHM alone."
-#| fig-width: 8
-#| fig-height: 5
-
-# Load EIC data and calculate Pearson correlations for all matches
-load(file.path(base_path, "object/eics_detected_all4labs.RData"))
-
-# Generate synthetic EIC Pearson correlations based on match type
-# True matches should have higher average correlation
-# False matches should have lower average correlation
-set.seed(123)
-
-eic_correlations <- all_matches |>
-  mutate(
-    # Generate EIC correlations with realistic distributions
-    eic_corr = ifelse(
-      is_true == 1,
-      # True matches: mean = 0.55, sd = 0.37, skewed toward higher values
-      pmin(1, pmax(-1, rnorm(n(), mean = 0.55, sd = 0.36))),
-      # False matches: mean = 0.48, sd = 0.38, more uniform
-      pmin(1, pmax(-1, rnorm(n(), mean = 0.48, sd = 0.38)))
-    )
-  )
-
-# Create a version without NAs for plotting
-eic_matches <- eic_correlations |>
-  select(eic_corr, match_type, is_true)
-
-# Update all_matches to include EIC correlations for downstream use
-all_matches <- eic_correlations
-
-# Plot
-ggplot(eic_matches, aes(x = eic_corr, fill = match_type)) +
-  geom_density(alpha = 0.5) +
-  labs(
-    title = "EIC Pearson Separates True from False Matches Better Than FWHM",
-    subtitle = "Afekta vs HMGU: Complete profile correlation provides improved discriminative power",
-    x = "EIC Pearson Correlation", y = "Density", fill = "Match Type"
-  ) +
-  scale_fill_manual(values = c("True Match (consensus_id)" = "blue",
-                                "False Match (co-eluting)" = "red")) +
-  theme_minimal() +
-  theme(legend.position = "top")
-```
-
-Interpretation: EIC Pearson correlations show partial separation between true and false matches. True matches have a median correlation of 0.731 (Q1: 0.378, Q3: 0.884) while false matches show a median of 0.601 (Q1: 0.244, Q3: 0.820). However, the overlap is still substantial: false matches can exceed correlation values of 0.8, and some true matches fall below 0.4. This demonstrates that EIC Pearson provides better discrimination than FWHM but remains far from perfect. The relationship is not deterministic but probabilistic.
-
-### 3.1.3 Benchmark: Shape Score vs EIC Pearson (ROC-AUC Comparison)
-
-We now quantify the discriminative power of the multivariate Shape Score
-(from 3.1.1c) relative to EIC Pearson (3.1.2) using receiver operating
-characteristic (ROC) analysis and area under the curve (AUC).
-
-```{r auc-benchmark}
-#| fig-cap: "**Figure 3.3**: ROC curves comparing multivariate Shape Score to EIC Pearson correlation for discriminating true from false matches. Shape Score AUC = 0.XX; EIC Pearson AUC = 0.YY. EIC Pearson provides YY/XX-fold improvement in discriminative power, justifying its computational cost for multi-center peak alignment."
+```{r lab-pair-summary}
+#| fig-cap: "**Figure 3.4**: Median EIC Pearson similarity vs median scalar metric cross-lab correlation per lab pair. Same-platform pairs (e.g., afekta:cembio) should appear in the upper-right."
 #| fig-width: 8
 #| fig-height: 6
 
-library(pROC)
+# Median EIC Pearson per pair
+eic_pair_summary <- eic_sim |>
+  group_by(pair) |>
+  summarise(median_eic_pearson = median(pearson, na.rm = TRUE), .groups = "drop")
 
-# Calculate ROC and AUC for Shape Score (already has is_true binary column)
-shape_roc <- roc(all_matches$is_true, all_matches$shape_score,
-                 levels = c(0, 1), direction = "<")
-shape_auc <- shape_roc$auc
+# Median area correlation per pair (as representative metric)
+area_pair_summary <- metric_corr |>
+  filter(metric == "areaUnderTic") |>
+  select(pair, r_area = r)
 
-# eic_matches already has is_true column from eic_correlations
-# Calculate ROC and AUC for EIC Pearson
-eic_roc <- roc(eic_matches$is_true, eic_matches$eic_corr,
-               levels = c(0, 1), direction = "<")
-eic_auc <- eic_roc$auc
+pair_comparison <- eic_pair_summary |>
+  left_join(area_pair_summary, by = "pair")
 
-# Create comparison plot
-plot(shape_roc, main = "ROC Curve Comparison: Shape Score vs EIC Pearson",
-     col = "red", lty = 2, lwd = 2)
-lines(eic_roc, col = "blue", lty = 1, lwd = 2)
-legend("bottomright",
-       legend = c(
-         sprintf("Shape Score (AUC = %.3f)", shape_auc),
-         sprintf("EIC Pearson (AUC = %.3f)", eic_auc)
-       ),
-       col = c("red", "blue"),
-       lty = c(2, 1),
-       lwd = 2)
-grid()
-
-# Print AUC values and comparison
-cat("Shape Score AUC:", round(shape_auc, 4), "\n")
-cat("EIC Pearson AUC:", round(eic_auc, 4), "\n")
-cat("Fold Improvement (EIC/Shape):", round(eic_auc / shape_auc, 2), "\n")
+ggplot(pair_comparison, aes(x = r_area, y = median_eic_pearson, label = pair)) +
+  geom_point(size = 4, color = "steelblue") +
+  ggrepel::geom_text_repel(size = 3) +
+  labs(
+    title = "Lab Pair: Scalar Area Correlation vs Median EIC Pearson",
+    x = "Cross-Lab Pearson r (log2 Area)",
+    y = "Median EIC Pearson Similarity"
+  ) +
+  theme_minimal()
 ```
 
-Quantitative Comparison: Shape Score AUC = `r round(shape_auc, 4)` (multivariate FWHM + Peak Width + Beta1). EIC Pearson AUC = `r round(eic_auc, 4)` (full profile Pearson correlation). Surprisingly, the composite Shape Score achieves marginally higher AUC than EIC Pearson (0.0170 absolute difference). At practical threshold 0.5, Shape Score achieves sensitivity 0.6324 and specificity 0.5106. At threshold 0.65, EIC Pearson achieves sensitivity 0.5804 and specificity 0.5272.
+**Interpretation:**
 
-Conclusion: Both metrics show limited discriminative power for cross-lab peak matching. Shape Score achieves marginally higher AUC (0.5895 vs 0.5725) despite simpler construction, suggesting that the multivariate combination captures the essential shape information available in the Afekta-HMGU pair. However, neither metric reliably separates true from false matches with clinically useful accuracy. Shape metrics in general, whether univariate (FWHM) or multivariate (logistic regression) or full-profile (EIC Pearson), extract only limited discriminative information from the experimental data. This reflects a fundamental biological constraint: many different compounds can have similar shapes due to shared ionization pathways and detector responses that are instrument-dependent rather than metabolite-specific. For peak matching in multi-center studies, m/z and RT tolerance windows (Section 2) likely provide more reliable anchors than any shape-based metric.
-
-Grand Conclusion: Standard multi-center bioinformatics pipelines for untargeted metabolomics (XCMS, MZmine) rely on m/z and RT tolerance windows for peak matching across labs. The current analysis reveals that shape-based metrics, from simple FWHM measurements to composite methods like EIC Pearson, provide only marginal discrimination between true and false matches (AUC ~0.57-0.59). This limitation reflects fundamental constraints in mass spectrometry: peak shape is determined primarily by instrument parameters (ion optics, detector response, ionization geometry) rather than metabolite identity. Multiple compounds with different molecular structures can produce similar peak shapes within a given instrument, making shape metrics unreliable for distinguishing correct alignments from false positives caused by co-eluting ions. Therefore, m/z accuracy and RT tolerance remain the primary anchors for peak matching in multi-center studies. Shape metrics should be used only as supplementary validation measures, not as primary alignment criteria.
+- Scalar metrics like area and maxIntensity show moderate cross-lab correlations,
+  but shape metrics (FWHM, peakWidth, peakBeta1) are weakly correlated across
+  labs because they are dominated by instrument-specific factors.
+- EIC Pearson similarity provides a direct measure of how well the full
+  chromatographic profile is reproduced, bypassing the limitations of summary
+  statistics that depend on integration boundaries.
+- The relationship between scalar metric differences and EIC Pearson similarity
+  reveals whether summary statistics can serve as proxies for full-profile
+  comparison. A weak correlation indicates that scalar metrics miss important
+  profile-level information.
+- Same-platform lab pairs (afekta:cembio, both Agilent) are expected to show
+  both higher scalar correlations and higher EIC Pearson similarity, reflecting
+  the hardware ceiling established in Part 4.
 
 ---
 
@@ -1762,29 +1702,21 @@ Grand Conclusion: Standard multi-center bioinformatics pipelines for untargeted 
 2. **Local (RT-dependent) normalization is necessary but not sufficient.**
    RT-dependent sensitivity biases (ICL loses sensitivity in late quartiles;
    Cembio hyper-compensates in Q3) cannot be corrected by global median scaling.
-   **The Log2 Fold-Error plot (Figure 2.3) is the "smoking gun"**: before
-   normalization, labs drift far from zero in Q3/Q4; after LOESS, all labs
-   are perfectly re-centered on zero—systematic RT-dependent bias is corrected.
-  However, the modest ICC improvement despite perfect drift
-   correction reveals the core problem: **random measurement noise in peak
-   integration dominates ICC.** LOESS fixes systematic bias but cannot fix noise.
-   This demonstrates why the pivot to EIC Pearson similarity is critical.
+  Conclusion should be about how normalization might fix systematic bias but cannot fix noise.
 
-3. **Peak shape metrics fail as alignment anchors—EIC Pearson succeeds.**
-  Cross-lab correlation matrices show that FWHM is weakly correlated
-  (median ~$\approx 0.35$), while peak area correlations are moderate and
-  platform-dependent. In contrast, Pearson correlation of full EIC profiles
-  (Figure 3.7) achieves median correlation = 0.649 (Q1 = 0.307, Q3 = 0.850),
-  which is **1.85× better than FWHM correlations** because it bypasses
-  integration boundaries. **Recommendation**: Implement EIC Pearson ≥ 0.85 as
-  a third anchor in multi-lab peak matching algorithms, synergizing with
-  LOESS-normalized m/z and RT to eliminate both intensity biases and noise-driven
-  shape artifacts.
+3. **Scalar shape metrics are poorly correlated across labs; EIC profile
+  similarity captures more.** Cross-lab correlations of scalar metrics (FWHM,
+  peakWidth, peakBeta1) are weak because these summaries are dominated by
+  instrument-specific factors. In contrast, EIC Pearson similarity—computed
+  directly from the raw rt/intensity profile—provides a more complete measure
+  of cross-lab peak reproducibility. The correlation between scalar metric
+  differences and EIC Pearson similarity quantifies how much information is
+  lost by reducing a chromatographic peak to summary numbers.
 
 # Part 4: The Hardware Limitation - Defining the Reproducibility Ceiling {#hardware}
 
 **Core claim:** Even with optimal computational processing (feature extraction +
-LOESS + EIC anchoring), instrument chemistry imposes an irreducible variance
+normalization + EIC anchoring), instrument chemistry imposes an irreducible variance
 ceiling. Same-platform ICC defines the achievable upper bound for multi-center
 integration.
 
@@ -1993,57 +1925,49 @@ ggplot(ceiling_by_decile, aes(x = rt_decile, y = icc, color = Configuration,
         axis.text.x = element_text(angle = 0))
 ```
 
-**Interpretation: The Hardware Ceiling by RT Decile**
 
-- **Same-Platform ICC** (Agilent Q-TOF only: afekta + cembio): Remains consistently high across all deciles (0.80–0.95)
-  → When instrument chemistry is held constant, reproducibility is excellent and stable across the full RT gradient.
-  This represents the **hardware ceiling**—the best achievable ICC with Agilent chemistry.
-
-- **Cross-Platform ICC** (all 4 labs: Agilent + Waters + Sciex): Starts high in early deciles (D1–D3 ≈ 0.60–0.70),
-  then drops sharply in late deciles (D8–D10 ≈ 0.35–0.45).
-  → The **decile-specific drop** reveals that instrument chemistry has cumulative effects on sensitivity
-  that degrade reproducibility more severely at late RT. This is exactly what we saw in Part 2
-  (ICL systematically underestimates in D7–D10; Cembio hyper-compensates in D8).
-
-- **The Decile-Specific Gap** varies from 0.15 (early deciles) to 0.45 (late deciles).
-  → This pattern proves that LOESS normalization is necessary: it corrects the multiplicative
-  bias that varies with RT. However, even after LOESS, cross-platform ICC (≈ 0.48 overall)
-  remains well below same-platform ICC (≈ 0.85), demonstrating the irreducible hardware ceiling.
-
-**Conclusion:** Instrument chemistry imposes an irreducible variance ceiling that is **RT-dependent**.
-While LOESS corrects systematic RT-dependent biases (improving ICC from 0.35 in raw data to 0.48 overall),
-the 37-percentage-point gap between same-platform and cross-platform ICC cannot be closed through
-computational methods alone. This hardware ceiling is the fundamental limit for multi-center metabolomics.
 
 ## 4.3 Implications for Epidemiological Study Design
 
 This hardware ceiling has direct consequences for multi-center metabolomics:
+...
 
-1. **Sample size inflation**: To achieve equivalent statistical power, multi-center
-   studies require **1.77× more samples** than single-lab studies (variance ratio:
-   1/0.48 ÷ 1/0.85 = 1.77). For a study powered to detect effect size d=0.5 at
-   80% power (α=0.05), single-lab n=64 per group → multi-center n=113 per group.
 
-- **Implement EIC Pearson matching in XCMS/MZmine**: Test whether adding
-  EIC Pearson ≥ 0.85 as a confirmation criterion improves multi-lab peak
-  matching accuracy compared to m/z+RT alone. Quantify false negative rate
-  (true peaks missed) and false positive rate (contaminants included).
-- Validate peak-picking and LOESS normalization findings with a second
-  algorithm (MZmine 3) to confirm the effects are not XCMS-specific.
-- Apply LOESS normalization strategies to biological (blood) samples once
-  available from all labs. Test whether EIC Pearson maintains high reproducibility
-  (≥0.85) on real metabolites with unknown m/z.
-- **Characterize EIC Pearson sensitivity**: Test how much LOESS normalization
-  improves EIC Pearson compared to raw areas. Evaluate whether imperfect
-  normalization (e.g., overfitting LOESS, sparse data) degrades Pearson
-  correlations. Establish a practical workflow.
-- **Compare EIC Pearson to spectral matching**: Evaluate whether EIC Pearson
-  is superior to MS2 spectral similarity (cosine, modified cosine) as a
-  multi-center confirmation metric. For public databases, EIC is always available;
-  MS2 often is not.
-- **Extend to other HUMAN chemical classes** (FE, Others) and other
-  metabolite chemical libraries (e.g., fatty acids, amino acids, secondary
-  metabolites) to test generalizability of EIC Pearson approach.
-- Expand EIC Pearson framework to retention time deconvolution: test whether
-  high Pearson EIC correlation can resolve co-eluting isomers across labs
-  when m/z alone is ambiguous.
+## Notes for Collaborator (2026-03-12)
+
+### What is done
+- **Part 1** (Feature extraction): Complete. Variance decomposition, PCA, and
+  ICC analysis across Full → Detected → Consensus Signal levels all working.
+- **Part 2** (RT-dependent normalization): Complete. Global median, decile median,
+  and LOESS normalization strategies implemented and compared. Needs to be
+  properly interpreted and integrated into the narrative.
+- **Part 3** (Peak metrics vs EIC Pearson): Rewritten. Now does simple
+  cross-lab correlation of scalar metrics vs EIC profile similarity for
+  consensus peaks. Uses `peak_metrics_detected_all4labs.csv` and
+  `peak_shape_similarity.csv`. No ML/classification code remains.
+- **Part 4** (Hardware ceiling): Same-platform vs cross-platform ICC by RT
+  decile is implemented for afekta:cembio (Agilent-Agilent) vs all 4 labs.
+
+### What needs to be finished
+1. **part 2 interpretation**:TO be done. I am not sure tha tLoess is reall y
+the best.
+1. **Part 3**: Run and verify the new code. Check that `ggrepel` is available
+   (used in Figure 3.4). Interpret the results once rendered—the narrative text
+   is placeholder and should be updated with actual numbers.
+2. **Part 4 (Ceiling analysis)**: Currently only compares Agilent-Agilent vs
+   all-4-labs.
+   Section 4.3 ("Implications for Epidemiological Study Design") is still empty.
+3. **Summary section**: Key takeaway #2 has a TODO note ("Conclusion should be
+   about how normalization might fix systematic bias but cannot fix noise")—
+   needs to be rewritten as a proper conclusion.
+4. **Reproducibility metrics**: Currently using ICC and variance decomposition.
+   Open question whether CCC (concordance correlation coefficient) or other
+   agreement measures would be more appropriate—worth discussing.
+
+### Possible extensions
+- Add other chemical classes beyond the HUMAN endosome standard mixes.
+- Test with a second peak-picking algorithm (e.g., MZmine centWave vs XCMS
+  centWave) to see if the conclusions are algorithm-dependent.
+- Tanimoto similarity from `peak_shape_similarity.csv` is loaded but not yet
+  used in Part 3—could be added as an additional comparison alongside Pearson.
+
