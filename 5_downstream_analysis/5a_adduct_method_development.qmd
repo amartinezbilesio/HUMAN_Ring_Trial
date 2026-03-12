@@ -1,0 +1,914 @@
+---
+title: "Adduct Grouping Method Development"
+format:
+  html:
+    toc: true
+    code-fold: true
+    theme: cosmo
+execute:
+  dir: project
+---
+
+# Overview
+
+This document develops an unsupervised method to group LC-MS detected peaks
+originating from the same compound (adducts, in-source fragments, isotopes).
+
+**Method Components:**
+
+1. **Extra annotation**: Targeted adduct matching using RT-anchored peak groups
+2. **RT clustering optimization**: Test different RT thresholds (2-6 sec)
+3. **Metric-based clustering optimization**: Test metric combinations
+4. **Evaluation**: Precision/Recall/F1 against annotated ground truth
+
+**Output**: Best-performing method configuration for use in benchmarking.
+
+---
+
+# Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+library(xcms)
+library(MsCoreUtils)
+library(MetaboCoreUtils)
+library(MsFeatures)
+library(Chromatograms)
+library(philentropy)
+library(mclust)
+library(ggplot2)
+library(ggpubr)
+library(patchwork)
+library(MsQuality)
+library(BiocParallel)
+library(dplyr)
+
+# Register parallel backend
+workers <- as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", "4"))
+if (is.na(workers) || workers < 1) workers <- 4
+bp <- SnowParam(workers = workers)
+register(bp)
+
+base_path <- here::here("5_downstream_analysis")
+cache_path <- file.path(base_path, "object", "method_dev_cache")
+if (!dir.exists(cache_path)) dir.create(cache_path, recursive = TRUE)
+
+log_ts <- function(msg) {
+  cat("[", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "] ", msg, "\n", sep = "")
+}
+
+time_block <- function(label, expr) {
+  log_ts(paste0("START: ", label))
+  t0 <- Sys.time()
+  on.exit({
+    dt <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+    log_ts(paste0("END: ", label, " (", round(dt, 2), " sec)"))
+  }, add = TRUE)
+  force(expr)
+}
+
+log_ts(paste0("Registered workers: ", workers))
+source(file.path(base_path, "rt_analysis_function.R"))
+source(here::here("1_preprocessing/setup.R"))
+```
+
+---
+
+# Section 1: Data Preparation
+
+## 1.1 Load Detected Peaks
+
+```{r load-detected}
+pt_afekta <- read.csv(
+  file.path(base_path, "object/detected_peaks_afekta_HE.csv")
+)
+
+cat("Total detected peaks (afekta):", nrow(pt_afekta), "\n")
+cat("Samples:", length(unique(pt_afekta$sample)), "\n")
+cat("Unique m/z × RT features:", length(unique(
+  paste(pt_afekta$mz, pt_afekta$rt)
+)), "\n")
+```
+
+## 1.2 Load Annotations (Ground Truth)
+
+```{r load-annotations}
+res_afekta <- read.csv(here::here(
+  "4_library_generation", "afekta", "HE", "ring_trial_library_HE.csv"
+))
+
+cat("Annotated peaks:", nrow(res_afekta), "\n")
+cat("Unique compounds:", length(unique(res_afekta$compound_name)), "\n")
+cat("Unique adducts:", length(unique(res_afekta$adduct)), "\n")
+```
+
+## 1.3 Merge Annotations
+
+```{r merge-annotations}
+ann_cols <- c("chrom_peak_id", "compound_name", "adduct", "formula", "InChIKey")
+
+pt_afekta <- merge(
+  pt_afekta,
+  res_afekta[, ann_cols],
+  by = "chrom_peak_id",
+  all.x = TRUE
+)
+
+pt_afekta$is_annotated <- !is.na(pt_afekta$compound_name)
+
+cat("Annotated peaks in detected table:",
+    sum(pt_afekta$is_annotated), "of", nrow(pt_afekta),
+    "(", round(100 * mean(pt_afekta$is_annotated), 1), "%)\n")
+```
+
+---
+
+# Section 2: Extra Annotation via Targeted Adduct Matching
+
+**Goal**: Expand ground truth by finding likely adducts of known compounds
+within RT clusters, improving evaluation coverage.
+
+## 2.1 Initial RT Clustering (h = 4 sec)
+
+Use complete-linkage hierarchical clustering to create RT groups:
+
+```{r initial-rt-cluster}
+pt_afekta <- pt_afekta[order(pt_afekta$rt), ]
+pt_afekta$rt_cluster <- NA
+
+for (samp in unique(pt_afekta$sample)) {
+  idx <- which(pt_afekta$sample == samp)
+
+  if (length(idx) <= 1) {
+    if (length(idx) == 1) pt_afekta$rt_cluster[idx] <- paste0(samp, "_rt1")
+    next
+  }
+
+  # Complete-linkage prevents chaining
+  rt_hc <- hclust(dist(pt_afekta$rt[idx]), method = "complete")
+  rt_clusters <- cutree(rt_hc, h = 4)
+  pt_afekta$rt_cluster[idx] <- paste0(samp, "_rt", rt_clusters)
+}
+
+cat("RT clusters created:", length(unique(pt_afekta$rt_cluster)), "\n")
+cat("Peaks per cluster - median:",
+    median(table(pt_afekta$rt_cluster)), "\n")
+```
+
+## 2.2 Build Expected Adduct m/z
+
+```{r expected-adducts}
+library(MetaboAnnotation)
+
+# Get all singly-charged adducts
+all_adducts_tbl <- rbind(adducts("positive"), adducts("negative"))
+all_adducts_tbl <- all_adducts_tbl[abs(all_adducts_tbl$charge) == 1, ]
+
+pos_adduct_names <- all_adducts_tbl$name[all_adducts_tbl$positive]
+neg_adduct_names <- all_adducts_tbl$name[!all_adducts_tbl$positive]
+
+# Remove implausible adducts (multimers, rare reagent-based)
+pos_adduct_names <- pos_adduct_names[!grepl("^\\[2M|^\\[3M", pos_adduct_names)]
+neg_adduct_names <- neg_adduct_names[!grepl("^\\[2M|^\\[3M", neg_adduct_names)]
+
+implausible <- c(
+  "[M+Li]+", "[M+2Li-H]+", "[M+Br]-", "[M+C2F3O2]-",
+  "[M+C2H6OS+H]+", "[M+C4H6N2+H]+", "[M+C3H8O+H]+"
+)
+pos_adduct_names <- setdiff(pos_adduct_names, implausible)
+neg_adduct_names <- setdiff(neg_adduct_names, implausible)
+
+# Remove adducts already used in annotation
+annotated_adducts <- unique(res_afekta$adduct)
+pos_adduct_names <- setdiff(pos_adduct_names, annotated_adducts)
+neg_adduct_names <- setdiff(neg_adduct_names, annotated_adducts)
+
+cat("Target adducts for new annotation:\n")
+cat("  Positive:", length(pos_adduct_names), "\n")
+cat("  Negative:", length(neg_adduct_names), "\n")
+
+# Compute neutral mass for each compound
+compound_mass <- unique(res_afekta[, c("compound_name", "formula")])
+compound_mass$neutral_mass <- calculateMass(compound_mass$formula)
+
+cat("Compounds with neutral mass:", nrow(compound_mass), "\n")
+```
+
+## 2.3 Search for Matching Unannotated Peaks
+
+```{r adduct-search}
+adduct_cache_file <- file.path(cache_path, "adduct_hits.RData")
+
+if (file.exists(adduct_cache_file)) {
+  log_ts("Loading cached adduct hits")
+  load(adduct_cache_file)
+} else {
+  time_block("adduct-search", {
+    # Group annotated peaks by RT cluster
+    ann_by_cluster <- split(
+      pt_afekta[pt_afekta$is_annotated, ],
+      pt_afekta[pt_afekta$is_annotated, ]$rt_cluster
+    )
+
+    ppm_tol <- 5
+    param_pos <- Mass2MzParam(adducts = pos_adduct_names, tolerance = 0, ppm = ppm_tol)
+    param_neg <- Mass2MzParam(adducts = neg_adduct_names, tolerance = 0, ppm = ppm_tol)
+
+    adduct_hits <- do.call(rbind, lapply(
+      names(ann_by_cluster), function(cluster_id) {
+        ann_in_cluster <- ann_by_cluster[[cluster_id]]
+        all_in_cluster <- pt_afekta[pt_afekta$rt_cluster == cluster_id, ]
+
+        # Only search unannotated peaks
+        unannotated_idx <- !all_in_cluster$chrom_peak_id %in% ann_in_cluster$chrom_peak_id
+        unannotated <- all_in_cluster[unannotated_idx, ]
+        if (nrow(unannotated) == 0) return(NULL)
+
+        # For each annotated compound, search for new adducts
+        results <- do.call(rbind, lapply(
+          unique(ann_in_cluster$compound_name), function(cmpd) {
+            neutral_mass <- compound_mass$neutral_mass[
+              compound_mass$compound_name == cmpd
+            ]
+            if (length(neutral_mass) == 0 || is.na(neutral_mass)) return(NULL)
+
+            # Determine polarity
+            pol <- unique(ann_in_cluster$polarity[ann_in_cluster$compound_name == cmpd])
+            if (length(pol) == 0) return(NULL)
+
+            # Match unannotated peaks
+            target_df <- data.frame(exactmass = neutral_mass)
+            query_df <- data.frame(mz = unannotated$mz)
+            param <- if (pol == "pos") param_pos else param_neg
+
+            res <- matchValues(query_df, target_df, param)
+            md <- matchedData(res)
+
+            # Keep only matched rows
+            matched_idx <- which(!is.na(md$adduct))
+            if (length(matched_idx) == 0) return(NULL)
+
+            out <- unannotated[matched_idx, ]
+            out$matched_compound <- cmpd
+            out$matched_adduct <- as.character(md$adduct[matched_idx])
+            out$mz_error_ppm <- as.numeric(md$score[matched_idx])
+            out
+          }
+        ))
+
+        results
+      }
+    ))
+    if (!is.null(adduct_hits)) rownames(adduct_hits) <- NULL
+    save(adduct_hits, file = adduct_cache_file)
+  })
+}
+
+if (!is.null(adduct_hits) && nrow(adduct_hits) > 0) {
+  cat("New adduct matches found:", nrow(adduct_hits), "\n")
+  cat("Unique peaks newly matched:", length(unique(adduct_hits$chrom_peak_id)), "\n")
+
+  # Merge back into main table
+  pt_afekta <- merge(
+    pt_afekta,
+    adduct_hits[, c("chrom_peak_id", "matched_compound", "matched_adduct", "mz_error_ppm")],
+    by = "chrom_peak_id",
+    all.x = TRUE
+  )
+
+  # Fill compound_name for newly annotated peaks
+  pt_afekta$compound_name <- ifelse(
+    !is.na(pt_afekta$matched_compound),
+    pt_afekta$matched_compound,
+    pt_afekta$compound_name
+  )
+
+  # Update is_annotated flag
+  pt_afekta$is_annotated <- pt_afekta$is_annotated | !is.na(pt_afekta$matched_adduct)
+
+  cat("Total annotated peaks after expansion:",
+      sum(pt_afekta$is_annotated), "\n")
+} else {
+  cat("No new adduct matches found\n")
+}
+```
+
+---
+
+# Section 3: Extract EICs and Compute Peak Metrics
+
+## 3.1 EIC Extraction (2-pass strategy)
+
+```{r extract-eics}
+# Get unique peaks
+pk_rows <- pt_afekta[!duplicated(pt_afekta$chrom_peak_id), ]
+
+# m/z tolerance
+mz_tolerance <- 0.01  # ~10 ppm at 1000 m/z
+
+# Pass 1: Extract with 5-second buffers for initial metrics
+pk_table <- data.frame(
+  chrom_peak_id = pk_rows$chrom_peak_id,
+  mzMin = pk_rows$mzmin - mz_tolerance,
+  mzMax = pk_rows$mzmax + mz_tolerance,
+  rtMin = pk_rows$rtmin - 5,
+  rtMax = pk_rows$rtmax + 5,
+  polarity = ifelse(pk_rows$polarity == "pos", 1L, 0L),
+  mixture = pk_rows$mixture,
+  sample = pk_rows$sample,
+  stringsAsFactors = FALSE
+)
+
+eics_file <- file.path(base_path, "object/eics_afekta_method_dev.RData")
+
+if (!file.exists(eics_file)) {
+  load(file.path(base_path, "object/tic_full_spectra.RData"))
+  tic_afekta <- tic_full[tic_full$lab == "afekta"]
+
+  eics_afekta <- chromExtract(
+    tic_afekta,
+    peak.table = pk_table,
+    by = c("polarity", "mixture")
+  )
+  eics_afekta <- setBackend(eics_afekta, ChromBackendMemory())
+  save(eics_afekta, file = eics_file)
+  rm(tic_full, tic_afekta)
+} else {
+  load(eics_file)
+}
+
+cat("EICs extracted (Pass 1):", length(eics_afekta), "\n")
+```
+
+## 3.2 Compute Pass 1 Metrics
+
+```{r pass1-metrics}
+metrics_pass1 <- c(
+  "peakCount",
+  "xicFwhm",
+  "areaUnderTic",
+  "maxIntensity",
+  "baselineIntensity",
+  "signalToNoiseRatio",
+  "peakWidth",
+  "peakBoundary",
+  "peakProminence",
+  "peakBeta"
+)
+
+pass1_cache_file <- file.path(cache_path, "pk_metrics_pass1.RData")
+if (file.exists(pass1_cache_file)) {
+  log_ts("Loading cached Pass 1 metrics")
+  load(pass1_cache_file)
+} else {
+  time_block("pass1-metrics", {
+    pk_metrics_pass1 <- calculateMetrics(
+      eics_afekta,
+      metrics = metrics_pass1,
+      na.rm = TRUE,
+      filterEmptyObject = FALSE,
+      f = seq_len(length(eics_afekta)),
+      probs = 0.05,
+      method = "adaptive",
+      minPeakWidth = 3
+    )
+
+    # Extract metadata
+    cd <- chromData(eics_afekta)
+    pk_metrics_pass1 <- cbind(
+      cd[, intersect(c("chrom_peak_id", "mixture", "polarity", "mz", "sample"),
+                     colnames(cd))],
+      pk_metrics_pass1
+    )
+    save(pk_metrics_pass1, file = pass1_cache_file)
+  })
+}
+
+cat("Pass 1 metrics computed:", nrow(pk_metrics_pass1), "peaks\n")
+```
+
+## 3.3 Quality Filtering
+
+```{r quality-filter}
+n_before <- nrow(pt_afekta)
+
+metric_cols_pass1 <- setdiff(colnames(pk_metrics_pass1),
+                             c("chrom_peak_id", "mixture", "polarity", "mz", "sample"))
+
+# Merge metrics
+pt_afekta <- merge(pt_afekta, pk_metrics_pass1[, c("chrom_peak_id", metric_cols_pass1)],
+                   by = "chrom_peak_id", all.x = TRUE)
+
+# Quality filters
+bad <- is.na(pt_afekta$xicFwhm) |
+  (!is.na(pt_afekta$peakProminence) & pt_afekta$peakProminence < 1.0) |
+  (!is.na(pt_afekta$peakWidth) & (pt_afekta$peakWidth < 1 | pt_afekta$peakWidth > 30))
+
+n_removed <- sum(bad)
+pt_afekta <- pt_afekta[!bad, ]
+
+cat("Quality filtering:\n")
+cat("  Removed:", n_removed, "peaks\n")
+cat("  Remaining:", nrow(pt_afekta), "peaks\n")
+cat("  Annotated retained:", sum(pt_afekta$is_annotated), "\n")
+```
+
+## 3.4 Re-extract EICs with Refined Boundaries
+
+```{r reextract-eics}
+# Use peakBoundary from Pass 1 to refine EIC windows
+peak_boundaries <- pk_metrics_pass1[, c("chrom_peak_id", "peakBoundary1", "peakBoundary2")]
+peak_boundaries <- peak_boundaries[peak_boundaries$chrom_peak_id %in% pt_afekta$chrom_peak_id, ]
+
+eics_afekta_refined <- lapply(seq_len(nrow(peak_boundaries)), function(i) {
+  eic_id <- peak_boundaries$chrom_peak_id[i]
+  boundary1 <- peak_boundaries$peakBoundary1[i]
+  boundary2 <- peak_boundaries$peakBoundary2[i]
+
+  idx <- which(eics_afekta$chrom_peak_id == eic_id)
+  if (length(idx) == 0) return(NULL)
+
+  eic <- eics_afekta[idx]
+  eic <- filterPeaksData(
+    eic,
+    variables = "rtime",
+    ranges = c(boundary1 - 0.05, boundary2 + 0.05)  # 3-sec margin
+  )
+  eic <- applyProcessing(eic)
+  eic
+})
+
+eics_afekta_refined <- eics_afekta_refined[!sapply(eics_afekta_refined, is.null)]
+eics_afekta_refined <- concatenateChromatograms(eics_afekta_refined)
+
+cat("Re-extracted EICs:", length(eics_afekta_refined), "\n")
+```
+
+## 3.5 Compute Pass 2 Metrics (Refined)
+
+```{r pass2-metrics}
+metrics_pass2 <- c(
+  "xicFwhm",
+  "peakWidth",
+  "peakBeta",
+  "signalToNoiseRatio",
+  "peakProminence"
+)
+
+pass2_cache_file <- file.path(cache_path, "pk_metrics_pass2.RData")
+if (file.exists(pass2_cache_file)) {
+  log_ts("Loading cached Pass 2 metrics")
+  load(pass2_cache_file)
+} else {
+  time_block("pass2-metrics", {
+    pk_metrics_pass2 <- calculateMetrics(
+      eics_afekta_refined,
+      metrics = metrics_pass2,
+      na.rm = TRUE,
+      filterEmptyObject = FALSE,
+      f = seq_len(length(eics_afekta_refined)),
+      probs = 0.05,
+      method = "adaptive",
+      minPeakWidth = 3
+    )
+
+    cd2 <- chromData(eics_afekta_refined)
+    pk_metrics_pass2 <- cbind(
+      cd2[, "chrom_peak_id", drop = FALSE],
+      pk_metrics_pass2
+    )
+    save(pk_metrics_pass2, file = pass2_cache_file)
+  })
+}
+
+# Rename refined metrics
+colnames(pk_metrics_pass2) <- c("chrom_peak_id", paste0(metrics_pass2, "_refined"))
+
+# Merge refined metrics
+pt_afekta <- merge(pt_afekta, pk_metrics_pass2, by = "chrom_peak_id", all.x = TRUE)
+
+cat("Pass 2 metrics computed:", nrow(pk_metrics_pass2), "peaks\n")
+```
+
+## 3.6 LOESS Intensity Correction
+
+Remove intensity bias from shape metrics using LOESS regression:
+
+```{r loess-correction}
+cat("\n--- Correcting Shape Metrics for Intensity Bias ---\n")
+
+pt_afekta$log_intensity <- log10(pt_afekta$maxIntensity)
+
+# Correct FWHM
+fwhm_model <- loess(xicFwhm_refined ~ log_intensity, data = pt_afekta,
+                    span = 0.5, na.action = na.exclude)
+pt_afekta$corrected_FWHM <- residuals(fwhm_model)
+
+# Correct Width
+width_model <- loess(peakWidth_refined ~ log_intensity, data = pt_afekta,
+                     span = 0.5, na.action = na.exclude)
+pt_afekta$corrected_Width <- residuals(width_model)
+
+# Correct Beta1
+beta_model <- loess(peakBeta_refined ~ log_intensity, data = pt_afekta,
+                    span = 0.5, na.action = na.exclude)
+pt_afekta$corrected_Beta1 <- residuals(beta_model)
+
+cat("Corrected metrics created:\n")
+cat("  corrected_FWHM, corrected_Width, corrected_Beta1\n")
+```
+
+---
+
+# Section 4: Optimize RT Clustering Threshold
+
+Test different RT thresholds (2, 3, 4, 5, 6 seconds) to find optimal:
+
+```{r optimize-rt-threshold}
+cat("\n=== OPTIMIZING RT CLUSTERING THRESHOLD ===\n\n")
+
+# Evaluation helper function
+evaluate_clustering <- function(eval_df, cluster_col = "final_cluster") {
+  # Generate all pairwise comparisons
+  pairs <- combn(seq_len(nrow(eval_df)), 2, simplify = FALSE)
+
+  pair_results <- lapply(pairs, function(p) {
+    i <- p[1]
+    j <- p[2]
+
+    true_compound_1 <- eval_df$compound_sample[i]
+    true_compound_2 <- eval_df$compound_sample[j]
+    pred_cluster_1 <- eval_df[[cluster_col]][i]
+    pred_cluster_2 <- eval_df[[cluster_col]][j]
+
+    is_true_pair <- (true_compound_1 == true_compound_2)
+    is_pred_pair <- (pred_cluster_1 == pred_cluster_2)
+
+    data.frame(
+      is_true_pair = is_true_pair,
+      is_pred_pair = is_pred_pair
+    )
+  })
+
+  pair_df <- do.call(rbind, pair_results)
+
+  tp <- sum(pair_df$is_true_pair & pair_df$is_pred_pair)
+  fp <- sum(!pair_df$is_true_pair & pair_df$is_pred_pair)
+  fn <- sum(pair_df$is_true_pair & !pair_df$is_pred_pair)
+  tn <- sum(!pair_df$is_true_pair & !pair_df$is_pred_pair)
+
+  precision <- if ((tp + fp) > 0) tp / (tp + fp) else 0
+  recall <- if ((tp + fn) > 0) tp / (tp + fn) else 0
+  f1 <- if ((precision + recall) > 0) 2 * ((precision * recall) / (precision + recall)) else 0
+
+  list(
+    precision = precision,
+    recall = recall,
+    f1 = f1,
+    tp = tp,
+    fp = fp,
+    fn = fn,
+    tn = tn
+  )
+}
+
+# Prepare evaluation data (annotated multi-peak compounds only)
+compound_counts <- table(paste(pt_afekta$compound_name, pt_afekta$sample))
+multi_peak_compounds <- names(compound_counts)[compound_counts > 1]
+
+eval_data <- pt_afekta[pt_afekta$is_annotated, ]
+eval_data$compound_sample <- paste(eval_data$compound_name, eval_data$sample)
+eval_data <- eval_data[eval_data$compound_sample %in% multi_peak_compounds, ]
+
+cat("Evaluation dataset:\n")
+cat("  Multi-peak compounds:", length(unique(eval_data$compound_sample)), "\n")
+cat("  Total peaks:", nrow(eval_data), "\n\n")
+
+rt_opt_cache_file <- file.path(cache_path, "rt_optimization.RData")
+if (file.exists(rt_opt_cache_file)) {
+  log_ts("Loading cached RT-threshold optimization")
+  load(rt_opt_cache_file)
+} else {
+  time_block("optimize-rt-threshold", {
+    # Test RT thresholds
+    rt_thresholds <- c(2, 3, 4, 5, 6)
+    rt_results <- list()
+
+    for (h in rt_thresholds) {
+      cat("Testing RT threshold h =", h, "sec...\n")
+
+      # Re-cluster with this threshold
+      pt_temp <- pt_afekta
+      pt_temp$rt_cluster_test <- NA
+
+      for (samp in unique(pt_temp$sample)) {
+        idx <- which(pt_temp$sample == samp)
+        if (length(idx) <= 1) {
+          if (length(idx) == 1) pt_temp$rt_cluster_test[idx] <- paste0(samp, "_rt1")
+          next
+        }
+
+        rt_hc <- hclust(dist(pt_temp$rt[idx]), method = "complete")
+        rt_clusters <- cutree(rt_hc, h = h)
+        pt_temp$rt_cluster_test[idx] <- paste0(samp, "_rt", rt_clusters)
+      }
+
+      # Evaluate on eval_data
+      eval_temp <- eval_data
+      eval_temp$rt_cluster_test <- pt_temp$rt_cluster_test[
+        match(eval_temp$chrom_peak_id, pt_temp$chrom_peak_id)
+      ]
+
+      perf <- evaluate_clustering(eval_temp, cluster_col = "rt_cluster_test")
+
+      rt_results[[paste0("h", h)]] <- data.frame(
+        threshold = h,
+        precision = perf$precision,
+        recall = perf$recall,
+        f1 = perf$f1,
+        n_clusters = length(unique(pt_temp$rt_cluster_test))
+      )
+
+      cat("  Precision:", round(perf$precision * 100, 1), "%\n")
+      cat("  Recall:", round(perf$recall * 100, 1), "%\n")
+      cat("  F1:", round(perf$f1, 3), "\n")
+      cat("  Clusters:", length(unique(pt_temp$rt_cluster_test)), "\n\n")
+    }
+
+    rt_results_df <- do.call(rbind, rt_results)
+    save(rt_results_df, file = rt_opt_cache_file)
+  })
+}
+
+best_rt_idx <- which.max(rt_results_df$f1)
+best_rt_threshold <- rt_results_df$threshold[best_rt_idx]
+
+cat("BEST RT THRESHOLD: h =", best_rt_threshold, "sec\n")
+cat("F1-Score:", round(rt_results_df$f1[best_rt_idx], 3), "\n\n")
+
+# Apply best threshold
+pt_afekta$rt_cluster <- NA
+for (samp in unique(pt_afekta$sample)) {
+  idx <- which(pt_afekta$sample == samp)
+  if (length(idx) <= 1) {
+    if (length(idx) == 1) pt_afekta$rt_cluster[idx] <- paste0(samp, "_rt1")
+    next
+  }
+
+  rt_hc <- hclust(dist(pt_afekta$rt[idx]), method = "complete")
+  rt_clusters <- cutree(rt_hc, h = best_rt_threshold)
+  pt_afekta$rt_cluster[idx] <- paste0(samp, "_rt", rt_clusters)
+}
+
+cat("Final RT clustering applied with h =", best_rt_threshold, "\n")
+```
+
+---
+
+# Section 5: Optimize Metric-Based Clustering
+
+Test different metric combinations to find best performer:
+
+```{r optimize-metrics}
+cat("\n=== OPTIMIZING METRIC-BASED CLUSTERING ===\n\n")
+
+# Define metric combinations to test
+metric_combos <- list(
+  # Singles (raw)
+  xicFwhm_raw = c("xicFwhm_refined"),
+  peakWidth_raw = c("peakWidth_refined"),
+  peakBeta_raw = c("peakBeta_refined"),
+
+  # Singles (corrected)
+  FWHM_corrected = c("corrected_FWHM"),
+  Width_corrected = c("corrected_Width"),
+  Beta_corrected = c("corrected_Beta1"),
+
+  # Pairs (raw)
+  FWHM_Width_raw = c("xicFwhm_refined", "peakWidth_refined"),
+  FWHM_Beta_raw = c("xicFwhm_refined", "peakBeta_refined"),
+  Width_Beta_raw = c("peakWidth_refined", "peakBeta_refined"),
+
+  # Pairs (corrected)
+  FWHM_Width_corrected = c("corrected_FWHM", "corrected_Width"),
+  FWHM_Beta_corrected = c("corrected_FWHM", "corrected_Beta1"),
+  Width_Beta_corrected = c("corrected_Width", "corrected_Beta1"),
+
+  # Triples (raw)
+  all_raw = c("xicFwhm_refined", "peakWidth_refined", "peakBeta_refined"),
+
+  # Triples (corrected)
+  all_corrected = c("corrected_FWHM", "corrected_Width", "corrected_Beta1"),
+
+  # Hybrids
+  FWHM_corrected_Width_Beta_raw = c("corrected_FWHM", "peakWidth_refined", "peakBeta_refined"),
+  FWHM_Width_corrected_Beta_raw = c("xicFwhm_refined", "corrected_Width", "peakBeta_refined"),
+  FWHM_Width_raw_Beta_corrected = c("xicFwhm_refined", "peakWidth_refined", "corrected_Beta1"),
+  all_hybrid = c("corrected_FWHM", "corrected_Width", "peakBeta_refined")
+)
+
+cat("Testing", length(metric_combos), "metric combinations...\n\n")
+
+metric_opt_cache_file <- file.path(cache_path, "metric_optimization.RData")
+if (file.exists(metric_opt_cache_file)) {
+  log_ts("Loading cached metric-combination optimization")
+  load(metric_opt_cache_file)
+} else {
+  time_block("optimize-metrics", {
+    combo_results <- list()
+
+    for (combo_name in names(metric_combos)) {
+      metrics <- metric_combos[[combo_name]]
+
+      cat("Testing:", combo_name, "(", paste(metrics, collapse = ", "), ")...\n")
+
+      # Cluster within each RT cluster using these metrics
+      pt_temp <- pt_afekta
+      pt_temp$metric_cluster <- NA
+
+      for (rt_clust in unique(pt_temp$rt_cluster)) {
+        idx <- which(pt_temp$rt_cluster == rt_clust)
+
+        if (length(idx) <= 1) {
+          if (length(idx) == 1) pt_temp$metric_cluster[idx] <- paste0(rt_clust, "_m1")
+          next
+        }
+
+        # Extract metric values
+        metric_matrix <- as.matrix(pt_temp[idx, metrics, drop = FALSE])
+
+        # Remove rows with all NA
+        valid_rows <- rowSums(!is.na(metric_matrix)) > 0
+        if (sum(valid_rows) <= 1) {
+          pt_temp$metric_cluster[idx[valid_rows]] <- paste0(rt_clust, "_m1")
+          next
+        }
+
+        metric_matrix <- metric_matrix[valid_rows, , drop = FALSE]
+
+        # Impute remaining NA with column median
+        for (col in seq_len(ncol(metric_matrix))) {
+          na_idx <- is.na(metric_matrix[, col])
+          if (any(na_idx)) {
+            metric_matrix[na_idx, col] <- median(metric_matrix[, col], na.rm = TRUE)
+          }
+        }
+
+        # Scale metrics
+        metric_scaled <- scale(metric_matrix)
+
+        # Average-linkage clustering
+        metric_hc <- hclust(dist(metric_scaled), method = "average")
+        metric_clusters <- cutree(metric_hc, h = 0.8)
+
+        pt_temp$metric_cluster[idx[valid_rows]] <- paste0(rt_clust, "_m", metric_clusters)
+      }
+
+      # Evaluate
+      eval_temp <- eval_data
+      eval_temp$metric_cluster <- pt_temp$metric_cluster[
+        match(eval_temp$chrom_peak_id, pt_temp$chrom_peak_id)
+      ]
+
+      perf <- evaluate_clustering(eval_temp, cluster_col = "metric_cluster")
+
+      combo_results[[combo_name]] <- data.frame(
+        metric_combo = combo_name,
+        precision = perf$precision,
+        recall = perf$recall,
+        f1 = perf$f1,
+        metrics_used = paste(metrics, collapse = "; "),
+        stringsAsFactors = FALSE
+      )
+
+      cat("  Precision:", round(perf$precision * 100, 1), "%\n")
+      cat("  Recall:", round(perf$recall * 100, 1), "%\n")
+      cat("  F1:", round(perf$f1, 3), "\n\n")
+    }
+
+    combo_results_df <- do.call(rbind, combo_results)
+    combo_results_df <- combo_results_df[order(-combo_results_df$f1), ]
+    save(combo_results_df, file = metric_opt_cache_file)
+  })
+}
+
+cat("=== METRIC COMBINATION RESULTS (sorted by F1) ===\n")
+print(combo_results_df, row.names = FALSE)
+
+best_combo <- combo_results_df$metric_combo[1]
+best_metrics <- metric_combos[[best_combo]]
+best_f1 <- combo_results_df$f1[1]
+
+cat("\nBEST METRIC COMBINATION:", best_combo, "\n")
+cat("Metrics:", paste(best_metrics, collapse = ", "), "\n")
+cat("F1-Score:", round(best_f1, 3), "\n")
+```
+
+---
+
+# Section 6: Apply Best Configuration
+
+Apply optimal RT threshold + metric combination to full dataset:
+
+```{r apply-best-config}
+cat("\n=== APPLYING BEST CONFIGURATION ===\n\n")
+
+# RT clustering already applied above (best_rt_threshold)
+
+# Metric clustering with best_metrics
+pt_afekta$final_cluster <- NA
+
+for (rt_clust in unique(pt_afekta$rt_cluster)) {
+  idx <- which(pt_afekta$rt_cluster == rt_clust)
+
+  if (length(idx) <= 1) {
+    if (length(idx) == 1) pt_afekta$final_cluster[idx] <- paste0(rt_clust, "_m1")
+    next
+  }
+
+  metric_matrix <- as.matrix(pt_afekta[idx, best_metrics, drop = FALSE])
+
+  valid_rows <- rowSums(!is.na(metric_matrix)) > 0
+  if (sum(valid_rows) <= 1) {
+    pt_afekta$final_cluster[idx[valid_rows]] <- paste0(rt_clust, "_m1")
+    next
+  }
+
+  metric_matrix <- metric_matrix[valid_rows, , drop = FALSE]
+
+  for (col in seq_len(ncol(metric_matrix))) {
+    na_idx <- is.na(metric_matrix[, col])
+    if (any(na_idx)) {
+      metric_matrix[na_idx, col] <- median(metric_matrix[, col], na.rm = TRUE)
+    }
+  }
+
+  metric_scaled <- scale(metric_matrix)
+  metric_hc <- hclust(dist(metric_scaled), method = "average")
+  metric_clusters <- cutree(metric_hc, h = 0.8)
+
+  pt_afekta$final_cluster[idx[valid_rows]] <- paste0(rt_clust, "_m", metric_clusters)
+}
+
+cat("Final clustering applied\n")
+cat("Total clusters:", length(unique(pt_afekta$final_cluster)), "\n")
+
+# Final evaluation
+eval_data$final_cluster <- pt_afekta$final_cluster[
+  match(eval_data$chrom_peak_id, pt_afekta$chrom_peak_id)
+]
+
+final_perf <- evaluate_clustering(eval_data, cluster_col = "final_cluster")
+
+cat("\n=== FINAL PERFORMANCE ===\n")
+cat("RT Threshold:", best_rt_threshold, "sec\n")
+cat("Metric Combination:", best_combo, "\n")
+cat("Metrics:", paste(best_metrics, collapse = ", "), "\n")
+cat("Precision:", round(final_perf$precision * 100, 1), "%\n")
+cat("Recall:", round(final_perf$recall * 100, 1), "%\n")
+cat("F1-Score:", round(final_perf$f1, 3), "\n")
+```
+
+---
+
+# Section 7: Save Results for Benchmarking
+
+```{r save-results}
+# Save optimized configuration
+method_config <- list(
+  rt_threshold = best_rt_threshold,
+  metric_combination = best_combo,
+  metrics = best_metrics,
+  performance = final_perf,
+  rt_results = rt_results_df,
+  metric_results = combo_results_df
+)
+
+save(method_config, file = file.path(base_path, "object/optimized_method_config.RData"))
+
+# Save clustered peak table
+save(pt_afekta, file = file.path(base_path, "object/pt_afekta_optimized.RData"))
+
+# Save EICs for benchmarking
+save(eics_afekta_refined, file = file.path(base_path, "object/eics_afekta_refined.RData"))
+
+cat("\n=== SAVED FOR BENCHMARKING ===\n")
+cat("Config: object/optimized_method_config.RData\n")
+cat("Peak table: object/pt_afekta_optimized.RData\n")
+cat("EICs: object/eics_afekta_refined.RData\n")
+```
+
+---
+
+# Summary
+
+**Optimized Method Configuration:**
+
+- **RT Clustering**: Complete-linkage, h = `r best_rt_threshold` sec
+- **Metric Clustering**: Average-linkage, h = 0.8
+- **Best Metrics**: `r paste(best_metrics, collapse = ", ")`
+- **Performance**: Precision = `r round(final_perf$precision * 100, 1)`%, Recall = `r round(final_perf$recall * 100, 1)`%, F1 = `r round(final_perf$f1, 3)`
+
+This configuration will be used in the benchmarking document to compare against:
+1. RT clustering + EIC correlation
+2. CAMERA
+

@@ -1,5 +1,5 @@
 #' Helper functions for global analysis
-#' 
+#'
 #' This script contains reusable functions for the inter-laboratory
 #' LC-MS reproducibility analysis.
 
@@ -16,6 +16,14 @@ run_for_polarities <- function(fn, ...) {
 #' Run function for both polarities (single argument version)
 run_for_polarities_simple <- function(fn) {
   bind_rows(fn(1L), fn(0L))
+}
+
+#' Run function for both polarities with names
+run_for_polarities_names <- function(fn) {
+  bind_rows(
+    fn(1L, "Positive"),
+    fn(0L, "Negative")
+  )
 }
 
 # ==== Lab Pairs Definition ====
@@ -40,11 +48,11 @@ check_metric_quality <- function(data, metric_name) {
   } else {
     model <- lm(get(metric_name) ~ lab + mixture, data = data)
   }
-  
+
   r_squared <- summary(model)$r.squared
   an <- anova(model)
   ss_total <- sum(an[, "Sum Sq"])
-  
+
   variance_data <- data.frame(
     Source = c("Lab Variance", "Mixture Variance", "Residual Variance"),
     Percentage = c(
@@ -53,7 +61,7 @@ check_metric_quality <- function(data, metric_name) {
       an["Residuals", "Sum Sq"] / ss_total * 100
     )
   )
-  
+
   coefs <- coef(model)
   coef_df <- data.frame(
     coefficient = names(coefs),
@@ -64,7 +72,7 @@ check_metric_quality <- function(data, metric_name) {
       TRUE ~ "Intercept"
     )
   ) |> filter(type != "Intercept")
-  
+
   list(
     model = model,
     r_squared = r_squared,
@@ -93,19 +101,19 @@ compute_icc <- function(data, metric_name) {
   } else {
     data$value <- log2(data[[metric_name]])
   }
-  
+
   between_var <- data |>
     group_by(mixture) |>
     summarise(mean_val = mean(value, na.rm = TRUE), .groups = "drop") |>
     pull(mean_val) |>
     var(na.rm = TRUE)
-  
+
   within_var <- data |>
     group_by(mixture) |>
     summarise(var_val = var(value, na.rm = TRUE), .groups = "drop") |>
     pull(var_val) |>
     mean(na.rm = TRUE)
-  
+
   data.frame(
     Metric = metric_name,
     ICC = between_var / (between_var + within_var),
@@ -123,34 +131,34 @@ compute_icc <- function(data, metric_name) {
 compute_rt_binned_correlations <- function(tic_data, bin_size = 5) {
   rt_range <- range(rtime(tic_data[1L])[[1]])
   breaks <- seq(rt_range[1], rt_range[2], by = bin_size)
-  
+
   polarities <- unique(tic_data$polarity)
   mixtures <- unique(tic_data$mixture)
-  
+
   results <- list()
-  
+
   for (pol in polarities) {
     for (mix in mixtures) {
       subset_tic <- tic_data[which(tic_data$polarity == pol & tic_data$mixture == mix)]
       if (length(subset_tic) == 0) next
-      
+
       int_matrix <- data.frame(
         afekta = numeric(length(breaks) - 1),
         icl = numeric(length(breaks) - 1),
         hmgu = numeric(length(breaks) - 1),
         cembio = numeric(length(breaks) - 1)
       )
-      
+
       for (i in seq_along(subset_tic)) {
         lab_name <- subset_tic$lab[i]
         peaks <- peaksData(subset_tic[i])[[1]]
         int_matrix[[lab_name]] <- tapply(
-          peaks$intensity, 
-          cut(peaks$rtime, breaks = breaks), 
+          peaks$intensity,
+          cut(peaks$rtime, breaks = breaks),
           sum, na.rm = TRUE
         )
       }
-      
+
       cor_mat <- cor(int_matrix, method = "pearson", use = "pairwise.complete.obs")
       polarity_label <- ifelse(pol == 1, "pos", "neg")
       results[[paste0(polarity_label, "_", mix)]] <- cor_mat
@@ -162,7 +170,7 @@ compute_rt_binned_correlations <- function(tic_data, bin_size = 5) {
 #' Extract pairwise correlations from correlation results
 extract_pairwise_cors <- function(correlation_results) {
   pairwise_cors <- data.frame()
-  
+
   for (result_name in names(correlation_results)) {
     cor_mat <- correlation_results[[result_name]]
     for (pair in LAB_PAIRS) {
@@ -173,7 +181,7 @@ extract_pairwise_cors <- function(correlation_results) {
       ))
     }
   }
-  
+
   pairwise_cors |>
     separate(mixture, into = c("polarity", "mix"), sep = "_", extra = "merge") |>
     mutate(polarity = factor(polarity, levels = c("neg", "pos")))
@@ -187,7 +195,7 @@ extract_pairwise_cors <- function(correlation_results) {
 #' @param data Original data used for the model (optional, for lab/mixture styling)
 plot_residuals <- function(model, title = "Residual Plot", data = NULL) {
   plot_df <- data.frame(Fitted = fitted(model), Residuals = residuals(model))
-  
+
   if (!is.null(data) && "lab" %in% names(data) && "mixture" %in% names(data)) {
     plot_df$lab <- data$lab
     plot_df$mixture <- as.factor(data$mixture)
@@ -200,7 +208,7 @@ plot_residuals <- function(model, title = "Residual Plot", data = NULL) {
     p <- ggplot(plot_df, aes(x = Fitted, y = Residuals)) +
       geom_point(alpha = 0.6, size = 2)
   }
-  
+
   p + geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
     labs(title = title, x = "Fitted Values", y = "Residuals") +
     theme_minimal() +
@@ -217,7 +225,7 @@ plot_violin <- function(data, metric) {
     ylab <- metric
     title <- paste("Violin plot of", metric)
   }
-  
+
   ggplot(data, aes(x = lab, y = .data[[metric]], fill = polarity)) +
     geom_violin(trim = FALSE, alpha = 0.6) +
     geom_jitter(aes(color = as.factor(mixture)), width = 0.2, size = 1.5, alpha = 0.7) +
@@ -232,7 +240,7 @@ plot_correlation_heatmap <- function(cor_data, title) {
   ggplot(cor_data, aes(x = pair, y = mix, fill = correlation)) +
     geom_tile() +
     geom_text(aes(label = round(correlation, 2)), size = 3) +
-    scale_fill_gradient2(low = "blue", mid = "white", high = "red", 
+    scale_fill_gradient2(low = "blue", mid = "white", high = "red",
                          midpoint = 0.5, limits = c(0, 1)) +
     facet_wrap(~polarity, ncol = 2) +
     theme_minimal() +
@@ -245,7 +253,7 @@ plot_correlation_distribution <- function(cor_data, title) {
   ggplot(cor_data, aes(x = pair, y = correlation, color = pair)) +
     geom_violin(alpha = 0.3, show.legend = FALSE) +
     ggbeeswarm::geom_beeswarm(size = 2, alpha = 0.7, show.legend = FALSE) +
-    stat_summary(fun = median, geom = "crossbar", width = 0.5, 
+    stat_summary(fun = median, geom = "crossbar", width = 0.5,
                  color = "black", show.legend = FALSE) +
     facet_wrap(~polarity, ncol = 2) +
     theme_minimal() +
@@ -260,7 +268,7 @@ plot_quartile_variance <- function(data, metric_type = "TIC") {
     "Q1" = "Q1 (Polar)", "Q2" = "Q2 (Semi-polar)",
     "Q3" = "Q3 (Lipids)", "Q4" = "Q4 (Wash)"
   )
-  
+
   plot_data <- data |>
     mutate(Residual_Var = 100 - (Mixture_Var + Lab_Var)) |>
     filter(grepl(metric_type, Metric)) |>
@@ -275,7 +283,7 @@ plot_quartile_variance <- function(data, metric_type = "TIC") {
     mutate(Source = factor(Source,
                            levels = c("Residual_Var", "Lab_Var", "Mixture_Var"),
                            labels = c("Unexplained (Noise)", "Laboratory Bias", "Mixture (Biology)")))
-  
+
   ggplot(plot_data, aes(x = Quartile, y = Variance, fill = Source)) +
     geom_col(width = 0.7, color = "white") +
     facet_wrap(~Polarity) +
@@ -302,8 +310,8 @@ load_peak_tables <- function(base_path) {
 #' Join intensity data from all labs to consensus table
 join_intensity_data <- function(ct_filtered, peak_tables) {
   ct_filtered |>
-    select(consensus_id, sample, idx_afekta, 
-           chrom_peak_id_afekta, chrom_peak_id_icl, 
+    select(consensus_id, sample, idx_afekta,
+           chrom_peak_id_afekta, chrom_peak_id_icl,
            chrom_peak_id_hmgu, chrom_peak_id_cembio) |>
     left_join(peak_tables$afekta |> select(chrom_peak_id, into, rt),
               by = c("chrom_peak_id_afekta" = "chrom_peak_id")) |>

@@ -1,0 +1,392 @@
+---
+title: "SIRIUS Compound Annotation Across Labs"
+format: html
+---
+
+## Introduction
+
+This document annotates the manually curated chromatographic peaks from all four
+labs using SIRIUS via the `RuSirius` R package. The workflow:
+
+1. Load the combined annotation table and filter per lab
+2. Extract MS1 and MS2 spectra for annotated peaks
+3. Import into SIRIUS and run formula ID + structure DB search
+4. Extract results: top-rank (`summary()`) and full-rank (`results()`) per lab
+5. Compare SIRIUS annotations across labs against known identities
+
+**Prerequisites:**
+
+- [SIRIUS 6.3+](https://github.com/sirius-ms/sirius/releases) installed
+  and running
+- A SIRIUS account (free at [bright-giant.com](https://bright-giant.com/))
+- `RuSirius` and `RSirius` packages installed
+  (see [RuSirius README](https://github.com/rformassspectrometry/RuSirius))
+
+## Setup
+
+```{r}
+#| label: setup
+#| message: false
+library(Spectra)
+library(MsExperiment)
+library(xcms)
+library(RSirius)
+library(RuSirius)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(here)
+
+# Source preprocessing helpers (automate_matching_ms2, etc.)
+source(here("1_preprocessing", "setup.R"))
+```
+
+## Configuration
+
+```{r}
+#| label: config
+labs <- c("afekta", "cembio", "hmgu", "icl")
+study_group <- "HE"
+
+# Waters data flag (ICL uses Waters Synapt → needs estimatePrecursorMz)
+waters_labs <- c("icl")
+
+# Path to combined annotation table
+ann_path <- here("3_annotation_manual", "HE", "2_combine_annotation",
+                 "all_lab_annotations.xlsx")
+
+# Output directory
+output_dir <- here("3_annotation_manual", "HE", "3_Sirius_curation", "results")
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+## Load Annotations
+
+```{r}
+#| label: load-annotations
+ann <- read_xlsx(ann_path)
+
+# Clean lab_id column (remove leading underscore from lab_id values)
+ann <- ann |>
+  mutate(lab = sub("^_", "", lab_id))
+
+# Overview of peaks per lab and polarity
+ann |>
+  count(lab, polarity) |>
+  pivot_wider(names_from = polarity, values_from = n)
+```
+
+## Part 1: Spectra Extraction
+
+### Helper function
+
+Extract MS1 + MS2 `Spectra` for a single lab, ready for SIRIUS import.
+MS1 spectra are extracted with `chromPeakSpectra()` from `mse`.
+MS2 spectra are matched to annotated peaks using `automate_matching_ms2()`
+from `mse2`.
+
+```{r}
+#| label: helper-extract
+extract_spectra_for_sirius <- function(lab_name,
+                                       ann,
+                                       study_group,
+                                       is_waters = FALSE) {
+  study_path <- here("1_preprocessing", lab_name, study_group)
+
+  # --- Filter annotations for this lab ---
+  lab_ann <- ann |>
+    filter(lab == lab_name) |>
+    as.data.frame()
+  rownames(lab_ann) <- lab_ann$chrom_peak_id
+
+  # --- Load MS1 XcmsExperiment ---
+  mse <- readMsObject(
+    XcmsExperiment(),
+    AlabasterParam(path = file.path(study_path, "mse")),
+    spectraPath = file.path(study_path, "mzml")
+  )
+  sampleData(mse)$mixture <- sub(".*_", "", sampleData(mse)$Sample.Name)
+  sampleData(mse)$mixture <- gsub("\\.", "_", sampleData(mse)$mixture)
+
+  # --- Extract MS1 spectra for annotated peaks ---
+  peak_ids <- lab_ann$chrom_peak_id
+  ms1 <- chromPeakSpectra(
+    mse, msLevel = 1L,
+    peaks = peak_ids,
+    method = "closest_rt"
+  )
+  # Ensure consistent grouping variable for SIRIUS import
+  ms1$chrom_peak_id <- ms1$peak_id
+  ms1 <- applyProcessing(ms1)
+
+  # --- Load MS2 XcmsExperiment ---
+  mse2 <- readMsObject(
+    XcmsExperiment(),
+    AlabasterParam(path = file.path(study_path, "mse2")),
+    spectraPath = file.path(study_path, "mzml")
+  )
+  sampleData(mse2)$mixture <- sub(".*_", "", sampleData(mse2)$Sample.Name)
+  sampleData(mse2)$mixture <- gsub("\\.", "_", sampleData(mse2)$mixture)
+
+  # --- Extract MS2 spectra matched to annotated peaks ---
+  # automate_matching_ms2 filters mse2 spectra by m/z and RT proximity to
+  # the annotated peaks, and assigns the matching chrom_peak_id.
+  ms2 <- automate_matching_ms2(
+    mse2 = mse2,
+    match_res = lab_ann,
+    waters_data = is_waters
+  )
+
+  # Filter low-intensity MS2 fragments (keep > 5% of base peak)
+  low_int <- function(x, ...) x > max(x, na.rm = TRUE) * 0.05
+  ms2 <- filterIntensity(ms2, intensity = low_int)
+  ms2 <- ms2[lengths(ms2) > 1]
+  ms2 <- applyProcessing(ms2)
+
+  # --- Combine MS1 and MS2 ---
+  ms1_ms2 <- c(ms1, ms2)
+
+  list(
+    spectra = ms1_ms2,
+    n_ms1 = length(ms1),
+    n_ms2 = length(ms2),
+    n_peaks = length(peak_ids)
+  )
+}
+```
+
+### Run extraction
+
+```{r}
+#| label: extract-spectra
+#| message: false
+spectra_per_lab <- list()
+extraction_summary <- list()
+
+for (lab_name in labs) {
+  message("Extracting spectra for: ", lab_name)
+  res <- extract_spectra_for_sirius(
+    lab_name = lab_name,
+    ann = ann,
+    study_group = study_group,
+    is_waters = lab_name %in% waters_labs
+  )
+  spectra_per_lab[[lab_name]] <- res$spectra
+  extraction_summary[[lab_name]] <- tibble(
+    lab = lab_name,
+    n_peaks = res$n_peaks,
+    n_ms1 = res$n_ms1,
+    n_ms2 = res$n_ms2
+  )
+  message(sprintf("  %s: %d peaks, %d MS1, %d MS2 spectra",
+                  lab_name, res$n_peaks, res$n_ms1, res$n_ms2))
+}
+
+bind_rows(extraction_summary)
+```
+
+## Part 2: SIRIUS Annotation
+
+**NOTE:** SIRIUS must be running before executing this section.
+Start SIRIUS 6.3+ and ensure you are logged in.
+
+Each lab gets its own SIRIUS project. Annotation includes:
+
+- Formula identification (SIRIUS)
+- Molecular fingerprint prediction (CSI:FingerID)
+- Structure database search (BIO database)
+- Compound class prediction (CANOPUS)
+
+```{r}
+#| label: sirius-annotate
+#| eval: false
+summary_results <- list()
+full_results <- list()
+
+for (lab_name in labs) {
+  message("=== Processing: ", lab_name, " ===")
+
+  # --- Create / open SIRIUS project ---
+  srs <- Sirius(
+    projectId = paste0("ring_trial_", lab_name),
+    path = output_dir
+  )
+
+  # --- Import spectra ---
+  srs <- import(
+    sirius = srs,
+    spectra = spectra_per_lab[[lab_name]],
+    ms_column_name = "chrom_peak_id",
+    deleteExistingFeatures = TRUE
+  )
+  message(sprintf("  Imported %d features", nrow(featuresInfo(srs))))
+
+  # --- Run annotation ---
+  # All labs use Q-ToF instruments
+  job_id <- run(
+    srs,
+    fallbackAdducts = c("[M + H]+", "[M + Na]+", "[M + K]+",
+                        "[M - H]-", "[M + Cl]-"),
+    formulaIdParams = formulaIdParam(
+      numberOfCandidates = 5,
+      instrument = "QTOF",
+      numberOfCandidatesPerIonization = 2,
+      massAccuracyMS2ppm = 10,
+      filterByIsotopePattern = FALSE,
+      isotopeMs2Settings = "SCORE",
+      performDeNovoBelowMz = 600
+    ),
+    predictParams = predictParam(),
+    structureDbSearchParams = structureDbSearchParam(
+      structureSearchDbs = c("BIO")
+    ),
+    recompute = TRUE,
+    wait = TRUE
+  )
+  message(sprintf("  Job %s completed", job_id))
+
+  # --- Extract top-rank summary ---
+  summary_results[[lab_name]] <- summary(srs, result.type = "structure") |>
+    mutate(lab = lab_name)
+
+  # --- Extract full results (top 5 formulas × top 3 structures) ---
+  full_results[[lab_name]] <- results(
+    srs,
+    result.type = "structureDb",
+    topFormula = 5,
+    topStructure = 3,
+    return.type = "data.frame"
+  ) |>
+    mutate(lab = lab_name)
+
+  # --- Save per-lab CSVs ---
+  write.csv(
+    summary_results[[lab_name]],
+    file.path(output_dir, paste0("sirius_summary_", lab_name, ".csv")),
+    row.names = FALSE
+  )
+  write.csv(
+    full_results[[lab_name]],
+    file.path(output_dir, paste0("sirius_full_", lab_name, ".csv")),
+    row.names = FALSE
+  )
+
+  # Shut down this project's connection
+  shutdown(srs)
+  message(sprintf("  Results saved for %s\n", lab_name))
+}
+```
+
+## Part 3: Combine and Compare
+
+### Merge with ground truth
+
+```{r}
+#| label: combine-results
+#| eval: false
+all_summaries <- bind_rows(summary_results)
+all_full <- bind_rows(full_results)
+
+# Map SIRIUS xcms_fts back to the original annotation info
+all_summaries <- all_summaries |>
+  left_join(
+    ann |>
+      select(lab, chrom_peak_id, target_ChEBI.name, target_formula,
+             target_InChIKey, adduct, polarity, mixture),
+    by = c("lab", "xcms_fts" = "chrom_peak_id")
+  )
+
+# Save combined tables
+write.csv(all_summaries,
+          file.path(output_dir, "sirius_summary_all_labs.csv"),
+          row.names = FALSE)
+write.csv(all_full,
+          file.path(output_dir, "sirius_full_all_labs.csv"),
+          row.names = FALSE)
+```
+
+### Annotation success rate
+
+Check whether SIRIUS top-rank molecular formula matches the known formula.
+
+```{r}
+#| label: success-rate
+#| eval: false
+comparison <- all_summaries |>
+  mutate(
+    formula_match = molecularFormula == target_formula,
+    has_structure = !is.na(structureName)
+  )
+
+comparison |>
+  group_by(lab) |>
+  summarise(
+    n_features = n(),
+    n_formula_match = sum(formula_match, na.rm = TRUE),
+    pct_formula = round(mean(formula_match, na.rm = TRUE) * 100, 1),
+    n_with_structure = sum(has_structure, na.rm = TRUE),
+    mean_confidence = round(mean(confidenceApproxMatch, na.rm = TRUE), 3),
+    .groups = "drop"
+  )
+```
+
+### Confidence score distribution
+
+```{r}
+#| label: confidence-plot
+#| eval: false
+ggplot(comparison, aes(x = lab, y = confidenceApproxMatch, fill = lab)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(
+    title = "SIRIUS Confidence Scores by Lab",
+    x = "Lab",
+    y = "Approximate Confidence"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+### Compound-level cross-lab agreement
+
+For each standard compound, check whether all labs produce the same top
+molecular formula prediction.
+
+```{r}
+#| label: cross-lab-agreement
+#| eval: false
+compound_agreement <- comparison |>
+  group_by(target_ChEBI.name) |>
+  summarise(
+    n_labs = n_distinct(lab),
+    formulas = paste(unique(na.omit(molecularFormula)), collapse = "; "),
+    n_unique_formulas = n_distinct(molecularFormula, na.rm = TRUE),
+    all_agree = n_distinct(molecularFormula, na.rm = TRUE) == 1,
+    mean_confidence = round(mean(confidenceApproxMatch, na.rm = TRUE), 3),
+    .groups = "drop"
+  ) |>
+  filter(n_labs > 1) |>
+  arrange(desc(n_labs), desc(all_agree))
+
+compound_agreement
+```
+
+
+## Notes for collaborators
+
+- The spectra extraction (Part 1) does not require SIRIUS. It can be run
+  independently to verify that spectra are correctly matched.
+- SIRIUS annotation (Part 2) requires a running SIRIUS instance and may take
+  significant time depending on the number of features.
+- The `eval: false` chunks in Parts 2–3 must be set to `eval: true` (or run
+  interactively) once SIRIUS is available.
+- Per-lab results are saved as CSVs in the `results/` subfolder.
+- The `automate_matching_ms2()` function from `setup.R` matches MS2 spectra
+  to annotated MS1 peaks by m/z and RT proximity. It works for all labs
+  (both separate and single injection workflows).
+
+## Session Info
+
+```{r}
+sessionInfo()
+```
