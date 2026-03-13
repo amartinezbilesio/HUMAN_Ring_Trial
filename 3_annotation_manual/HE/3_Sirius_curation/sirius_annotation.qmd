@@ -96,9 +96,7 @@ extract_spectra_for_sirius <- function(lab_name,
 
   # --- Filter annotations for this lab ---
   lab_ann <- ann |>
-    filter(lab == lab_name) |>
-    as.data.frame()
-  rownames(lab_ann) <- lab_ann$chrom_peak_id
+    filter(lab == lab_name)
 
   # --- Load MS1 XcmsExperiment ---
   mse <- readMsObject(
@@ -109,32 +107,75 @@ extract_spectra_for_sirius <- function(lab_name,
   sampleData(mse)$mixture <- sub(".*_", "", sampleData(mse)$Sample.Name)
   sampleData(mse)$mixture <- gsub("\\.", "_", sampleData(mse)$mixture)
 
+  # --- Expand pipe-separated chrom_peak_id into individual rows ---
+  # all_lab_annotations.xlsx stores compound-level rows with pipe-separated
+
+  # peak IDs (e.g. "CP396003|CP395863|CP636221"). We need one row per peak.
+  cp <- chromPeaks(mse)
+  sd <- as.data.frame(sampleData(mse))
+
+  peak_df <- lab_ann |>
+    mutate(peak_id_list = strsplit(chrom_peak_id, "\\|")) |>
+    tidyr::unnest(peak_id_list) |>
+    rename(compound_peak_id = chrom_peak_id,
+           chrom_peak_id = peak_id_list)
+
+  # Keep only peaks that exist in chromPeaks
+  peak_df <- peak_df |>
+    filter(chrom_peak_id %in% rownames(cp))
+
+  # Add mz/rt info from chromPeaks table
+  cp_info <- as.data.frame(cp[peak_df$chrom_peak_id, ])
+  peak_df$mz <- cp_info$mz
+  peak_df$mzmin <- cp_info$mzmin
+  peak_df$mzmax <- cp_info$mzmax
+  peak_df$rt <- cp_info$rt
+  peak_df$rtmin <- cp_info$rtmin
+  peak_df$rtmax <- cp_info$rtmax
+
+  # Add per-peak polarity and mixture from sample metadata
+  peak_df$polarity <- sd$polarity[cp_info$sample]
+  peak_df$mixture <- sd$mixture[cp_info$sample]
+
+  peak_df <- as.data.frame(peak_df)
+  rownames(peak_df) <- peak_df$chrom_peak_id
+
   # --- Extract MS1 spectra for annotated peaks ---
-  peak_ids <- lab_ann$chrom_peak_id
+  peak_ids <- peak_df$chrom_peak_id
   ms1 <- chromPeakSpectra(
     mse, msLevel = 1L,
     peaks = peak_ids,
     method = "closest_rt"
   )
-  # Ensure consistent grouping variable for SIRIUS import
-  ms1$chrom_peak_id <- ms1$peak_id
+  # chromPeakSpectra already sets ms1$chrom_peak_id
+  # Switch to in-memory backend and materialize processing queue
+  ms1 <- setBackend(ms1, MsBackendMemory())
   ms1 <- applyProcessing(ms1)
 
   # --- Load MS2 XcmsExperiment ---
-  mse2 <- readMsObject(
-    XcmsExperiment(),
-    AlabasterParam(path = file.path(study_path, "mse2")),
-    spectraPath = file.path(study_path, "mzml")
-  )
-  sampleData(mse2)$mixture <- sub(".*_", "", sampleData(mse2)$Sample.Name)
+  # Some labs (e.g. hmgu) use single injection (no separate mse2);
+  # in that case, MS2 spectra live in the same mse object.
+  mse2_path <- file.path(study_path, "mse2")
+  if (dir.exists(mse2_path)) {
+    mse2 <- readMsObject(
+      XcmsExperiment(),
+      AlabasterParam(path = mse2_path),
+      spectraPath = file.path(study_path, "mzml")
+    )
+  } else {
+    mse2 <- mse
+  }
+  # Strip _MS2 suffix (Waters/ICL naming) before extracting mixture
+  sn2 <- sub("_MS2$", "", sampleData(mse2)$Sample.Name)
+  sampleData(mse2)$mixture <- sub(".*_", "", sn2)
   sampleData(mse2)$mixture <- gsub("\\.", "_", sampleData(mse2)$mixture)
 
   # --- Extract MS2 spectra matched to annotated peaks ---
-  # automate_matching_ms2 filters mse2 spectra by m/z and RT proximity to
-  # the annotated peaks, and assigns the matching chrom_peak_id.
+  # automate_matching_ms2 needs per-peak rows with: mixture, polarity,
+  # rtmin, rtmax, mzmin, mzmax (as rownames = chrom_peak_id)
   ms2 <- automate_matching_ms2(
     mse2 = mse2,
-    match_res = lab_ann,
+    match_res = peak_df,
     waters_data = is_waters
   )
 
@@ -142,6 +183,8 @@ extract_spectra_for_sirius <- function(lab_name,
   low_int <- function(x, ...) x > max(x, na.rm = TRUE) * 0.05
   ms2 <- filterIntensity(ms2, intensity = low_int)
   ms2 <- ms2[lengths(ms2) > 1]
+  # Switch to in-memory backend and materialize processing queue
+  ms2 <- setBackend(ms2, MsBackendMemory())
   ms2 <- applyProcessing(ms2)
 
   # --- Combine MS1 and MS2 ---
