@@ -331,13 +331,19 @@ for (lab_name in labs) {
 all_summaries <- bind_rows(summary_results)
 all_full <- bind_rows(full_results)
 
-# Map SIRIUS xcms_fts back to the original annotation info
+# Build a peak-level lookup from the pipe-separated annotation table
+ann_expanded <- ann |>
+  mutate(peak_id_list = strsplit(chrom_peak_id, "\\|")) |>
+  tidyr::unnest(peak_id_list) |>
+  select(lab, chrom_peak_id = peak_id_list,
+         target_ChEBI.name, target_formula,
+         target_InChIKey, adduct, polarity, mixture)
+
+# Map SIRIUS externalFeatureId back to the original annotation info
 all_summaries <- all_summaries |>
   left_join(
-    ann |>
-      select(lab, chrom_peak_id, target_ChEBI.name, target_formula,
-             target_InChIKey, adduct, polarity, mixture),
-    by = c("lab", "xcms_fts" = "chrom_peak_id")
+    ann_expanded,
+    by = c("lab", "externalFeatureId" = "chrom_peak_id")
   )
 
 # Save combined tables
@@ -358,6 +364,8 @@ Check whether SIRIUS top-rank molecular formula matches the known formula.
 #| eval: false
 comparison <- all_summaries |>
   mutate(
+    confidenceApproxMatch = as.numeric(confidenceApproxMatch),
+    confidenceExactMatch = as.numeric(confidenceExactMatch),
     formula_match = molecularFormula == target_formula,
     has_structure = !is.na(structureName)
   )
@@ -369,7 +377,9 @@ comparison |>
     n_formula_match = sum(formula_match, na.rm = TRUE),
     pct_formula = round(mean(formula_match, na.rm = TRUE) * 100, 1),
     n_with_structure = sum(has_structure, na.rm = TRUE),
-    mean_confidence = round(mean(confidenceApproxMatch, na.rm = TRUE), 3),
+    mean_confidence = round(
+      mean(confidenceApproxMatch[is.finite(confidenceApproxMatch)],
+           na.rm = TRUE), 3),
     .groups = "drop"
   )
 ```
@@ -379,7 +389,10 @@ comparison |>
 ```{r}
 #| label: confidence-plot
 #| eval: false
-ggplot(comparison, aes(x = lab, y = confidenceApproxMatch, fill = lab)) +
+ggplot(
+  comparison |> filter(is.finite(confidenceApproxMatch)),
+  aes(x = lab, y = confidenceApproxMatch, fill = lab)
+) +
   geom_boxplot(alpha = 0.7) +
   labs(
     title = "SIRIUS Confidence Scores by Lab",
