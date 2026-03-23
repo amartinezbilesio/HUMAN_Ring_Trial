@@ -40,7 +40,7 @@ results/lab_comparison_HE.rmarkdown
 /1_preprocessing/icl/HE/mse2
 *.rmarkdown
 /5_downstream_analysis/lab_comparison_HE_files
-/5_downstream_analysis/object
+/5_downstream_analysis/object/*.RData
 /5_downstream_analysis/data
 /5_downstream_analysis/global_signal_analysis_files
 .nfs*
@@ -54,3 +54,4 @@ redner.sh
 /5_downstream_analysis/2_global_analysis_files
 /5_downstream_analysis/3a_peak_feature_calculation_detected_files
 /5_downstream_analysis/6_mitigaging_inter_lab_varaince_files
+*.sirius
