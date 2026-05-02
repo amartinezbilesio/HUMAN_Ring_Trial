@@ -55,3 +55,8 @@ redner.sh
 /5_downstream_analysis/3a_peak_feature_calculation_detected_files
 /5_downstream_analysis/6_mitigaging_inter_lab_varaince_files
 *.sirius
+*.csv
+*.rds
+*.js
+*.css
+*.woff
