@@ -404,32 +404,30 @@ eics
 ## Compute metrics
 
 
-```{r}
-## need to look into the peakCount before calcualting fwhm.
-metrics <- c(
-  "peakCount",
-  "xicFwhm",
-  "areaUnderTic",
-  "maxIntensity",
-  "baselineIntensity",
-  "signalToNoiseRatio",
-  "peakWidth",
-  "peakBoundary",
-  "peakProminence",
-  "peakBeta"
-)
+```{r compute-metrics}
+# Step 1: peak boundaries — now in Chromatograms, no longer a calculateMetrics metric
+cat("Computing peak boundaries...\n")
+pb <- Chromatograms::peakBoundary(eics)
+cat("peakBoundary columns:", paste(names(pb), collapse = ", "), "\n")
+chromData(eics) <- cbind(chromData(eics), pb)
+
+# Step 2: quality metrics used for filtering and downstream doc-3 analysis
+# Removed: peakBoundary (above), gaussianSimilarity (computed on narrow EICs below)
+# Removed: f = seq_len() — not a valid parameter in current MsQuality
 pk <- calculateMetrics(
   eics,
-  metrics = metrics,
+  metrics = c(
+    "peakCount", "xicFwhm", "maxIntensity",
+    "baselineIntensity", "signalToNoiseRatio",
+    "peakWidth", "peakProminence"
+  ),
   na.rm = TRUE,
   filterEmptyObject = FALSE,
-  f = seq_len(length(eics)),
-  probs = 0.05, # for BAseline intensity,
-  method = "adaptive",  ## might need ot change smooth to 1 bc narrow peaks,
-  minPeakWidth = 3 # in seconds, to avoid too narrow peaks
+  probs = 0.05
 )
 
 chromData(eics) <- cbind(chromData(eics), pk)
+cat("Metrics computed for", length(eics), "EICs\n")
 ```
 
 ## Filter bad peaks
@@ -454,58 +452,96 @@ cat("Unique consensus IDs:", length(unique(eics$consensus_id)), "\n")
 ## Re-extract EICs using peak boundaries
 
 ```{r re-extract}
+# NOTE: delete the cached RData below if you want to force re-extraction
+# (necessary after changes to boundary computation or imputation).
+rdata_path <- file.path(base_path, "object/eics_filtered_detected_all4labs.RData")
 
-if (!file.exists(file.path(base_path, "object/eics_filtered_detected_all4labs.RData"))) {
-  final_eics <- lapply(split(eics, seq_len(length(eics))), function(eic) {
-    eic <- filterPeaksData(
-      eic,
-      variables = "rtime",
-      ranges = c(eic$peakBoundary1 - 0.05, eic$peakBoundary2 + 0.05) # add a small margin to ensure we capture the whole peak
-            )
-    eic <- applyProcessing(eic)
-    eic
+if (!file.exists(rdata_path)) {
+  # Trim each EIC to its peak boundaries + small margin, then impute edge NAs.
+  # peakBoundary column names are printed above — adjust if different.
+  final_eics <- lapply(seq_along(eics), function(i) {
+    eic  <- eics[i]
+    rt1  <- eic$left_boundary
+    rt2  <- eic$right_boundary
+    if (is.na(rt1) || is.na(rt2)) return(eic)
+    eic  <- filterPeaksData(eic, variables = "rtime",
+                            ranges = c(rt1 - 0.5, rt2 + 0.5))
+    applyProcessing(eic)
   })
   final_eics <- concatenateChromatograms(final_eics)
-  save(final_eics, file = file.path(base_path,
-  "object/eics_filtered_detected_all4labs.RData"))
+  # Impute residual NAs (boundary edge artefacts from scan-grid misalignment)
+  final_eics <- imputePeaksData(final_eics, method = "linear")
+  save(final_eics, file = rdata_path)
 } else {
-  load(file.path(base_path, "object/eics_filtered_detected_all4labs.RData"))
+  load(rdata_path)
 }
 
-## i want check wether the saame order is kept after the filtering
-all(final_eics$consensus_id == eics$consensus_id) # should be TRUE
+stopifnot(all(final_eics$consensus_id == eics$consensus_id))
+cat("Re-extracted EICs:", length(final_eics), "\n")
+
+# Patch remaining edge NAs — linear imputation cannot fill leading/trailing NAs
+# because there is no boundary value to interpolate toward.  At peak boundaries
+# the signal approaches baseline, so 0 is the appropriate fill value.
+# This block also runs on a loaded cache, so stale objects self-heal.
+n_na <- sum(is.na(unlist(intensity(final_eics))))
+cat("NAs after linear imputation:", n_na, "\n")
+if (n_na > 0) {
+  cat("  -> filling", n_na, "edge NAs with 0 (signal at peak boundary ≈ baseline)...\n")
+  pd <- peaksData(final_eics)
+  pd <- lapply(pd, function(df) {
+    df$intensity[is.na(df$intensity)] <- 0
+    df
+  })
+  peaksData(final_eics) <- pd
+  cat("NAs after 0-fill:", sum(is.na(unlist(intensity(final_eics)))), "\n")
+  save(final_eics, file = rdata_path)  # patch the cache so next load is already clean
+} else {
+  cat("  -> no edge NAs found.\n")
+}
 ```
 
-```{r}
-metrics <- c(
-  "peakCount",
-  "xicFwhm",
-  "areaUnderTic",
-  "maxIntensity",
-  "baselineIntensity",
-  "signalToNoiseRatio",
-  "peakBeta"
-)
+```{r compute-metrics-final}
+# Second metrics round — computed on boundary-trimmed, imputed EICs.
+# Only the three metrics needed by 4_mitigating_inter_lab_variance.qmd.
+# (areaUnderTic and xicFwhm on narrow EICs are more accurate than on wide EICs.)
+# Guard: skip if metrics are already stored in the loaded RData.
+if (!("areaUnderTic" %in% names(chromData(final_eics)))) {
+  cat("Computing tight-EIC metrics (areaUnderTic, xicFwhm, gaussianSimilarity)...\n")
+  pk2 <- calculateMetrics(
+    final_eics,
+    metrics = c("areaUnderTic", "xicFwhm", "gaussianSimilarity"),
+    na.rm = TRUE,
+    filterEmptyObject = FALSE
+  )
+  # Store metrics in chromData(final_eics) so doc 4 can access them after
+  # loading the same RData object it needs for compareChromatograms anyway.
+  chromData(final_eics) <- cbind(chromData(final_eics), pk2)
+  save(final_eics, file = rdata_path)
+  cat("Metrics stored in chromData and RData re-saved.\n")
+} else {
+  cat("Tight-EIC metrics already in chromData — skipping calculateMetrics.\n")
+  pk2 <- as.data.frame(chromData(final_eics))[,
+    intersect(c("areaUnderTic", "xicFwhm",
+                "gaussianSimilarity.gaussian_similarity",
+                "gaussianSimilarity.gaussian_residuals"),
+              names(chromData(final_eics)))
+  ]
+}
 
-## replace the old metrics with the new ones
-pk_filtered <- calculateMetrics(
-  final_eics,
-  metrics = metrics,
-  na.rm = TRUE,
-  filterEmptyObject = FALSE,
-  f = seq_len(length(final_eics)),
-  probs = 0.05, # for BAseline intensity,
-)
-
-## finalise the metric table
-# which columns do i need from eics
-# lab , consensus_id, mixture, polarity, mz, chrom_peak_id, peakWidth,
-# peakBoundary1, peakBoundary2
+# Build the full analysis table for doc-3 analysis: tight-EIC metrics +
+# QC metrics from the first round.
+# left_boundary/right_boundary column names must match what peakBoundary() added.
 pk_filtered <- cbind(
-  chromData(eics)[, c("lab", "consensus_id", "mixture", "polarity", "mz",
-   "chrom_peak_id", "peakWidth", "peakBoundary1", "peakBoundary2")],
-  pk_filtered
+  chromData(eics)[, c(
+    "lab", "consensus_id", "mixture", "polarity", "mz", "chrom_peak_id",
+    "peakCount", "maxIntensity", "baselineIntensity", "signalToNoiseRatio",
+    "peakWidth", "peakProminence", "left_boundary", "right_boundary"
+  )],
+  pk2
 )
+
+cat("pk_filtered columns:", paste(names(pk_filtered), collapse = ", "), "\n")
+cat("Rows:", nrow(pk_filtered), "\n")
 
 write.csv(
   pk_filtered,
@@ -830,38 +866,42 @@ inter-lab reproducibility? We examine two relationships:
 ### Peak Count vs Quality Metrics
 
 ```{r peak-count-quality, fig.width=10, fig.height=5}
-# Per-EIC relationship: peakCount vs quality metrics
+# Per-EIC relationship: peakCount vs gaussianSimilarity metrics
+# (peakBeta1/peakBeta2 renamed to gaussianSimilarity.* in new MsQuality)
+gs_sim <- "gaussianSimilarity.gaussian_similarity"
+gs_res <- "gaussianSimilarity.gaussian_residuals"
+
 pq <- pk_filtered |>
-  filter(!is.na(peakBeta1), !is.na(peakBeta2))
+  filter(!is.na(.data[[gs_sim]]), !is.na(.data[[gs_res]]))
 
-cat("Spearman cor (peakCount vs peakBeta1):",
-    round(cor(pq$peakCount, pq$peakBeta1,
+cat("Spearman cor (peakCount vs gaussian_similarity):",
+    round(cor(pq$peakCount, pq[[gs_sim]],
               method = "spearman", use = "complete.obs"), 3), "\n")
-cat("Spearman cor (peakCount vs peakBeta2):",
-    round(cor(pq$peakCount, pq$peakBeta2,
+cat("Spearman cor (peakCount vs gaussian_residuals):",
+    round(cor(pq$peakCount, pq[[gs_res]],
               method = "spearman", use = "complete.obs"), 3), "\n")
 
-p1 <- ggplot(pq, aes(x = peakCount, y = peakBeta1)) +
+p1 <- ggplot(pq, aes(x = peakCount, y = .data[[gs_sim]])) +
   geom_bin2d(bins = 50) +
   scale_fill_viridis_c(option = "inferno", trans = "log10") +
   geom_smooth(method = "loess", se = FALSE, color = "red",
               linewidth = 0.8) +
   labs(
-    title = "Peak Count vs Peak Beta1",
+    title = "Peak Count vs Gaussian Similarity",
     x = "Peak Count (data points)",
-    y = "Peak Beta1 (Gaussian fit, 0\u20131)"
+    y = "Gaussian similarity (0\u20131)"
   ) +
   theme_minimal()
 
-p2 <- ggplot(pq, aes(x = peakCount, y = peakBeta2)) +
+p2 <- ggplot(pq, aes(x = peakCount, y = .data[[gs_res]])) +
   geom_bin2d(bins = 50) +
   scale_fill_viridis_c(option = "inferno", trans = "log10") +
   geom_smooth(method = "loess", se = FALSE, color = "red",
               linewidth = 0.8) +
   labs(
-    title = "Peak Count vs Peak Beta2",
+    title = "Peak Count vs Gaussian Residuals",
     x = "Peak Count (data points)",
-    y = "Peak Beta2 (fit SNR)"
+    y = "Gaussian residuals"
   ) +
   theme_minimal()
 
@@ -1123,7 +1163,8 @@ Key findings from the peak feature and shape analysis:
    Other pairs are moderate (ρ ≈ 0.4–0.5).
 3. **Peak count**: More data points do not improve shape agreement across
    labs. Broader peaks actually show slightly lower Gaussian-fit scores
-   (peakBeta1), though the fit SNR (peakBeta2) improves modestly.
+   (`gaussianSimilarity.gaussian_similarity`), though the residuals
+   (`gaussianSimilarity.gaussian_residuals`) improve modestly.
 4. **Shape similarity**: Median Pearson correlations range from 0.59
    (hmgu:icl) to 0.73 (afekta:hmgu). Only 11–20% of peaks exceed the
    0.9 threshold, indicating room for improvement.

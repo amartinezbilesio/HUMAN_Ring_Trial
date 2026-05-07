@@ -57,9 +57,7 @@ Baseline finding: **lab identity explains 97–100% of variance in raw TIC**
 ## Load Libraries
 
 ```{r library, include=TRUE, warning=FALSE, message=FALSE}
-##The install below are temporary and should be replaced with proper dependencies in the future.
-# BiocManager::install("RforMassSpectrometry/Chromatograms", ask = FALSE, update = TRUE)
-# BiocManager::install("tnaake/MsQuality", ask = FALSE, update = TRUE)
+## this analysisis dependent on R 4.6.0 and Bioc 3.23
 library(Chromatograms)
 library(tidyr)
 library(dplyr)
@@ -1365,216 +1363,379 @@ with EIC profile similarity.
 
 ---
 
-# Part 3: Peak Shape Metrics vs EIC Profile Correlation {#strategy3}
+# Part 3: Diagnosing the Residual Variance — Peak Shape Reproducibility {#strategy3}
 
-**Core question:** Do scalar peak shape metrics (FWHM, peak width, asymmetry,
-etc.) capture the same cross-lab reproducibility information as the full EIC
-Pearson profile similarity?
+**Why this section exists.** Part 2 established that local normalization
+re-centers all labs on zero (Figure 2.3) but ICC plateaus at ~0.58, well
+below the same-platform ceiling we will define in Part 4. *Something other
+than systematic intensity bias is left over.* Part 3 asks what.
 
-## 3.1 Load Data
+**Hypothesis.** The residual variance is not random measurement noise but
+**structured platform-specific differences in peak shape itself**. If true:
+(i) peak shape metrics will track platform identity the same way intensity
+does, and (ii) full EIC profile similarity (`compareChromatograms()`) will
+agree with the same-platform vs cross-platform split. If false (i.e., shape
+is reproducible and only intensity drifts), then better normalization
+could in principle close the ICC gap.
 
-```{r part3-data-setup}
-# Peak shape metrics (scalar summaries per peak per lab)
-pk_metrics <- read.csv(file.path(base_path,
-                                 "data/peak_metrics_detected_all4labs.csv"))
+**Approach.** For each consensus peak we compute, **per lab**, a panel of
+peak-level metrics from `MsQuality::calculateMetrics()` and, **per lab pair**,
+one profile-level similarity from `Chromatograms::compareChromatograms()`:
 
-# EIC profile similarity (Pearson & Tanimoto of raw rt/int values per lab pair)
-eic_sim <- read.csv(file.path(base_path,
-                               "data/peak_shape_similarity.csv"))
+| Property                   | Metric                                                            | Type     |
+|----------------------------|-------------------------------------------------------------------|----------|
+| Quantitative response      | `areaUnderTic`, `maxIntensity`                                    | scalar   |
+| Width / shape              | `xicFwhm`, `peakWidth`, `peakProminence`                          | scalar   |
+| Gaussianity                | `gaussianSimilarity.gaussian_similarity`, `…gaussian_residuals`   | scalar   |
+| SNR / sampling             | `signalToNoiseRatio`, `peakCount`                                 | scalar   |
+| Full profile similarity    | Pearson r of apex-shifted aligned EICs                            | profile  |
+
+Area and `maxIntensity` are included as **consistency checks**: they are the
+quantities that drove the ICC analysis in Parts 1–2, so we already know
+roughly what their cross-lab Pearson looks like and use them to anchor the
+new shape metrics on the same scale.
+
+We split positive and negative polarity throughout this section because the
+two ionization modes have very different chemical and intensity distributions
+and pooling them would mask polarity-specific patterns.
+
+The same-platform pair (afekta:cembio, both Agilent Q-TOF) is shown as a
+**reference**: under the hypothesis that residual variance is platform-bound,
+this pair should score higher than cross-platform pairs on shape metrics.
+Whether that actually holds — and whether it holds in both polarities — is
+read off the tables below, not assumed.
+
+## 3.1 Load Pre-Processed EICs
+
+EICs are boundary-trimmed and NA-imputed by `3_peak_feature_calculation_detected.qmd`
+and saved to `eics_filtered_detected_all4labs.RData` — no further preprocessing needed here.
+
+```{r peak-boundaries-once}
+load(file.path(base_path, "object/eics_filtered_detected_all4labs.RData"))
+cat("Loaded", length(final_eics), "EICs across",
+    length(unique(final_eics$consensus_id)), "consensus peaks\n")
 ```
 
-## 3.2 Cross-Lab Correlation of Scalar Metrics
+## 3.2 Extract Pre-Computed Metrics
 
-Pairwise Pearson correlations per scalar metric across consensus peaks.
+`areaUnderTic`, `xicFwhm`, and `gaussianSimilarity` were computed on the
+boundary-trimmed EICs in `3_peak_feature_calculation_detected.qmd` and
+stored in `chromData(final_eics)` before saving the RData — already loaded above.
 
-```{r metric-cross-lab-correlation}
-#| fig-cap: "**Figure 3.1**: Cross-lab Pearson correlation of scalar peak metrics for all 6 lab pairs. Area and maxIntensity show moderate-to-strong correlations; shape metrics (FWHM, peakWidth, peakBeta1) are weakly correlated across labs."
-#| fig-width: 10
-#| fig-height: 6
+```{r calc-metrics-loop}
+# Metrics live in chromData(final_eics) — no separate file needed.
+pk_metrics <- as.data.frame(chromData(final_eics))
+cat("Loaded", nrow(pk_metrics), "peak-lab rows\n")
+cat("Columns:", paste(names(pk_metrics), collapse = ", "), "\n")
 
-metrics_to_test <- c("areaUnderTic", "maxIntensity", "xicFwhm",
-                     "peakWidth", "peakBeta1", "signalToNoiseRatio")
+# --- Polarity normalisation ----------------------------------------------
+# polarity in chromData may come back as integer 1L/0L, numeric 1/0,
+# character "1"/"0", or factor. Normalise to a single "Positive"/"Negative"
+# label so downstream filters are encoding-independent.
+stopifnot("polarity" %in% names(pk_metrics))
+cat("polarity class:", class(pk_metrics$polarity),
+    "| unique values:",
+    paste(unique(pk_metrics$polarity), collapse = ", "), "\n")
 
-# Keep only consensus peaks present in all 4 labs
-pk_complete <- pk_metrics |>
-  group_by(consensus_id) |>
-  filter(n() == 4) |>
-  ungroup()
+pol_to_label <- function(x) {
+  s <- as.character(x)
+  dplyr::case_when(
+    s %in% c("1", "1L", "Positive", "positive", "pos", "POS", "+") ~ "Positive",
+    s %in% c("0", "0L", "Negative", "negative", "neg", "NEG", "-") ~ "Negative",
+    TRUE ~ NA_character_
+  )
+}
+pk_metrics$polarity_label <- pol_to_label(pk_metrics$polarity)
+cat("polarity_label counts:\n"); print(table(pk_metrics$polarity_label, useNA = "always"))
+stopifnot(sum(!is.na(pk_metrics$polarity_label)) > 0)
+```
 
-# For each metric, compute pairwise lab-lab Pearson correlation
-metric_corr <- map_dfr(metrics_to_test, function(m) {
-  wide <- pk_complete |>
-    select(consensus_id, lab, all_of(m)) |>
-    pivot_wider(names_from = lab, values_from = all_of(m))
+## 3.3 Cross-Lab Pearson Correlation by Metric
 
-  labs <- setdiff(names(wide), "consensus_id")
-  pairs <- combn(labs, 2, simplify = FALSE)
+For each lab pair, each metric, and each polarity separately, compute
+Pearson r across consensus peaks present in all four labs. The metric
+panel is everything currently in `chromData(final_eics)` that comes from
+`MsQuality::calculateMetrics()` — quantitative, shape, Gaussianity and
+SNR/sampling. Intensity-scale metrics (`areaUnderTic`, `maxIntensity`,
+`peakProminence`, `signalToNoiseRatio`) are log2-transformed before
+correlating; the others are already on bounded or near-bounded scales.
 
-  map_dfr(pairs, function(p) {
-    vals <- wide |> select(all_of(p)) |> drop_na()
-    r <- cor(vals[[1]], vals[[2]], use = "complete.obs")
-    tibble(metric = m, pair = paste(p, collapse = ":"), r = r)
+```{r cross-lab-pearson-table}
+# Helper: pairwise Pearson r per metric on peaks complete in all 4 labs.
+# `pol_label` is just a string carried through to the output table.
+compute_metric_corr <- function(data, pol_label, metrics) {
+  pk_complete <- data |>
+    group_by(consensus_id) |>
+    filter(n() == 4) |>
+    ungroup()
+
+  pairs <- combn(c("afekta", "cembio", "hmgu", "icl"), 2, simplify = FALSE)
+  log2_metrics <- c("areaUnderTic", "maxIntensity",
+                    "peakProminence", "signalToNoiseRatio")
+
+  map_dfr(metrics, function(m) {
+    wide <- pk_complete |>
+      select(consensus_id, lab, all_of(m)) |>
+      pivot_wider(names_from = lab, values_from = all_of(m))
+
+    map_dfr(pairs, function(p) {
+      if (!all(p %in% names(wide))) return(NULL)
+      vals <- wide |> select(all_of(p)) |> drop_na()
+      if (nrow(vals) < 10) return(NULL)
+      if (m %in% log2_metrics) {
+        vals <- vals |> mutate(across(everything(), \(x) log2(pmax(x, 1e-9))))
+      }
+      tibble(
+        polarity      = pol_label,
+        metric        = m,
+        pair          = paste(p, collapse = ":"),
+        same_platform = identical(sort(p), c("afekta", "cembio")),
+        r             = cor(vals[[1]], vals[[2]], use = "complete.obs"),
+        n             = nrow(vals)
+      )
+    })
   })
-})
+}
 
-ggplot(metric_corr, aes(x = metric, y = r, color = pair)) +
+metric_cols <- intersect(
+  c("areaUnderTic", "maxIntensity",
+    "xicFwhm", "peakWidth", "peakProminence",
+    "gaussianSimilarity.gaussian_similarity",
+    "gaussianSimilarity.gaussian_residuals",
+    "signalToNoiseRatio", "peakCount"),
+  names(pk_metrics)
+)
+cat("Metrics in chromData used:", paste(metric_cols, collapse = ", "), "\n")
+
+metric_corr <- bind_rows(
+  compute_metric_corr(pk_metrics |> filter(polarity_label == "Positive"),
+                      "Positive", metric_cols),
+  compute_metric_corr(pk_metrics |> filter(polarity_label == "Negative"),
+                      "Negative", metric_cols)
+)
+cat("metric_corr rows:", nrow(metric_corr),
+    "| polarities present:", paste(unique(metric_corr$polarity), collapse = ", "), "\n")
+stopifnot(nrow(metric_corr) > 0)
+
+# Wide table: rows = (polarity, metric), columns = lab pair
+metric_corr_wide <- metric_corr |>
+  mutate(r = round(r, 3)) |>
+  select(polarity, metric, pair, r) |>
+  pivot_wider(names_from = pair, values_from = r) |>
+  arrange(polarity, metric)
+
+knitr::kable(
+  metric_corr_wide,
+  caption = "Cross-lab Pearson r per metric and lab pair, split by polarity. Same-platform pair = afekta:cembio."
+)
+```
+
+```{r cross-lab-pearson-plot}
+#| fig-cap: "**Figure 3.1**: Cross-lab Pearson r per metric for all six lab pairs, split by polarity. Same-platform pair (afekta:cembio) marked in red as reference."
+#| fig-width: 12
+#| fig-height: 8
+
+ggplot(metric_corr,
+       aes(x = metric, y = r, color = same_platform, group = pair)) +
   geom_point(size = 3, position = position_dodge(width = 0.5)) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_text(aes(label = pair),
+            position = position_dodge(width = 0.5),
+            size = 2.3, hjust = -0.15) +
+  scale_color_manual(values = c(`FALSE` = "grey50", `TRUE` = "#E64B35"),
+                     labels = c("Cross-platform", "Same-platform"),
+                     name = NULL) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey70") +
+  facet_wrap(~polarity, ncol = 1) +
   labs(
-    title = "Cross-Lab Pearson Correlation of Scalar Peak Metrics",
-    subtitle = "Each point is one lab pair; consensus peaks detected in all 4 labs",
-    x = "Metric", y = "Pearson r", color = "Lab Pair"
+    title = "Cross-Lab Pearson Correlation per Metric (by Polarity)",
+    x = NULL, y = "Cross-Lab Pearson r"
   ) +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 30, hjust = 1))
 ```
 
-## 3.3 EIC Profile Similarity Distribution by Lab Pair
+## 3.4 EIC Profile Similarity via `compareChromatograms()`
 
-`peak_shape_similarity.csv` holds Pearson correlations of aligned EIC
-rt/intensity profiles, per consensus peak per lab pair.
+For each consensus peak and each lab pair, compute Pearson correlation on
+the aligned EIC profiles. This uses the Bioconductor primitive
+`compareChromatograms()` with `ALIGNFUN = alignRt` and `FUN = cor` — i.e.,
+align by retention time, then Pearson on the aligned intensities. This
+captures shape information that scalar metrics summarise away.
 
-```{r eic-similarity-distribution}
-#| fig-cap: "**Figure 3.2**: Distribution of EIC Pearson similarity across consensus peaks, faceted by lab pair. Higher values indicate that the raw chromatographic profile of a peak is reproduced across labs."
-#| fig-width: 10
-#| fig-height: 6
+```{r eic-pearson-compare-chr}
+# final_eics is already boundary-trimmed and NA-imputed by doc 3 — no
+# imputePeaksData needed here.
 
-ggplot(eic_sim, aes(x = pearson, fill = pair)) +
-  geom_histogram(bins = 50, alpha = 0.7) +
-  facet_wrap(~pair, scales = "free_y") +
-  labs(
-    title = "EIC Pearson Similarity Distribution by Lab Pair",
-    subtitle = "Consensus peaks: Pearson correlation of raw EIC profiles",
-    x = "EIC Pearson Correlation", y = "Count"
-  ) +
-  theme_minimal() +
-  theme(legend.position = "none")
-```
+# Custom MAPFUN — same interface as matchRtime: returns list(x = numeric, y = numeric).
+#
+# Apex-shift alignment, then matchRtime-style resampling:
+#   1. shift each EIC so its apex (max intensity) sits at RT = 0
+#   2. interpolate y onto x's apex-shifted RT grid
+#   3. drop points outside the overlap (no extrapolation)
+#
+# This preserves peak width, asymmetry, and tailing — only the time origin moves.
+# It removes the inter-lab absolute-RT offset that prevents using matchRtime() directly.
+mapfun_relrt <- function(x, y, ...) {
+  ok_x <- !is.na(x$intensity)
+  ok_y <- !is.na(y$intensity)
+  if (sum(ok_x) < 2 || sum(ok_y) < 2)
+    return(list(x = numeric(), y = numeric()))
 
-## 3.4 Comparing Metrics Correlation vs EIC Pearson Similarity
+  ix <- x$intensity[ok_x]; rx <- x$rtime[ok_x] - x$rtime[ok_x][which.max(ix)]
+  iy <- y$intensity[ok_y]; ry <- y$rtime[ok_y] - y$rtime[ok_y][which.max(iy)]
 
-Per (peak, lab pair): correlate the scalar metric's absolute cross-lab
-difference with the EIC Pearson similarity.
+  y_on_x <- approx(ry, iy, xout = rx)$y   # rule = 1: NA outside y's range
+  keep <- !is.na(y_on_x)
+  list(x = ix[keep], y = y_on_x[keep])
+}
 
-```{r metrics-vs-eic}
-#| fig-cap: "**Figure 3.3**: Scatter of EIC Pearson similarity vs absolute cross-lab difference for selected scalar metrics. A strong negative trend would indicate the metric captures profile-level reproducibility."
-#| fig-width: 12
-#| fig-height: 8
+# FUN: x/y parameter names match MAPFUN list names because compareChromatograms
+# calls do.call(FUN, MAPFUN_result).
+fun_cor <- function(x, y, ...) {
+  if (length(x) < 2) return(NA_real_)
+  cor(x, y, method = "pearson", use = "complete.obs")
+}
 
-# Compute pairwise metric differences per consensus peak per lab pair
-lab_pairs <- eic_sim |> distinct(pair) |> pull(pair)
-
-metric_diffs <- map_dfr(lab_pairs, function(p) {
-  labs_in_pair <- str_split(p, ":")[[1]]
-  lab_a <- pk_metrics |> filter(lab == labs_in_pair[1])
-  lab_b <- pk_metrics |> filter(lab == labs_in_pair[2])
-
-  joined <- inner_join(lab_a, lab_b, by = "consensus_id", suffix = c("_a", "_b"))
-
-  tibble(
-    consensus_id = joined$consensus_id,
-    pair = p,
-    area_diff = abs(log2(joined$areaUnderTic_a / joined$areaUnderTic_b)),
-    fwhm_diff = abs(log2(joined$xicFwhm_a / joined$xicFwhm_b)),
-    width_diff = abs(log2(joined$peakWidth_a / joined$peakWidth_b)),
-    beta_diff = abs(joined$peakBeta1_a - joined$peakBeta1_b)
-  )
+eic_pearson <- map_dfr(unique(final_eics$consensus_id), function(cid) {
+  sub      <- final_eics[final_eics$consensus_id == cid]
+  n        <- length(sub)
+  if (n < 2) return(NULL)
+  pair_idx <- combn(seq_len(n), 2)
+  map_dfr(seq_len(ncol(pair_idx)), function(k) {
+    i <- pair_idx[1, k]
+    j <- pair_idx[2, k]
+    r_val <- compareChromatograms(
+      sub[i], sub[j],
+      MAPFUN = mapfun_relrt,
+      FUN    = fun_cor
+    )
+    tibble(
+      consensus_id = cid,
+      pair         = paste(sub$lab[i], sub$lab[j], sep = ":"),
+      eic_pearson  = as.numeric(r_val[,,1])
+    )
+  })
 })
 
-# Join with EIC Pearson similarity
-metric_vs_eic <- metric_diffs |>
-  inner_join(eic_sim, by = c("consensus_id", "pair"))
-
-# Pivot to long for faceted scatter
-metric_vs_eic_long <- metric_vs_eic |>
-  pivot_longer(cols = c(area_diff, fwhm_diff, width_diff, beta_diff),
-               names_to = "metric", values_to = "abs_diff") |>
-  filter(is.finite(abs_diff))
-
-ggplot(metric_vs_eic_long, aes(x = abs_diff, y = pearson)) +
-  geom_point(alpha = 0.15, size = 0.5) +
-  geom_smooth(method = "loess", se = FALSE, color = "red", linewidth = 0.8) +
-  facet_wrap(~metric, scales = "free_x") +
-  labs(
-    title = "Scalar Metric Difference vs EIC Pearson Similarity",
-    subtitle = "Each point is one consensus peak in one lab pair",
-    x = "Absolute Metric Difference (log2 scale where applicable)",
-    y = "EIC Pearson Correlation"
-  ) +
-  theme_minimal()
+cat("EIC Pearson similarities computed:", nrow(eic_pearson), "\n")
 ```
 
-## 3.5 Summary Correlation Table
+```{r eic-pearson-by-pair-table}
+# Attach polarity_label to each consensus_id (one polarity per peak)
+polarity_lookup <- pk_metrics |>
+  select(consensus_id, polarity = polarity_label) |>
+  distinct()
 
-```{r metrics-vs-eic-summary}
-metric_vs_eic_summary <- metric_vs_eic_long |>
-  group_by(metric) |>
+eic_pearson <- eic_pearson |>
+  left_join(polarity_lookup, by = "consensus_id")
+cat("eic_pearson polarities:",
+    paste(unique(eic_pearson$polarity), collapse = ", "), "\n")
+
+eic_summary <- eic_pearson |>
+  group_by(polarity, pair) |>
   summarise(
-    r_with_eic_pearson = cor(abs_diff, pearson, use = "complete.obs"),
-    n_peaks = n(),
-    .groups = "drop"
+    median_r = median(eic_pearson, na.rm = TRUE),
+    iqr      = IQR(eic_pearson, na.rm = TRUE),
+    n        = n(),
+    .groups  = "drop"
   ) |>
-  arrange(r_with_eic_pearson)
+  mutate(same_platform = pair == "afekta:cembio") |>
+  arrange(polarity, desc(median_r))
 
 knitr::kable(
-  metric_vs_eic_summary,
-  caption = "Correlation between scalar metric differences and EIC Pearson similarity",
-  digits = 3
+  eic_summary |> mutate(median_r = round(median_r, 3),
+                        iqr      = round(iqr, 3)),
+  caption = "EIC profile Pearson r per lab pair, split by polarity (median, IQR, n peaks)."
 )
 ```
 
-## 3.6 Lab-Pair Comparison: Median EIC Similarity vs Median Metric Correlation
+```{r eic-pearson-by-pair-plot}
+#| fig-cap: "**Figure 3.2**: EIC profile Pearson similarity per lab pair, split by polarity. Same-platform pair (afekta:cembio) marked in red as reference."
+#| fig-width: 10
+#| fig-height: 5
 
-```{r lab-pair-summary}
-#| fig-cap: "**Figure 3.4**: Median EIC Pearson similarity vs median scalar metric cross-lab correlation per lab pair. Same-platform pairs (e.g., afekta:cembio) should appear in the upper-right."
-#| fig-width: 8
-#| fig-height: 6
-
-# Median EIC Pearson per pair
-eic_pair_summary <- eic_sim |>
-  group_by(pair) |>
-  summarise(median_eic_pearson = median(pearson, na.rm = TRUE), .groups = "drop")
-
-# Median area correlation per pair (as representative metric)
-area_pair_summary <- metric_corr |>
-  filter(metric == "areaUnderTic") |>
-  select(pair, r_area = r)
-
-pair_comparison <- eic_pair_summary |>
-  left_join(area_pair_summary, by = "pair")
-
-ggplot(pair_comparison, aes(x = r_area, y = median_eic_pearson, label = pair)) +
-  geom_point(size = 4, color = "steelblue") +
-  ggrepel::geom_text_repel(size = 3) +
+ggplot(eic_summary,
+       aes(x = reorder(pair, median_r), y = median_r,
+           fill = same_platform)) +
+  geom_col(alpha = 0.85) +
+  geom_text(aes(label = round(median_r, 2)), hjust = -0.2, size = 3.2) +
+  scale_fill_manual(values = c(`FALSE` = "grey60", `TRUE` = "#E64B35"),
+                    labels = c("Cross-platform", "Same-platform"),
+                    name = NULL) +
+  coord_flip() +
+  facet_wrap(~polarity) +
   labs(
-    title = "Lab Pair: Scalar Area Correlation vs Median EIC Pearson",
-    x = "Cross-Lab Pearson r (log2 Area)",
-    y = "Median EIC Pearson Similarity"
+    title = "EIC Profile Similarity by Lab Pair (by Polarity)",
+    subtitle = "compareChromatograms(): apex-shifted EIC Pearson, median across peaks",
+    x = NULL, y = "Median EIC Pearson r"
   ) +
-  theme_minimal()
+  theme_minimal() +
+  ylim(0, 1)
 ```
 
-**Findings:**
-- Area and maxIntensity: moderate cross-lab correlation.
-- Shape metrics (FWHM, peakWidth, peakBeta1): weak cross-lab correlation.
-- Weak correlation between scalar metric differences and EIC Pearson →
-  scalar summaries miss profile-level information.
-- Same-platform pairs (afekta:cembio) expected top-right; consistent with
-  the Part 4 hardware ceiling.
+```{r eic-pearson-distribution-plot}
+#| fig-cap: "**Figure 3.2b**: Distribution of per-peak EIC Pearson r across lab pairs and polarity. The medians used in Figure 3.2 are summarised from these distributions; check whether differences between pairs come from shifted medians or from heavier tails."
+#| fig-width: 12
+#| fig-height: 6
 
+ggplot(eic_pearson |> filter(!is.na(eic_pearson)),
+       aes(x = eic_pearson, fill = pair == "afekta:cembio")) +
+  geom_histogram(bins = 40, alpha = 0.85) +
+  scale_fill_manual(values = c(`FALSE` = "grey60", `TRUE` = "#E64B35"),
+                    labels = c("Cross-platform", "Same-platform"),
+                    name = NULL) +
+  facet_grid(polarity ~ pair) +
+  labs(
+    title = "Per-peak EIC Pearson r distributions",
+    x = "EIC Pearson r", y = "Count"
+  ) +
+  theme_minimal() +
+  theme(strip.text.x = element_text(size = 8))
+```
+
+## 3.5 Synthesis: Scalar Metrics vs EIC Profile per (Polarity, Lab Pair)
+
+```{r synthesis-table}
+synthesis <- metric_corr |>
+  select(polarity, pair, metric, r) |>
+  mutate(r = round(r, 2)) |>
+  pivot_wider(names_from = metric, values_from = r) |>
+  left_join(
+    eic_summary |> select(polarity, pair, eic_pearson_median = median_r) |>
+      mutate(eic_pearson_median = round(eic_pearson_median, 2)),
+    by = c("polarity", "pair")
+  ) |>
+  mutate(same_platform = pair == "afekta:cembio") |>
+  arrange(polarity, desc(eic_pearson_median))
+
+knitr::kable(
+  synthesis,
+  caption = "Cross-lab agreement per (polarity, lab pair): scalar metrics + EIC profile median r."
+)
+```
+
+**Interpretation.** *To be written after inspecting the table above.*
+
+Things to read off the table before drafting the conclusion:
+
+1. Does the same-platform pair (afekta:cembio) top every metric, or only
+   some? Does the answer differ between Positive and Negative mode?
+2. Which metrics show the **largest** same-platform vs cross-platform gap?
+   Those are the diagnostics most sensitive to platform identity.
+3. Do scalar shape metrics (`xicFwhm`, `peakWidth`,
+   `gaussianSimilarity.gaussian_similarity`) rank lab pairs the same way
+   the EIC Pearson does? If yes, scalar metrics are sufficient for routine
+   diagnostics. If not, EIC Pearson is detecting structure the scalars miss.
+4. How does the intensity anchor (`areaUnderTic`, `maxIntensity`) compare
+   to shape metrics? If shape metrics drop more than intensity for
+   cross-platform pairs, that supports the "shape is platform-bound"
+   hypothesis; if not, the residual is not specifically a shape problem.
 ---
 
 # Summary {#summary}
 
 ## Key Takeaways
-
-1. **Peak matching is the true bottleneck.** Raw TIC ICC **0.002 → 0.024 → 0.502**
-   across Full → Detected → Consensus (positive mode).
-2. **Local normalization fixes bias but not noise.** LOESS re-centers labs on
-   zero (Figure 2.3) but overall ICC gain plateaus (0.33 → 0.58).
-3. **Scalar shape metrics are weakly correlated across labs; EIC profile
-   similarity captures more.** Integration-boundary noise dominates scalar
-   summaries.
+Redo 
 
 # Part 4: The Hardware Limitation - Defining the Reproducibility Ceiling {#hardware}
 
@@ -1777,12 +1938,6 @@ ggplot(ceiling_by_decile, aes(x = rt_decile, y = icc, color = Configuration,
 
 
 
-## 4.3 Implications for Epidemiological Study Design
-
-This hardware ceiling has direct consequences for multi-center metabolomics:
-...
-
-
 ## Notes for Collaborator (2026-03-12)
 
 ### What is done
@@ -1808,7 +1963,7 @@ the best.
    all-4-labs.
    Section 4.3 ("Implications for Epidemiological Study Design") is still empty.
 3. **Summary section**: Key takeaway #2 has a TODO note ("Conclusion should be
-   about how normalization might fix systematic bias but cannot fix noise")—
+   about how normalization might fix systematic bias but cannot fix noise")
    needs to be rewritten as a proper conclusion.
 4. **Reproducibility metrics**: Currently using ICC and variance decomposition.
    Open question whether CCC (concordance correlation coefficient) or other
