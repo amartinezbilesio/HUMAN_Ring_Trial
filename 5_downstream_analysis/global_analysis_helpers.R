@@ -215,6 +215,32 @@ plot_residuals <- function(model, title = "Residual Plot", data = NULL) {
     theme(legend.position = "bottom")
 }
 
+plot_residuals_new <- function(model, title = "Residual Plot", data = NULL) {
+  model_df <- model.frame(model)
+  plot_df <- data.frame(
+    Fitted = fitted(model),
+    Residuals = residuals(model)
+  )
+  if ("lab" %in% names(model_df) && "mixture" %in% names(model_df)) {
+    plot_df$lab <- model_df$lab
+    plot_df$mixture <- as.factor(model_df$mixture)
+    p <- ggplot(plot_df, aes(x = Fitted, y = Residuals,
+                             color = mixture, shape = lab)) +
+      geom_point(alpha = 0.7, size = 2.5) +
+      scale_color_viridis_d(option = "turbo") +
+      scale_shape_manual(values = c(16, 17, 15, 18)) +
+      labs(color = "Mixture", shape = "Laboratory")
+  } else {
+    p <- ggplot(plot_df, aes(x = Fitted, y = Residuals)) +
+      geom_point(alpha = 0.6, size = 2)
+  }
+  p +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+    labs(title = title, x = "Fitted Values", y = "Residuals") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+}
+
 #' Plot violin with jitter for intensity metrics
 plot_violin <- function(data, metric) {
   if (metric %in% c("bpc", "tic")) {

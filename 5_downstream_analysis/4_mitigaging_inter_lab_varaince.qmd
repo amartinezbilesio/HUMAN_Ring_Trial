@@ -57,7 +57,7 @@ Baseline finding: **lab identity explains 97–100% of variance in raw TIC**
 ## Load Libraries
 
 ```{r library, include=TRUE, warning=FALSE, message=FALSE}
-##The install belows are temporary and should be replaced with proper dependencies in the future.
+##The install below are temporary and should be replaced with proper dependencies in the future.
 # BiocManager::install("RforMassSpectrometry/Chromatograms", ask = FALSE, update = TRUE)
 # BiocManager::install("tnaake/MsQuality", ask = FALSE, update = TRUE)
 library(Chromatograms)
@@ -177,6 +177,11 @@ metrics_combined <- bind_rows(metrics_full, metrics_detect, metrics_consensus)
 Progression Full → Detected → Consensus tests whether computational processing
 progressively removes technical variance.
 
+```{r, echo=FALSE, out.width="50%"}
+knitr::include_graphics("C:/Users/amart/Desktop/HUMAN Ring Trial/HUMAN_Ring_Trial-main/HUMAN_Ring_Trial-main/5_downstream_analysis/FullSignal_DetectedSignal_ConsensusSignal.png")
+```
+
+
 ---
 
 # Part 1: The Baseline Problem - Feature Extraction is Mandatory {#part1}
@@ -216,7 +221,14 @@ variance_long <- results_table |>
                names_to = "Source", values_to = "Percentage") |>
   mutate(
     Source = gsub("_Variance_Pct|_Pct", "", Source),
+    Data_Level = factor(Data_Level,
+                        levels = c("Full Signal", "Detected Signal", "Consensus Signal")),
     Label = paste(Polarity, Data_Level, sep = "\n"),
+    Label = factor(Label, levels = unique(paste(
+      rep(c("Positive", "Negative"), each = 3),
+      rep(c("Full Signal", "Detected Signal", "Consensus Signal"), times = 2),
+      sep = "\n"
+    ))),
     R2_label = paste("R² =", round(R_squared, 3))
   )
 
@@ -494,12 +506,28 @@ knitr::kable(icc_comparison_tic,
 
 ```{r peak-detection-plot}
 #| fig-cap: "Peak detection improves ICC on raw TIC; consensus peaks reveal the true signal ceiling."
-ggplot(icc_all_results |> filter(Metric == "tic"),
+
+default_cols <- scales::hue_pal()(3)
+
+custom_cols <- c(
+  "Full Signal" = default_cols[3],
+  "Detected Signal" = default_cols[2],
+  "Consensus Signal" = default_cols[1]
+)
+
+ggplot(icc_all_results |>
+         filter(Metric == "tic") |>
+         mutate(Data_Level = factor(Data_Level,
+                                    levels = c("Full Signal", "Detected Signal", "Consensus Signal")),
+                Polarity = factor(Polarity,
+                                  levels = c("Positive", "Negative"))
+                ),
        aes(x = Polarity, y = ICC, fill = Data_Level)) +
   geom_col(position = "dodge", alpha = 0.8) +
   geom_text(aes(label = round(ICC, 2)),
             position = position_dodge(0.9), vjust = -0.5) +
   geom_hline(yintercept = 0.5, linetype = "dashed", color = "red") +
+  scale_fill_manual(values = custom_cols) +
   labs(title = "Impact of Peak Detection on Reproducibility",
        subtitle = "Raw TIC (no normalization); dashed = 0.5 threshold",
        y = "ICC", x = "Polarity", fill = "Processing Level") +
@@ -575,7 +603,7 @@ ggplot(icc_comparison_all, aes(x = Data_Level, y = ICC, fill = Data_Level)) +
   ylim(0, 0.7)
 ```
 
-**Key Finding:** Raw TIC ICC progresses **0.002 → 0.024 → 0.502** (Positive
+**Key Finding:** Raw TIC ICC progresses **0.002 → 0.024 → 0.436** (Positive
 mode) across Full → Detected → Consensus. The ~21× jump from Detected to
 Consensus shows **peak matching is the critical bottleneck**, not peak
 detection alone.
@@ -637,11 +665,16 @@ normalization_results <- bind_rows(
 )
 
 normalization_results |>
+  mutate(Normalization = factor(Normalization,
+    levels = c("Raw TIC", "Median Scaled", "Autoscaled (MAD)")
+  )) |>
   ggplot(aes(x = Normalization, y = Percentage, fill = Source)) +
   geom_col(alpha = 0.8) +
-  labs(title = "Effect of Normalization on Variance Decomposition (TIC)",
-       subtitle = "Positive Mode, Detected Signal",
-       x = "Normalization Method", y = "Variance (%)") +
+  labs(
+    title = "Effect of Normalization on Variance Decomposition (TIC)",
+    subtitle = "Positive Mode, Detected Signal",
+    x = "Normalization Method", y = "Variance (%)"
+  ) +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 30, hjust = 1))
 ```
@@ -649,15 +682,21 @@ normalization_results |>
 ### 2.1.2 Residual Comparison
 
 ```{r normalization-residuals}
-#| fig-height: 12
-mod_raw <- lm(log2(tic) ~ lab + factor(mixture), data = test_data)
-mod_median <- lm(log2(tic_median_scaled) ~ lab + factor(mixture),
+#| fig-height: 16
+mod_raw <- lm(log2(tic) ~ lab + mixture, data = test_data)
+mod_median <- lm(log2(tic_median_scaled) ~ lab + mixture,
                  data = test_data)
+mod_auto <- lm(log2(tic_autoscaled) ~ lab + mixture,
+               data = test_data)
 
-plot_residuals(mod_raw, "Raw TIC (log2)", test_data) /
-  plot_residuals(mod_median, "Median Scaled TIC", test_data) +
+(
+  plot_residuals_new(mod_raw, "Raw TIC (log2)", test_data) /
+  plot_residuals_new(mod_median, "Median Scaled TIC", test_data) /
+  plot_residuals_new(mod_auto, "Autoscaled TIC (MAD)", test_data)
+) +
   plot_annotation(
-    title = "Residual Plots: Raw vs Median Scaled"
+    title = "Residual Plots: Raw vs Median vs Autoscaled",
+    theme = theme(plot.title = element_text(face = "bold", size = 14))
   )
 ```
 
@@ -995,6 +1034,7 @@ consensus_areas <- pk_norm |>
   summarise(
     consensus_median_raw = median(areaUnderTic, na.rm = TRUE),
     consensus_median_global = median(area_global, na.rm = TRUE),
+    consensus_median_decile = median(area_decile, na.rm = TRUE),
     consensus_median_loess = median(area_loess, na.rm = TRUE),
     .groups = "drop"
   )
@@ -1005,10 +1045,11 @@ fold_error <- pk_norm |>
   mutate(
     log2_fe_raw = log2(areaUnderTic / consensus_median_raw),
     log2_fe_global = log2(area_global / consensus_median_global),
+    log2_fe_decile = log2(area_decile / consensus_median_decile),
     log2_fe_loess = log2(area_loess / consensus_median_loess)
   ) |>
   filter(!is.na(rt_decile), !is.na(log2_fe_raw)) |>
-  select(lab, consensus_id, rt_decile, log2_fe_raw, log2_fe_global, log2_fe_loess)
+  select(lab, consensus_id, rt_decile, log2_fe_raw, log2_fe_global, log2_fe_decile, log2_fe_loess)
 
 cat("Log2 Fold-Error dataset:", nrow(fold_error), "rows\n")
 ```
@@ -1028,9 +1069,10 @@ fe_long <- fold_error |>
     strategy = case_when(
       strategy == "raw" ~ "Raw Area",
       strategy == "global" ~ "Global Median",
+      strategy == "decile" ~ "Decile Median",
       strategy == "loess" ~ "LOESS"
     ),
-    strategy = factor(strategy, levels = c("Raw Area", "Global Median", "LOESS"))
+    strategy = factor(strategy, levels = c("Raw Area", "Global Median", "Decile Median", "LOESS"))
   )
 
 ggplot(fe_long, aes(x = rt_decile, y = log2_fold_error, fill = lab)) +
