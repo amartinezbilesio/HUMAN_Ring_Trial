@@ -13,31 +13,23 @@ execute:
 
 ## Input Data
 
-All required input data lives in the `data/` subfolder. These files are
-produced by the upstream pipeline (`1_object_creation.qmd` →
-`2_global_analysis.qmd` → `3a_peak_feature_calculation_detected.qmd`).
+All required input data lives in the `data/` subfolder. These files are produced by the upstream pipeline (`1_object_creation.qmd` → `2_global_analysis.qmd` → `3a_peak_feature_calculation_detected.qmd`).
 I can also provide them pre-computed.
 
 **RData objects** (chromatographic profiles, from `1_object_creation.qmd`):
 `bpc_full.RData`, `bpc_detect.RData`, `tic_full.RData`, `tic_detect.RData`
 
 **CSV files** (from `1_object_creation.qmd` and `3a_peak_feature_calculation_detected.qmd`):
-`detected_peaks_{afekta,cembio,hmgu,icl}_HE.csv`,
-`peak_metrics_detected_all4labs.csv`, `peak_shape_similarity.csv`
+`detected_peaks_{afekta,cembio,hmgu,icl}_HE.csv`, `peak_metrics_detected_all4labs.csv`, `peak_shape_similarity.csv`
 
 **Helper files** (in `5_downstream_analysis/`):
 `global_analysis_helpers.R`, `lab_setup_phase1.csv`
 
 ## Question and Hypothesis
 
-**Core question:** *What are the computational steps required to make
-multi-center metabolomics data integration possible, and what are the absolute
-hardware-imposed limits of the field?*
+**Core question:** *What are the computational steps required to make multi-center metabolomics data integration possible, and what are the absolute hardware-imposed limits of the field?*
 
-**Hypothesis:** Raw LC-MS data from different laboratories is too confounded
-by instrumental noise to be directly integrated. Computational processing can
-recover biological signal, but instrument chemistry imposes an irreducible
-reproducibility ceiling.
+**Hypothesis:** Raw LC-MS data from different laboratories is too confounded by instrumental noise to be directly integrated. Computational processing can recover biological signal, but instrument chemistry imposes an irreducible reproducibility ceiling.
 
 We benchmark four sequential processing strategies:
 
@@ -46,10 +38,7 @@ We benchmark four sequential processing strategies:
 3. **Peak shape confirmation** (EIC Pearson similarity for cross-lab anchors)
 4. **Hardware ceiling** (same-platform ICC as the achievable upper bound)
 
-Data: 19 standard mixtures (HUMAN endosome) from 4 labs with harmonized LC
-(same column, mobile phases, gradient) but different MS platforms (Agilent
-Q-TOF, Waters Synapt, Sciex Zeno, Bruker TIMS). No technical replicates; lab
-identity is confounded with instrument platform.
+Data: 19 standard mixtures (HUMAN Endosome) from 4 labs with harmonized LC (same column, mobile phases, gradient) but different MS platforms (Agilent 6546 Q-ToF, Waters Synapt G2S Q-ToF, Sciex Zeno TOF 7600, Agilent 6545 Q-ToF). No technical replicates; lab identity is confounded with instrument platform.
 
 Baseline finding: **lab identity explains 97–100% of variance in raw TIC**
 (Full Signal).
@@ -76,6 +65,8 @@ source(file.path(base_path, "global_analysis_helpers.R"))
 ## Setup Information
 
 ```{r load-setup}
+#| fig-cap: "**Table 1.0**: Laboratory settings."
+
 setup <- read.csv(file.path(base_path, "lab_setup_phase1.csv"))
 
 setup_simplified <- setup |>
@@ -109,8 +100,7 @@ setup_simplified
 
 ## Compute Global Metrics (Raw Signal)
 
-TIC and BPC per chromatogram across data levels and polarities; no
-normalization (added in Part 2).
+TIC and BPC per chromatogram across data levels and polarities; no normalization (added in Part 2).
 
 ```{r compute-metrics}
 compute_metrics <- function(polarity, polarity_name, data_level = "full") {
@@ -176,22 +166,22 @@ Progression Full → Detected → Consensus tests whether computational processi
 progressively removes technical variance.
 
 ```{r, echo=FALSE, out.width="50%"}
+#| fig-cap: "**Graphical Abstract**: Progressive refinement of the TIC from Full Signal to Detected Signal to Consensus Signal."
+
 knitr::include_graphics("C:/Users/amart/Desktop/HUMAN Ring Trial/HUMAN_Ring_Trial-main/HUMAN_Ring_Trial-main/5_downstream_analysis/FullSignal_DetectedSignal_ConsensusSignal.png")
 ```
-
 
 ---
 
 # Part 1: The Baseline Problem - Feature Extraction is Mandatory {#part1}
 
-**Core claim:** Raw chromatographic profiles cannot be integrated across labs
-because vendor-specific baseline noise dominates the signal. Feature extraction
-(peak-picking) is the mandatory first computational step to make data integration
-theoretically possible.
+**Core claim:** Raw chromatographic profiles cannot be integrated across labs because vendor-specific baseline noise dominates the signal. Feature extraction (peak-picking) is the mandatory first computational step to make data integration theoretically possible.
 
 ## 1.1 The Problem: Lab Variance Dominates Raw Data
 
 ### 1.1.1 Variance Decomposition
+
+#### 1.1.1.1 Raw TIC
 
 ```{r variance-decomposition}
 results_table <- data.frame()
@@ -212,7 +202,8 @@ for (pol in c("Positive", "Negative")) {
 ```
 
 ```{r variance-stacked-bar}
-#| fig-cap: "**Figure 1.1**: Variance decomposition of TIC. Lab identity dominates raw signal variance — the core problem."
+#| fig-cap: "**Figure 1.1.1.1**: Variance decomposition of TIC across all conditions."
+
 variance_long <- results_table |>
   select(Polarity, Data_Level, R_squared, ends_with("_Pct")) |>
   pivot_longer(cols = ends_with("_Pct"),
@@ -227,7 +218,7 @@ variance_long <- results_table |>
       rep(c("Full Signal", "Detected Signal", "Consensus Signal"), times = 2),
       sep = "\n"
     ))),
-    R2_label = paste("R² =", round(R_squared, 3))
+    R2_label = paste("R² =", sprintf("%.3f", R_squared))
   )
 
 text_labels <- variance_long |> distinct(Label, R2_label)
@@ -243,10 +234,67 @@ ggplot(variance_long, aes(x = Label, y = Percentage, fill = Source)) +
   theme(legend.position = "top") +
   ylim(0, 110)
 ```
+#### 1.1.1.2 BPC
+
+```{r}
+results_table <- data.frame()
+
+for (pol in c("Positive", "Negative")) {
+  for (level in c("Full Signal", "Detected Signal", "Consensus Signal")) {
+    data_subset <- metrics_combined |>
+      filter(polarity == pol, data_level == level)
+    result <- check_metric_quality(data_subset, "bpc")
+    results_table <- rbind(results_table, data.frame(
+      Polarity = pol, Data_Level = level, R_squared = result$r_squared,
+      Lab_Variance_Pct = result$variance_table$Percentage[1],
+      Mixture_Variance_Pct = result$variance_table$Percentage[2],
+      Residual_Variance_Pct = result$variance_table$Percentage[3]
+    ))
+  }
+}
+```
+
+```{r}
+#| fig-cap: "**Figure 1.1.1.2**: Variance decomposition of BPC across all conditions."
+
+variance_long <- results_table |>
+  select(Polarity, Data_Level, R_squared, ends_with("_Pct")) |>
+  pivot_longer(cols = ends_with("_Pct"),
+               names_to = "Source", values_to = "Percentage") |>
+  mutate(
+    Source = gsub("_Variance_Pct|_Pct", "", Source),
+    Data_Level = factor(Data_Level,
+                        levels = c("Full Signal", "Detected Signal", "Consensus Signal")),
+    Label = paste(Polarity, Data_Level, sep = "\n"),
+    Label = factor(Label, levels = unique(paste(
+      rep(c("Positive", "Negative"), each = 3),
+      rep(c("Full Signal", "Detected Signal", "Consensus Signal"), times = 2),
+      sep = "\n"
+    ))),
+    R2_label = paste("R² =", sprintf("%.3f", R_squared))
+  )
+
+text_labels <- variance_long |> distinct(Label, R2_label)
+
+ggplot(variance_long, aes(x = Label, y = Percentage, fill = Source)) +
+  geom_col(alpha = 0.8) +
+  geom_text(aes(x = Label, label = R2_label, y = 105),
+            data = text_labels, size = 3, inherit.aes = FALSE) +
+  labs(title = "Variance Decomposition: BPC Across All Conditions",
+       subtitle = "Lab variance (orange) dominates raw signal — the core problem",
+       x = "Polarity & Data Level", y = "Variance (%)", fill = "Source") +
+  theme_minimal() +
+  theme(legend.position = "top") +
+  ylim(0, 110)
+```
 
 ### 1.1.2 Lab Effect Coefficients
 
+#### 1.1.2.1 Raw TIC
+
 ```{r lab-coefficients}
+#| fig-cap: "**Figure 1.1.2.1**: Comparison of Laboratory Effect Coefficients against Afekta (TIC)."
+
 all_coefficients <- data.frame()
 
 for (pol in c("Positive", "Negative")) {
@@ -263,23 +311,66 @@ lab_coefs <- all_coefficients |>
   filter(type == "Lab Effect") |>
   mutate(lab_name = gsub("lab", "", coefficient))
 
+lab_coefs <- lab_coefs |>
+  mutate(
+    Polarity = factor(Polarity, levels = c("Positive", "Negative"))
+  )
+
 ggplot(lab_coefs, aes(x = lab_name, y = estimate, fill = lab_name)) +
   geom_col(alpha = 0.8) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
   facet_grid(Data_Level ~ Polarity) +
   scale_fill_viridis_d(option = "turbo") +
   labs(title = "Lab Effect Coefficients (deviation from Afekta)",
-       x = "Laboratory", y = "Coefficient (log2 scale)", fill = "Lab") +
+       x = "Polarity & Laboratory", y = "Coefficient (log2 scale)", fill = "Lab") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+#### 1.1.2.2 BPC
+
+```{r}
+#| fig-cap: "**Figure 1.1.2.2**: Comparison of Laboratory Effect Coefficients against Afekta (BPC)."
+
+all_coefficients <- data.frame()
+
+for (pol in c("Positive", "Negative")) {
+  for (level in c("Full Signal", "Detected Signal", "Consensus Signal")) {
+    data_subset <- metrics_combined |>
+      filter(polarity == pol, data_level == level)
+    result <- check_metric_quality(data_subset, "bpc")
+    all_coefficients <- rbind(all_coefficients,
+      result$coefficients |> mutate(Polarity = pol, Data_Level = level))
+  }
+}
+
+lab_coefs <- all_coefficients |>
+  filter(type == "Lab Effect") |>
+  mutate(lab_name = gsub("lab", "", coefficient))
+
+lab_coefs <- lab_coefs |>
+  mutate(
+    Polarity = factor(Polarity, levels = c("Positive", "Negative"))
+  )
+
+ggplot(lab_coefs, aes(x = lab_name, y = estimate, fill = lab_name)) +
+  geom_col(alpha = 0.8) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  facet_grid(Data_Level ~ Polarity) +
+  scale_fill_viridis_d(option = "turbo") +
+  labs(title = "Lab Effect Coefficients (deviation from Afekta)",
+       x = "Polarity & Laboratory", y = "Coefficient (log2 scale)", fill = "Lab") +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
 ### 1.1.3 PCA Analysis of Lab vs. Mixture Clustering
 
-Colour = mixture, shape = lab. Same shape clustering → lab dominates;
-same colour clustering → mixture (biology) dominates.
+Colour = mixture, shape = lab.
+Same shape clustering → lab dominates; same colour clustering → mixture (biology) dominates.
 
-```{r pca-setup}
+#### 1.1.3.1 Raw TIC
+
+```{r pca-setup-tic}
 # Prepare data for PCA: wide format with samples as rows, features as columns
 # For raw data: use individual RT bins as features
 # For detected data: use detected peaks as features
@@ -400,8 +491,8 @@ plot_pca_by_polarity <- function(pos, neg, title, subtitle) {
 }
 ```
 
-```{r pca-raw}
-#| fig-cap: "**Figure 1.2a**: PCA of Raw TIC profiles, Positive and Negative polarity. Colour = mixture, shape = lab. Same-shape points cluster (labs group together); colours are scattered — technical noise dominates biological signal."
+```{r pca-raw-tic}
+#| fig-cap: "**Figure 1.1.3.1.1**: PCA of Raw TIC profiles, Positive and Negative polarity. Colour = mixture, shape = lab. Same-shape points cluster (labs group together); colours are scattered — technical noise dominates biological signal."
 #| fig-width: 12
 #| fig-height: 6
 
@@ -413,8 +504,8 @@ plot_pca_by_polarity(
 )
 ```
 
-```{r pca-detected}
-#| fig-cap: "**Figure 1.2b**: PCA of Detected Peaks, Positive and Negative polarity. Colour = mixture, shape = lab. Lab clusters weaken and same-colour points start to group together — feature extraction recovers biological signal."
+```{r pca-detected-tic}
+#| fig-cap: "**Figure 1.1.3.1.2**: PCA of Detected Peaks, Positive and Negative polarity. Colour = mixture, shape = lab. Lab clusters weaken and same-colour points start to group together — feature extraction recovers biological signal."
 #| fig-width: 12
 #| fig-height: 6
 
@@ -426,8 +517,212 @@ plot_pca_by_polarity(
 )
 ```
 
-```{r pca-consensus}
-#| fig-cap: "**Figure 1.2c**: PCA of Consensus Peaks, Positive and Negative polarity. Colour = mixture, shape = lab. Same-colour points cluster tightly regardless of shape — mixture dominates, lab effects minimized. log1p compresses the intensity range because each peak has ~4 non-zero values (labs) and ~72 zeros (other mixtures); without it the presence/absence gap dominates scaling."
+```{r pca-consensus-tic}
+#| fig-cap: "**Figure 1.1.3.1.3**: PCA of Consensus Peaks, Positive and Negative polarity. Colour = mixture, shape = lab. Same-colour points cluster tightly regardless of shape — mixture dominates, lab effects minimized. log1p compresses the intensity range because each peak has ~4 non-zero values (labs) and ~72 zeros (other mixtures); without it the presence/absence gap dominates scaling."
+#| fig-width: 12
+#| fig-height: 6
+
+plot_pca_by_polarity(
+  pos = pca_scores_df(pca_consensus_pos, "Positive", transform_fn = log1p),
+  neg = pca_scores_df(pca_consensus_neg, "Negative", transform_fn = log1p),
+  title = "PCA: Consensus Peaks (Cross-Lab Matched Signal)",
+  subtitle = "Colours cluster by mixture across all shapes — biology dominates technical variance"
+)
+```
+
+```{r consensus-matrix-example}
+#| fig-cap: "**Table 1.1**: Example structure of the consensus peak matrix."
+#| echo: FALSE
+#| message: FALSE
+#| warning: FALSE
+
+# data_pca_consensus_pos <- pca_consensus_neg[["data"]]
+# data_pca_consensus_pos <- as.data.frame(data_pca_consensus_pos)
+
+library(tibble)
+library(knitr)
+
+# Example structure of the consensus peak matrix
+# Rows = samples (lab + mixture)
+# Columns = consensus peaks
+# Most values are zeros because each consensus peak
+# only exists in one biological mixture.
+
+example_consensus_matrix <- tribble(
+  ~sample,        ~peak_1, ~peak_2, ~peak_3,
+  "LabA_mix1",      10000,        0,        0,
+  "LabB_mix1",       9000,        0,        0,
+  "LabC_mix1",      11000,        0,        0,
+  "LabD_mix1",      12000,        0,        0,
+  "LabA_mix2",          0,     7000,        0,
+  "LabB_mix2",          0,     6800,        0,
+  "LabC_mix2",          0,     7200,        0,
+  "LabD_mix2",          0,     7100,        0
+)
+
+kable(
+  example_consensus_matrix,
+  caption = paste0(
+    "<span style='white-space: nowrap;'><b>Example structure of the consensus peak matrix.</b></span>",
+    "<br>",
+    "Each consensus peak is only present within one mixture (across laboratories), producing many zeros."
+  ),
+  align = "lccc",
+  escape = FALSE
+)
+```
+
+#### 1.1.3.2 BPC
+
+```{r pca-setup-bpc}
+# Prepare data for PCA: wide format with samples as rows, features as columns
+# For raw data: use individual RT bins as features
+# For detected data: use detected peaks as features
+
+# Function to prepare PCA data
+prepare_pca_data <- function(data_level = "full", polarity = "Positive") {
+  if (data_level == "full") {
+    # Load full signal data
+    load(file.path(base_path, "data/bpc_full.RData"))
+    chr_data <- bpc_full[bpc_full$polarity == ifelse(polarity == "Positive", 1, 0)]
+  } else {
+    # Load detected signal data
+    load(file.path(base_path, "data/bpc_detect.RData"))
+    chr_data <- bpc_detect[bpc_detect$polarity == ifelse(polarity == "Positive", 1, 0)]
+  }
+
+  # Extract intensity matrices
+  # Each row = one sample, columns = RT bins
+  int_list <- intensity(chr_data)
+  rt_list <- rtime(chr_data)
+
+  # Create common RT grid
+  all_rts <- unlist(rt_list)
+  rt_grid <- seq(min(all_rts, na.rm = TRUE),
+                 max(all_rts, na.rm = TRUE),
+                 length.out = 500)
+
+  # Interpolate each chromatogram onto the grid
+  int_matrix <- t(sapply(seq_along(int_list), function(i) {
+    approx(rt_list[[i]], int_list[[i]], xout = rt_grid,
+           method = "linear", rule = 2)$y
+  }))
+
+  # Add sample metadata
+  rownames(int_matrix) <- paste0(chr_data$lab, "_", chr_data$mixture)
+  colnames(int_matrix) <- paste0("RT_", round(rt_grid, 1))
+
+  # Create metadata data frame
+  meta_df <- data.frame(
+    sample = rownames(int_matrix),
+    lab = chr_data$lab,
+    mixture = chr_data$mixture,
+    row.names = rownames(int_matrix)
+  )
+
+  list(data = int_matrix, meta = meta_df)
+}
+
+# Prepare datasets for both polarities
+pca_full_pos <- prepare_pca_data("full", "Positive")
+pca_full_neg <- prepare_pca_data("full", "Negative")
+pca_detect_pos <- prepare_pca_data("detect", "Positive")
+pca_detect_neg <- prepare_pca_data("detect", "Negative")
+
+# Prepare consensus data from pk_metrics (wide format: samples x consensus peaks)
+# Filter to one polarity at a time — consensus_ids are disjoint across polarities
+# and the two modes have different intensity scales.
+pk_metrics <- read.csv(file.path(base_path,
+                                 "data/peak_metrics_detected_all4labs.csv"))
+
+prepare_pca_consensus <- function(polarity_int) {
+  wide <- pk_metrics |>
+    filter(as.integer(polarity) == polarity_int) |>
+    mutate(sample = paste0(lab, "_", mixture)) |>
+    select(sample, consensus_id, areaUnderTic, lab, mixture) |>
+    pivot_wider(names_from = consensus_id, values_from = areaUnderTic,
+                values_fill = 0, names_prefix = "peak_") |>
+    arrange(sample)
+
+  data_mat <- wide |> select(starts_with("peak_")) |> as.matrix()
+  rownames(data_mat) <- wide$sample
+
+  list(data = data_mat, meta = wide |> select(sample, lab, mixture))
+}
+
+pca_consensus_pos <- prepare_pca_consensus(1L)
+pca_consensus_neg <- prepare_pca_consensus(0L)
+
+# Helper: run prcomp and return a scores data frame tagged with polarity.
+# `transform_fn` applies a transform before PCA (identity for continuous TIC
+# profiles, log1p for sparse consensus peaks).
+pca_scores_df <- function(pca_list, polarity_label, transform_fn = identity) {
+  res <- prcomp(transform_fn(pca_list$data), scale. = TRUE, center = TRUE)
+  var_expl <- (res$sdev^2 / sum(res$sdev^2)) * 100
+  list(
+    scores = data.frame(
+      PC1 = res$x[, 1], PC2 = res$x[, 2],
+      lab = pca_list$meta$lab, mixture = pca_list$meta$mixture,
+      polarity = polarity_label
+    ),
+    var_expl = var_expl
+  )
+}
+
+# Common plot: 2-panel PCA (Positive | Negative).
+# Colour encodes mixture (biological signal) and shape encodes lab (technical).
+# As data level progresses Full → Detected → Consensus, colours should tighten
+# (mixture clusters emerge) while shapes should disperse within each colour
+# (lab effects shrink).
+plot_pca_by_polarity <- function(pos, neg, title, subtitle) {
+  scores <- bind_rows(pos$scores, neg$scores) |>
+    mutate(polarity = factor(polarity, levels = c("Positive", "Negative")))
+  panel_labels <- c(
+    Positive = sprintf("Positive  (PC1 %.1f%%, PC2 %.1f%%)",
+                       pos$var_expl[1], pos$var_expl[2]),
+    Negative = sprintf("Negative  (PC1 %.1f%%, PC2 %.1f%%)",
+                       neg$var_expl[1], neg$var_expl[2])
+  )
+  ggplot(scores, aes(x = PC1, y = PC2, color = mixture, shape = lab)) +
+    geom_point(size = 3, alpha = 0.85, stroke = 0.8) +
+    facet_wrap(~polarity, scales = "free",
+               labeller = labeller(polarity = panel_labels)) +
+    scale_color_viridis_d(option = "turbo") +
+    labs(title = title, subtitle = subtitle,
+         x = "PC1", y = "PC2", color = "Mixture", shape = "Laboratory") +
+    theme_minimal() +
+    theme(plot.title = element_text(face = "bold"))
+}
+```
+
+```{r pca-raw-bpc}
+#| fig-cap: "**Figure 1.1.3.2.1**: PCA of BPC profiles, Positive and Negative polarity. Colour = mixture, shape = lab. Same-shape points cluster (labs group together); colours are scattered — technical noise dominates biological signal."
+#| fig-width: 12
+#| fig-height: 6
+
+plot_pca_by_polarity(
+  pos = pca_scores_df(pca_full_pos, "Positive"),
+  neg = pca_scores_df(pca_full_neg, "Negative"),
+  title = "PCA: BPC Profiles (Full Signal)",
+  subtitle = "Shapes cluster (lab dominates), colours scattered (mixture signal buried)"
+)
+```
+
+```{r pca-detected-bpc}
+#| fig-cap: "**Figure 1.1.3.2.2**: PCA of Detected Peaks, Positive and Negative polarity. Colour = mixture, shape = lab. Lab clusters weaken and same-colour points start to group together — feature extraction recovers biological signal."
+#| fig-width: 12
+#| fig-height: 6
+
+plot_pca_by_polarity(
+  pos = pca_scores_df(pca_detect_pos, "Positive"),
+  neg = pca_scores_df(pca_detect_neg, "Negative"),
+  title = "PCA: Detected Peaks (Peak-Picked Signal)",
+  subtitle = "Shapes disperse, colours begin to group — mixture signal emerges"
+)
+```
+
+```{r pca-consensus-bpc}
+#| fig-cap: "**Figure 1.1.3.2.3**: PCA of Consensus Peaks, Positive and Negative polarity. Colour = mixture, shape = lab. Same-colour points cluster tightly regardless of shape — mixture dominates, lab effects minimized. log1p compresses the intensity range because each peak has ~4 non-zero values (labs) and ~72 zeros (other mixtures); without it the presence/absence gap dominates scaling."
 #| fig-width: 12
 #| fig-height: 6
 
@@ -442,13 +737,13 @@ plot_pca_by_polarity(
 **Conclusion:** Raw profile data cannot be integrated across labs;
 feature extraction followed by cross-lab matching is required.
 
-## 1.3 ICC: Full Signal vs Detected Signal
+## 1.2 ICC: Full Signal vs Detected Signal
 
-### 1.3.1 ICC Computation
+### 1.2.1 ICC Computation
 
 ICC quantifies the ratio of biological signal to total variance:
 
-$$ICC = \frac{\sigma^2_{between}}{\sigma^2_{between} + \sigma^2_{within}}$$
+$$ICC = \frac{\sigma^2_{between}}{\sigma^2_{between} + \sigma^2_{within}} \tag{Equation 1}$$
 
 - $\sigma^2_{between}$ = variance *between* mixtures (biological signal)
 - $\sigma^2_{within}$ = variance *within* the same mixture across labs (technical noise)
@@ -484,26 +779,25 @@ for (pol in c("Positive", "Negative")) {
 }
 ```
 
-### 1.3.2 Peak Detection Impact
+### 1.2.2 Peak Detection Impact
 
-```{r peak-detection-impact}
+#### 1.2.2.1 Raw TIC
+
+```{r peak-detection-impact-tic}
+#| fig-cap: "**Table 1.2.2.1**: ICC improvement from peak detection (raw TIC) in both positive and negative mode."
+
 icc_comparison_tic <- icc_all_results |>
   filter(Metric == "tic") |>
   select(Polarity, Data_Level, ICC) |>
-  pivot_wider(names_from = Data_Level, values_from = ICC) |>
-  mutate(
-    ICC_Improvement = `Detected Signal` - `Full Signal`,
-    Percent_Gain = round(
-      (`Detected Signal` - `Full Signal`) / `Full Signal` * 100, 1)
-  )
+  pivot_wider(names_from = Data_Level, values_from = ICC)
 
 knitr::kable(icc_comparison_tic,
              caption = "ICC improvement from peak detection (raw TIC)",
              digits = 3)
 ```
 
-```{r peak-detection-plot}
-#| fig-cap: "Peak detection improves ICC on raw TIC; consensus peaks reveal the true signal ceiling."
+```{r peak-detection-plot-tic}
+#| fig-cap: "**Figure 1.2.2.1**: Raw TIC ICC across data levels. Peak detection improves ICC on raw TIC. Consensus Signal (matched peaks) achieves ICC = 0.436, far above Full and Detected Signal levels. Consensus peaks reveal the true signal ceiling. Peak matching is the critical bottleneck, not peak detection alone."
 
 default_cols <- scales::hue_pal()(3)
 
@@ -522,7 +816,7 @@ ggplot(icc_all_results |>
                 ),
        aes(x = Polarity, y = ICC, fill = Data_Level)) +
   geom_col(position = "dodge", alpha = 0.8) +
-  geom_text(aes(label = round(ICC, 2)),
+  geom_text(aes(label = sprintf("%.3f", ICC)),
             position = position_dodge(0.9), vjust = -0.5) +
   geom_hline(yintercept = 0.5, linetype = "dashed", color = "red") +
   scale_fill_manual(values = custom_cols) +
@@ -534,10 +828,58 @@ ggplot(icc_all_results |>
   ylim(0, 1)
 ```
 
-### 1.3.3 ICC Variance Decomposition
+#### 1.2.2.2 BPC
+
+```{r peak-detection-impact-bpc}
+#| fig-cap: "**Table 1.2.2.2**: ICC improvement from peak detection (BPC) in both positive and negative mode."
+
+icc_comparison_tic <- icc_all_results |>
+  filter(Metric == "bpc") |>
+  select(Polarity, Data_Level, ICC) |>
+  pivot_wider(names_from = Data_Level, values_from = ICC)
+
+knitr::kable(icc_comparison_tic,
+             caption = "ICC improvement from peak detection (BPC)",
+             digits = 3)
+```
+
+```{r peak-detection-plot-bpc}
+#| fig-cap: "**Figure 1.2.2.2**: BPC ICC across data levels. Peak detection improves ICC on BPC. Consensus Signal (matched peaks) achieves ICC = 0.441, far above Full and Detected Signal levels. Consensus peaks reveal the true signal ceiling. Peak matching is the critical bottleneck, not peak detection alone."
+
+default_cols <- scales::hue_pal()(3)
+
+custom_cols <- c(
+  "Full Signal" = default_cols[3],
+  "Detected Signal" = default_cols[2],
+  "Consensus Signal" = default_cols[1]
+)
+
+ggplot(icc_all_results |>
+         filter(Metric == "bpc") |>
+         mutate(Data_Level = factor(Data_Level,
+                                    levels = c("Full Signal", "Detected Signal", "Consensus Signal")),
+                Polarity = factor(Polarity,
+                                  levels = c("Positive", "Negative"))
+                ),
+       aes(x = Polarity, y = ICC, fill = Data_Level)) +
+  geom_col(position = "dodge", alpha = 0.8) +
+  geom_text(aes(label = sprintf("%.3f", ICC)),
+            position = position_dodge(0.9), vjust = -0.5) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "red") +
+  scale_fill_manual(values = custom_cols) +
+  labs(title = "Impact of Peak Detection on Reproducibility",
+       subtitle = "BPC (no normalization); dashed = 0.5 threshold",
+       y = "ICC", x = "Polarity", fill = "Processing Level") +
+  theme_bw() +
+  theme(legend.position = "top") +
+  ylim(0, 1)
+```
+
+### 1.2.3 ICC Variance Decomposition
 
 ```{r icc-variance-decomposition}
-#| fig-cap: "Peak detection shifts variance toward biological signal (raw signal, no normalization)."
+#| fig-cap: "**Figure 1.3.3**: Peak detection shifts variance toward biological signal (raw signal, no normalization)."
+
 variance_plot <- icc_all_results |>
   select(Polarity, Data_Level, Metric_Label,
          Between_mixture_var, Within_mixture_var) |>
@@ -548,6 +890,11 @@ variance_plot <- icc_all_results |>
     Source == "Within_mixture_var" ~ "Within mixtures (lab noise)"
   ))
 
+variance_plot <- variance_plot |>
+  mutate(
+    Polarity = factor(Polarity, levels = c("Positive", "Negative"))
+  )
+
 ggplot(variance_plot,
        aes(x = Metric_Label, y = Variance, fill = Source)) +
   geom_col(position = "stack", alpha = 0.8, width = 0.7) +
@@ -556,56 +903,11 @@ ggplot(variance_plot,
     "Between mixtures (signal)" = "#619CFF",
     "Within mixtures (lab noise)" = "#F8766D")) +
   labs(title = "Variance Decomposition: Raw TIC and BPC",
-       x = "Metric", y = "Variance (log2 scale)", fill = "Source") +
+       x = "Polarity & Metric", y = "Variance (log2 scale)", fill = "Source") +
   theme_bw() +
   theme(legend.position = "top",
         axis.text.x = element_text(angle = 30, hjust = 1))
 ```
-
-### 1.3.4 The Consensus Signal Breakthrough
-
-ICC on summed TIC of the 871 cross-lab matched peaks vs. Full and Detected.
-
-```{r consensus-signal-icc}
-# All three levels use raw TIC ICC (no normalization)
-icc_comparison_all <- icc_all_results |>
-  filter(Polarity == "Positive", Metric == "tic") |>
-  select(Data_Level, ICC)
-
-knitr::kable(icc_comparison_all,
-             caption = "Raw TIC ICC progression: Full → Detected → Consensus Signal (Positive mode)",
-             digits = 3)
-```
-
-```{r consensus-signal-plot}
-#| fig-cap: "**Figure 1.4**: Raw TIC ICC across data levels. Consensus Signal (matched peaks) achieves ICC ≈ 0.50, far above Full and Detected Signal levels. Peak matching is the critical bottleneck."
-#| fig-width: 8
-#| fig-height: 5
-
-ggplot(icc_comparison_all, aes(x = Data_Level, y = ICC, fill = Data_Level)) +
-  geom_col(width = 0.6, alpha = 0.8) +
-  geom_text(aes(label = sprintf("ICC = %.3f", ICC)),
-            vjust = -0.5, size = 4) +
-  geom_hline(yintercept = 0.5, linetype = "dashed", color = "red") +
-  scale_fill_manual(values = c("#E64B35", "#4DBBD5", "#00A087")) +
-  scale_x_discrete(limits = c("Full Signal", "Detected Signal", "Consensus Signal")) +
-  labs(
-    title = "Peak Matching is the Critical Bottleneck",
-    subtitle = "Raw TIC ICC: Full Signal → Detected Signal → Consensus Signal (Positive mode)",
-    y = "Intraclass Correlation Coefficient (ICC)",
-    x = NULL
-  ) +
-  theme_minimal() +
-  theme(legend.position = "none",
-        plot.title = element_text(size = 14, face = "bold")) +
-  ylim(0, 0.7)
-```
-
-**Key Finding:** Raw TIC ICC progresses **0.002 → 0.024 → 0.436** (Positive
-mode) across Full → Detected → Consensus. The ~21× jump from Detected to
-Consensus shows **peak matching is the critical bottleneck**, not peak
-detection alone.
-
 ---
 
 # Part 2: Addressing RT-Dependent Bias Makes Patient Pooling Possible {#strategy2}
@@ -644,8 +946,11 @@ metrics_combined <- metrics_combined |>
 
 ### 2.1.1 Global Normalization: Median Scaling
 
-```{r normalization-variance}
-#| fig-cap: "Effect of normalization on variance decomposition."
+#### 2.1.1.1 Raw TIC
+
+```{r normalization-variance-tic}
+#| fig-cap: "**Figure 2.1.1.1**: Effect of normalization on variance decomposition (TIC)."
+
 test_data <- metrics_combined |>
   filter(polarity == "Positive", data_level == "Detected Signal")
 
@@ -677,20 +982,83 @@ normalization_results |>
   theme(axis.text.x = element_text(angle = 30, hjust = 1))
 ```
 
+#### 2.1.1.2 BPC
+
+```{r normalization-variance-bpc}
+#| fig-cap: "**Figure 2.1.1.2**: Effect of normalization on variance decomposition (BPC)."
+
+test_data <- metrics_combined |>
+  filter(polarity == "Positive", data_level == "Detected Signal")
+
+result_raw <- check_metric_quality(test_data, "bpc")
+result_median <- check_metric_quality(test_data, "bpc_median_scaled")
+result_auto <- check_metric_quality(test_data, "bpc_autoscaled")
+
+normalization_results <- bind_rows(
+  result_raw$variance_table |>
+    mutate(Normalization = "BPC", R_squared = result_raw$r_squared),
+  result_median$variance_table |>
+    mutate(Normalization = "Median Scaled", R_squared = result_median$r_squared),
+  result_auto$variance_table |>
+    mutate(Normalization = "Autoscaled (MAD)", R_squared = result_auto$r_squared)
+)
+
+normalization_results |>
+  mutate(Normalization = factor(Normalization,
+    levels = c("BPC", "Median Scaled", "Autoscaled (MAD)")
+  )) |>
+  ggplot(aes(x = Normalization, y = Percentage, fill = Source)) +
+  geom_col(alpha = 0.8) +
+  labs(
+    title = "Effect of Normalization on Variance Decomposition (BPC)",
+    subtitle = "Positive Mode, Detected Signal",
+    x = "Normalization Method", y = "Variance (%)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
 ### 2.1.2 Residual Comparison
 
-```{r normalization-residuals}
+#### 2.1.2.1 Raw TIC
+
+```{r normalization-residuals-tic}
+#| fig-cap: "**Figure 2.1.2.1**: Effect of normalization on residual distribution (TIC)."
 #| fig-height: 16
+
 mod_raw <- lm(log2(tic) ~ lab + mixture, data = test_data)
 mod_median <- lm(log2(tic_median_scaled) ~ lab + mixture,
                  data = test_data)
-mod_auto <- lm(log2(tic_autoscaled) ~ lab + mixture,
-               data = test_data)
+mod_auto <- lm(tic_autoscaled ~ lab + mixture,
+               data = test_data) # Autoscaling often produces negative values centered around 0, and this is incompatible with log2()
 
 (
   plot_residuals_new(mod_raw, "Raw TIC (log2)", test_data) /
   plot_residuals_new(mod_median, "Median Scaled TIC", test_data) /
   plot_residuals_new(mod_auto, "Autoscaled TIC (MAD)", test_data)
+) +
+  plot_annotation(
+    title = "Residual Plots: Raw vs Median vs Autoscaled",
+    theme = theme(plot.title = element_text(face = "bold", size = 14))
+  )
+```
+
+#### 2.1.2.2 BPC
+
+```{r normalization-residuals-bpc}
+#| fig-cap: "**Figure 2.1.2.2**: Effect of normalization on residual distribution (BPC)."
+#| fig-height: 16
+
+mod_raw <- lm(log2(bpc) ~ lab + mixture, data = test_data)
+mod_median <- lm(log2(bpc_median_scaled) ~ lab + mixture,
+                 data = test_data)
+mod_auto <- lm(bpc_autoscaled ~ lab + mixture,
+               data = test_data) # Autoscaling often produces negative values centered around 0, and this is incompatible with log2()
+
+(
+  plot_residuals_new(mod_raw, "BPC (log2)", test_data) /
+  plot_residuals_new(mod_median, "Median Scaled BPC", test_data) /
+  plot_residuals_new(mod_auto, "Autoscaled BPC (MAD)", test_data)
 ) +
   plot_annotation(
     title = "Residual Plots: Raw vs Median vs Autoscaled",
@@ -705,7 +1073,9 @@ mod_auto <- lm(log2(tic_autoscaled) ~ lab + mixture,
 Non-parallel lines across quartiles → RT-dependent biases that global
 normalization cannot fix.
 
-```{r sensitivity-profile}
+#### 2.2.1.1 Raw TIC
+
+```{r sensitivity-profile-tic}
 compute_consortium_sensitivity <- function(polarity) {
   load(file.path(base_path, "data/tic_detect.RData"))
   tic_data <- tic_detect[tic_detect$polarity == polarity]
@@ -742,8 +1112,9 @@ compute_consortium_sensitivity <- function(polarity) {
 all_profiles <- run_for_polarities_simple(compute_consortium_sensitivity)
 ```
 
-```{r sensitivity-profile-plot}
-#| fig-cap: "Non-parallel sensitivity profiles → global normalization insufficient."
+```{r sensitivity-profile-plot-tic}
+#| fig-cap: "**Figure 2.2.1.1**: Non-parallel sensitivity profiles → global normalization insufficient (TIC)."
+
 all_profiles |>
   mutate(Log2_TIC = log2(Intensity)) |>
   group_by(Quartile, lab, Polarity) |>
@@ -763,7 +1134,9 @@ all_profiles |>
   theme_minimal()
 ```
 
-```{r sensitivity-deviation-table}
+```{r sensitivity-deviation-table-tic}
+#| fig-cap: "**Table 2.2.1.1**: Consortium median comparison by lab and RT quartile (TIC)"
+
 findings_table <- all_profiles |>
   mutate(Log2_Dev = log2(Intensity / Consensus)) |>
   group_by(lab, Quartile, Polarity) |>
@@ -776,6 +1149,81 @@ knitr::kable(findings_table,
 ```
 
 ICL: Q1 +0.24 → Q4 −0.78 (positive). Cembio: Q3 +1.55 log2 deviation (negative).
+
+#### 2.2.1.2 BPC
+
+```{r sensitivity-profile-bpc}
+compute_consortium_sensitivity <- function(polarity) {
+  load(file.path(base_path, "data/bpc_detect.RData"))
+  bpc_data <- bpc_detect[bpc_detect$polarity == polarity]
+  breaks <- quantile(unlist(rtime(bpc_data)),
+                     probs = seq(0, 1, 0.25), na.rm = TRUE)
+
+  raw_stats <- t(vapply(seq_along(bpc_data), function(i) {
+    rt <- rtime(bpc_data[i])[[1]]
+    int <- intensity(bpc_data[i])[[1]]
+    vapply(1:4, function(q) {
+      sum(int[rt >= breaks[q] & rt < breaks[q + 1]], na.rm = TRUE)
+    }, numeric(1))
+  }, numeric(4)))
+
+  df <- data.frame(
+    lab = bpc_data$lab, mixture = bpc_data$mixture,
+    Q1 = raw_stats[, 1], Q2 = raw_stats[, 2],
+    Q3 = raw_stats[, 3], Q4 = raw_stats[, 4]
+  )
+  grand_medians <- df |>
+    summarise(across(starts_with("Q"), \(x) median(x, na.rm = TRUE))) |>
+    pivot_longer(everything(), names_to = "Quartile", values_to = "Consensus")
+
+  df |>
+    pivot_longer(cols = starts_with("Q"),
+                 names_to = "Quartile", values_to = "Intensity") |>
+    left_join(grand_medians, by = "Quartile") |>
+    mutate(
+      Log2_Deviation = log2(Intensity / Consensus),
+      Polarity = ifelse(polarity == 1, "Positive", "Negative")
+    )
+}
+
+all_profiles <- run_for_polarities_simple(compute_consortium_sensitivity)
+```
+
+```{r sensitivity-profile-plot-bpc}
+#| fig-cap: "**Figure 2.2.1.2**: Non-parallel sensitivity profiles → global normalization insufficient (BPC)."
+
+all_profiles |>
+  mutate(Log2_BPC = log2(Intensity)) |>
+  group_by(Quartile, lab, Polarity) |>
+  summarise(median_log2_bpc = median(Log2_BPC, na.rm = TRUE),
+            .groups = "drop") |>
+  ggplot(aes(x = Quartile, y = median_log2_bpc,
+             group = lab, color = lab)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2.5) +
+  facet_wrap(~Polarity) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(
+    title = "BPC Distribution Across RT Quartiles",
+    subtitle = "Non-parallel lines → global normalization is insufficient",
+    y = "log2(BPC per Quartile)", x = "Quartile", color = "Laboratory"
+  ) +
+  theme_minimal()
+```
+
+```{r sensitivity-deviation-table-bpc}
+#| fig-cap: "**Table 2.2.1.2**: Consortium median comparison by lab and RT quartile (BPC)"
+
+findings_table <- all_profiles |>
+  mutate(Log2_Dev = log2(Intensity / Consensus)) |>
+  group_by(lab, Quartile, Polarity) |>
+  summarise(Median_Log2_Dev = round(median(Log2_Dev, na.rm = TRUE), 2),
+            .groups = "drop") |>
+  pivot_wider(names_from = Quartile, values_from = Median_Log2_Dev)
+
+knitr::kable(findings_table,
+             caption = "Median log2 deviation from consortium median by lab and RT quartile")
+```
 
 ### 2.2.2 Residual Lab Variance by RT Quartile
 
@@ -844,9 +1292,20 @@ quartile_results <- expand.grid(
   unnest(var_result)
 ```
 
-```{r quartile-variance-plot}
-#| fig-cap: "Residual lab variance peaks in Q4 (~53% positive mode, ~40% negative mode) after global median normalization, with Q3 also elevated (~29–34%)."
+#### 2.2.2.1 Raw TIC
+
+```{r quartile-variance-plot-tic}
+#| fig-cap: "**Figure 2.2.2.1**: TIC Residual lab variance peaks in Q4 (~53% positive mode, ~40% negative mode) after global median normalization, with Q3 also elevated (~29–34%)."
+
 plot_quartile_variance(quartile_results, "TIC")
+```
+
+#### 2.2.2.2 BPC
+
+```{r quartile-variance-plot-bpc}
+#| fig-cap: "**Figure 2.2.2.2**: BPC Residual lab variance peaks in Q4 (~53% positive mode, ~40% negative mode) after global median normalization, with Q3 also elevated (~29–34%)."
+
+plot_quartile_variance(quartile_results, "BPC")
 ```
 
 ## 2.3 Comparing Normalization Strategies
@@ -1000,10 +1459,13 @@ pk_norm <- pk_norm |>
 cat("Normalization complete. Rows:", nrow(pk_norm), "\n")
 ```
 
-### 2.3.3 Visualize LOESS Sensitivity Profiles
+### 2.3.3 LOESS
+
+#### 2.3.3.1 Visualize LOESS Sensitivity Profiles
 
 ```{r loess-profiles}
-#| fig-cap: "Per-lab LOESS sensitivity curves showing the RT-dependent bias that local normalization corrects."
+#| fig-cap: "**Figure 2.3.3.1**: Per-lab LOESS sensitivity curves showing the RT-dependent bias that local normalization corrects."
+
 pk_norm |>
   filter(!is.na(rt), !is.na(loess_area)) |>
   ggplot(aes(x = rt, y = loess_area, color = lab)) +
@@ -1019,7 +1481,7 @@ pk_norm |>
   theme_minimal()
 ```
 
-### 2.3.3b Log2 Fold-Error: Proof of LOESS Correction
+#### 2.3.3.2 Log2 Fold-Error: Proof of LOESS Correction
 
 Per-peak Log2 Fold-Error $= \log_2(\text{Lab Area} / \text{Consensus Median Area})$.
 Before normalization, labs drift from zero (especially Q3/Q4). After LOESS,
@@ -1055,7 +1517,8 @@ cat("Log2 Fold-Error dataset:", nrow(fold_error), "rows\n")
 ### 2.3.4 Log2 Fold-Error Visualization
 
 ```{r log2-fold-error-plot}
-#| fig-cap: "**Figure 2.3**: Log2 Fold-Error by RT Decile and Lab, showing the effect of LOESS normalization. Before correction (Raw, left), labs drift far from zero in D7-D10 (ICL systematically low, Cembio hyper-sensitive in D8). After Global Median (middle), drift persists. After LOESS (right), all labs are perfectly re-centered on zero across all deciles—the proof that systematic RT-dependent bias is corrected."
+#| fig-cap: "**Figure 2.3.4**: Log2 Fold-Error by RT Decile and Lab, showing the effect of LOESS normalization. Before correction (Raw, left), labs drift far from zero in D7-D10 (ICL systematically low, Cembio hyper-sensitive in D8). After Global Median (middle), drift persists. After LOESS (right), all labs are perfectly re-centered on zero across all deciles—the proof that systematic RT-dependent bias is corrected."
+
 fe_long <- fold_error |>
   pivot_longer(
     cols = starts_with("log2_fe_"),
@@ -1093,11 +1556,13 @@ ggplot(fe_long, aes(x = rt_decile, y = log2_fold_error, fill = lab)) +
 - **Global Median**: drift persists (RT-specific bias unaddressed).
 - **LOESS**: all labs re-centered on zero across deciles.
 
-### 2.3.5 ICC by Normalization Strategy and RT Decile
+### 2.3.5 ICC by Normalization Strategy
 
 ICC computed on **peak-level Area Under TIC** after each normalization
 strategy, per RT decile, for **Detected Signal** (all consensus peaks) and
 **Consensus Signal** (matched in all 4 labs).
+
+#### 2.3.5.1 By RT Decile
 
 ```{r icc-peak-function}
 compute_icc_peak <- function(data, value_col) {
@@ -1213,12 +1678,12 @@ icc_table_consensus <- icc_norm_results |>
 
 cat("\n**Detected Signal (all consensus peaks):**\n")
 knitr::kable(icc_table_detected,
-    caption = "Table 2.2a: ICC by normalization strategy and RT decile - Detected Signal",
+    caption = "Table 2.3.5.1a: ICC by normalization strategy and RT decile - Detected Signal",
     digits = 3)
 
 cat("\n**Consensus Signal (matched peaks only):**\n")
 knitr::kable(icc_table_consensus,
-    caption = "Table 2.2b: ICC by normalization strategy and RT decile - Consensus Signal",
+    caption = "Table 2.3.5.1b: ICC by normalization strategy and RT decile - Consensus Signal",
     digits = 3)
 ```
 
@@ -1230,7 +1695,7 @@ knitr::kable(icc_table_consensus,
 4. Decile Median ≈ LOESS (0.58 vs 0.58) but simpler.
 
 ```{r icc-normalization-line-plot}
-#| fig-cap: "**Figure 2.4**: ICC by Normalization Strategy and RT Decile (Detected vs Consensus Signal). Line plot showing which deciles benefit most from local normalization. Detected Signal (left) shows larger improvements from local methods in D7–D10, while Consensus Signal (right) maintains more stable ICC across deciles."
+#| fig-cap: "**Figure 2.3.5.1**: ICC by Normalization Strategy and RT Decile (Detected vs Consensus Signal). Line plot showing which deciles benefit most from local normalization. Detected Signal (left) shows larger improvements from local methods in D7–D10, while Consensus Signal (right) maintains more stable ICC across deciles."
 #| fig-width: 14
 #| fig-height: 6
 
@@ -1268,8 +1733,11 @@ ggplot(icc_plot_data, aes(x = Decile_num, y = ICC, color = Strategy, linetype = 
   ylim(NA, 1)
 ```
 
+#### 2.3.5.2 Global ICC across all RT
+
 ```{r icc-overall-comparison}
-#| fig-cap: "**Figure 2.5**: Overall ICC comparison across strategies (aggregated across all deciles). Detected Signal (left) shows more room for improvement through normalization, while Consensus Signal (right) has higher baseline ICC."
+#| fig-cap: "**Figure 2.3.5.2**: Overall ICC comparison across strategies (aggregated across all deciles). Detected Signal (left) shows more room for improvement through normalization, while Consensus Signal (right) has higher baseline ICC."
+
 icc_norm_results |>
   filter(Decile == "Overall") |>
   mutate(Strategy = factor(Strategy, levels = c("Raw", "Global Median",
@@ -1293,6 +1761,235 @@ icc_norm_results |>
   theme(legend.position = "none",
         axis.text.x = element_text(angle = 30, hjust = 1)) +
   ylim(NA, 1)
+```
+
+```{r}
+#| fig-cap: "**Table 2.3.5.2**: Global ICC across all RT per strategy"
+
+icc_global_table <- icc_norm_results |>
+  filter(Decile == "Overall") |>
+  select(Signal_Type, Strategy, ICC, Between_var, Within_var, n_peaks)
+
+knitr::kable(
+  icc_global_table,
+  caption = "Table 2.3.5.2: Global ICC across all RT values",
+  digits = 3
+)
+```
+
+#### 2.3.5.3 Pairwise ICC: Afekta vs Cembio
+
+This analysis evaluates reproducibility between only two laboratories (Afekta and Cembio), allowing direct assessment of pairwise agreement after normalization.
+
+```{r icc-afekta-cembio}
+compute_icc_peak_pair <- function(data, value_col,
+                                  labs_keep = c("afekta", "cembio")) {
+
+  wide <- data |>
+    filter(lab %in% labs_keep) |>
+    filter(!is.na(.data[[value_col]])) |>
+    select(consensus_id, lab, value = all_of(value_col)) |>
+    mutate(value = log2(value)) |>
+    pivot_wider(names_from = lab, values_from = value)
+
+  # Keep only peaks present in both labs
+  wide <- wide |>
+    filter(if_all(all_of(labs_keep), ~ !is.na(.x)))
+
+  if (nrow(wide) < 10) {
+    return(data.frame(
+      Metric = value_col,
+      ICC = NA_real_,
+      Between_var = NA_real_,
+      Within_var = NA_real_,
+      n_peaks = nrow(wide)
+    ))
+  }
+
+  mat <- as.matrix(wide[, labs_keep])
+
+  row_means <- rowMeans(mat, na.rm = TRUE)
+  grand_mean <- mean(row_means, na.rm = TRUE)
+
+  k <- ncol(mat)
+  n <- nrow(mat)
+
+  ss_between <- k * sum((row_means - grand_mean)^2)
+  ss_within <- sum(sweep(mat, 1, row_means)^2, na.rm = TRUE)
+
+  ms_between <- ss_between / (n - 1)
+  ms_within <- ss_within / (n * (k - 1))
+
+  icc_val <- (ms_between - ms_within) /
+    (ms_between + (k - 1) * ms_within)
+
+  data.frame(
+    Metric = value_col,
+    ICC = icc_val,
+    Between_var = ms_between,
+    Within_var = ms_within,
+    n_peaks = n
+  )
+}
+
+# Prepare data
+pair_signal <- pk_norm |>
+  filter(!is.na(rt_decile)) |>
+  filter(lab %in% c("afekta", "cembio"))
+
+# ICC by RT decile
+icc_pair_by_decile <- do.call(rbind, lapply(1:10, function(d) {
+
+  pk_dec <- pair_signal |>
+    filter(rt_decile == paste0("D", d))
+
+  bind_rows(
+    compute_icc_peak_pair(pk_dec, "areaUnderTic") |>
+      mutate(Strategy = "Raw", Decile = paste0("D", d)),
+
+    compute_icc_peak_pair(pk_dec, "area_global") |>
+      mutate(Strategy = "Global Median", Decile = paste0("D", d)),
+
+    compute_icc_peak_pair(pk_dec, "area_decile") |>
+      mutate(Strategy = "Decile Median", Decile = paste0("D", d)),
+
+    compute_icc_peak_pair(pk_dec, "area_loess") |>
+      mutate(Strategy = "LOESS", Decile = paste0("D", d))
+  )
+}))
+
+# Overall ICC across all RT
+icc_pair_overall <- bind_rows(
+
+  compute_icc_peak_pair(pair_signal, "areaUnderTic") |>
+    mutate(Strategy = "Raw", Decile = "Overall"),
+
+  compute_icc_peak_pair(pair_signal, "area_global") |>
+    mutate(Strategy = "Global Median", Decile = "Overall"),
+
+  compute_icc_peak_pair(pair_signal, "area_decile") |>
+    mutate(Strategy = "Decile Median", Decile = "Overall"),
+
+  compute_icc_peak_pair(pair_signal, "area_loess") |>
+    mutate(Strategy = "LOESS", Decile = "Overall")
+)
+
+icc_pair_results <- bind_rows(
+  icc_pair_by_decile,
+  icc_pair_overall
+)
+```
+
+```{r}
+#| fig-cap: "**Figure 2.3.5.3.1**: Pairwise ICC between Afekta and Cembio across RT deciles."
+
+icc_pair_plot <- icc_pair_results |>
+  filter(Decile != "Overall") |>
+  mutate(
+    Decile_num = as.numeric(gsub("D", "", Decile)),
+    Strategy = factor(
+      Strategy,
+      levels = c("Raw", "Global Median",
+                 "Decile Median", "LOESS")
+    )
+  )
+
+ggplot(
+  icc_pair_plot,
+  aes(x = Decile_num, y = ICC,
+      color = Strategy, linetype = Strategy)
+) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  geom_hline(
+    yintercept = 0.5,
+    linetype = "dashed",
+    color = "gray50"
+  ) +
+  scale_x_continuous(
+    breaks = 1:10,
+    labels = paste0("D", 1:10)
+  ) +
+  scale_color_manual(values = c(
+    "Raw" = "#E64B35",
+    "Global Median" = "#4DBBD5",
+    "Decile Median" = "#70AD47",
+    "LOESS" = "#4472C4"
+  )) +
+  scale_linetype_manual(values = c(
+    "Raw" = "solid",
+    "Global Median" = "solid",
+    "Decile Median" = "solid",
+    "LOESS" = "dashed"
+  )) +
+  labs(
+    title = "Pairwise ICC: Afekta vs Cembio",
+    subtitle = "Local normalization improves pairwise reproducibility in late RT regions",
+    x = "RT Decile",
+    y = "ICC"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "top",
+    panel.grid.minor = element_blank()
+  ) +
+  ylim(NA, 1)
+```
+
+```{r}
+#| fig-cap: "**Figure 2.3.5.3.2**: Overall pairwise ICC between Afekta and Cembio across normalization strategies."
+
+icc_pair_results |>
+  filter(Decile == "Overall") |>
+  mutate(
+    Strategy = factor(
+      Strategy,
+      levels = c("Raw", "Global Median",
+                 "Decile Median", "LOESS")
+    )
+  ) |>
+  ggplot(aes(x = Strategy, y = ICC, fill = Strategy)) +
+  geom_col(alpha = 0.85) +
+  geom_hline(
+    yintercept = 0.5,
+    linetype = "dashed",
+    color = "red"
+  ) +
+  geom_text(
+    aes(label = sprintf("%.3f", ICC)),
+    vjust = -0.5,
+    size = 4
+  ) +
+  scale_fill_manual(values = c(
+    "Raw" = "#E64B35",
+    "Global Median" = "#4DBBD5",
+    "Decile Median" = "#70AD47",
+    "LOESS" = "#4472C4"
+  )) +
+  labs(
+    title = "Overall Pairwise ICC: Afekta vs Cembio",
+    subtitle = "ICC aggregated across all RT values",
+    x = NULL,
+    y = "ICC"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 30, hjust = 1)
+  ) +
+  ylim(0, 1)
+```
+
+```{r}
+#| fig-cap: "**Table 2.3.5.3.1**: Global pairwise ICC between Afekta and Cembio."
+
+icc_pair_results |>
+  filter(Decile == "Overall") |>
+  select(Strategy, ICC, Between_var, Within_var, n_peaks) |>
+  knitr::kable(
+    caption = "Table 2.3.5.3.1: Pairwise ICC across all RT values",
+    digits = 3
+  )
 ```
 
 ### 2.3.6 CV by RT Decile and Strategy
@@ -1334,7 +2031,8 @@ cv_strat_long |>
 ```
 
 ```{r cv-quartile-strategy-plot}
-#| fig-cap: "**Figure 2.6**: CV by RT Decile and strategy. Global, Decile, and LOESS normalization show similar performance across all deciles."
+#| fig-cap: "**Figure 2.3.6**: CV by RT Decile and strategy. Global, Decile, and LOESS normalization show similar performance across all deciles."
+
 cv_strat_summary <- cv_strat_long |>
   filter(!is.na(CV), CV < 2) |>
   group_by(Strategy, rt_decile) |>
