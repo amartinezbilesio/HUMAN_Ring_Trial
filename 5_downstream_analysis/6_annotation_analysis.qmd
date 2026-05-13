@@ -1,0 +1,898 @@
+---
+title: "Annotation analysis across labs (SIRIUS-curated)"
+format: html
+---
+
+Compare the manually curated SIRIUS annotations across labs. Each lab has a
+curated table at `3_annotation_manual/HE/3_Sirius_curation/{lab}_lab_annotations_sirius_curated.xlsx`.
+Compound-level metadata lives in `1_preprocessing/standards.xlsx`.
+
+So this is using annotation that was done on the automatically annotated peaks. no RT restriction. No correspondence was done between the labs.
+
+### Source table structure
+
+Each curated `.xlsx` is one row per **(compound, lab)**. Within that row:
+
+- `chrom_peak_id` and `adduct` are pipe-separated, length-matched lists
+  (one entry per peak picked for that compound in that lab — typically
+  one peak per adduct).
+- `rtmed` is a **single value per (compound, lab)** — the median RT of
+  the curated peaks for that compound in that lab. It does not vary
+  per peak or per adduct.
+- `mz_[adduct]` columns give the theoretical m/z for each adduct.
+- `best_structurePerIdRank` is the SIRIUS rank of the curated structure
+  in SIRIUS's candidate list (1 = top hit), one value per
+  (compound, lab).
+- `ms2_count` is the number of MS2 spectra acquired for the curated
+  peaks of that (compound, lab). Carried only for diagnostics — see
+  the NA-rank breakdown below.
+
+This whole analysis is restricted to **rows where SIRIUS actually
+annotated the compound**, i.e. `best_structurePerIdRank` is not NA
+(SIRIUS returned the curated standard in its candidate list). Rows
+where SIRIUS did not (no MS2, or MS2 present but the standard was not
+in the returned candidates) are excluded — we cannot judge an
+annotation that SIRIUS did not produce.
+
+After `unnest_lab()` below, `long` is one row per
+**(lab, compound, adduct, peak)** with `rtmed` and `ms2_count` repeated
+across the peaks of the same (compound, lab).
+
+We look at:
+
+- RT deviation per compound between labs
+- m/z deviation per (compound, adduct) between labs
+- Which compound categories overlap most between labs
+- Per-lab coverage of unique compounds
+- Per-lab coverage of adducts
+- Whether large RT shifts coincide with worse SIRIUS structure ranks
+  (i.e. is the annotation still trustworthy when one lab's RT
+  disagrees with the others?)
+
+```{r}
+#| label: setup
+#| message: false
+library(readxl)
+library(ggplot2)
+library(here)
+
+labs <- c("afekta", "cembio", "hmgu", "icl")
+curated_dir <- here("3_annotation_manual", "HE", "3_Sirius_curation")
+std_path    <- here("1_preprocessing", "standards.xlsx")
+```
+
+## Load curated annotations
+
+Each curated row carries pipe-separated `chrom_peak_id` and `adduct`. We
+unnest these so each row is one (lab, compound, adduct, peak) tuple and
+attach the matching `mz_{adduct}` column. We also carry `ms2_count`
+(MS2 spectra acquired for the curated peaks) — it lives at
+(compound, lab) granularity in the source table, so it is repeated
+across the peaks of the same (compound, lab) after unnesting.
+
+```{r}
+#| label: load-curated
+read_lab <- function(lab) {
+    f <- file.path(curated_dir,
+                   paste0(lab, "_lab_annotations_sirius_curated.xlsx"))
+    x <- as.data.frame(read_xlsx(f), check.names = FALSE)
+    x$lab <- lab
+    x
+}
+
+raw <- lapply(labs, read_lab)
+names(raw) <- labs
+
+unnest_lab <- function(x) {
+    cps <- strsplit(as.character(x$chrom_peak_id), "|", fixed = TRUE)
+    ads <- strsplit(as.character(x$adduct),        "|", fixed = TRUE)
+    n   <- lengths(cps)
+    stopifnot(all(n == lengths(ads)))
+
+    idx <- rep(seq_len(nrow(x)), n)
+    out <- data.frame(
+        lab           = x$lab[idx],
+        compound      = trimws(x$target_ChEBI.name[idx]),
+        chrom_peak_id = trimws(unlist(cps, use.names = FALSE)),
+        adduct        = trimws(unlist(ads, use.names = FALSE)),
+        rtmed         = suppressWarnings(as.numeric(x$rtmed[idx])),
+        ms2_count     = suppressWarnings(as.numeric(x$ms2_count[idx])),
+        stringsAsFactors = FALSE
+    )
+
+    # Attach mz from the matching mz_{adduct} column
+    out$mz <- NA_real_
+    for (a in unique(out$adduct)) {
+        col <- paste0("mz_", a)
+        if (col %in% colnames(x)) {
+            sel <- out$adduct == a
+            row_idx <- idx[sel]
+            out$mz[sel] <- suppressWarnings(as.numeric(x[[col]][row_idx]))
+        }
+    }
+    out
+}
+
+long_all <- do.call(rbind, lapply(raw, unnest_lab))
+long_all <- long_all[!is.na(long_all$compound) & long_all$compound != "", ]
+rownames(long_all) <- NULL
+head(long_all)
+```
+
+SIRIUS reports a **structure rank** for the true standard
+(`best_structurePerIdRank`) — the position of the curated structure in
+SIRIUS's structural candidate list (1 = top hit). One value per curated
+row, so we keep it at (compound, lab) granularity rather than unnesting
+per peak. The curated tables do not carry a separate formula rank, so we
+work with the structure rank alone. NA = SIRIUS did not return the
+curated standard among its structural predictions for that row.
+
+```{r}
+#| label: load-rank
+rank_lab_all <- do.call(rbind, lapply(raw, function(x) {
+    data.frame(
+        lab            = x$lab,
+        compound       = trimws(x$target_ChEBI.name),
+        structure_rank = suppressWarnings(
+            as.numeric(x$best_structurePerIdRank)),
+        ms2_count      = suppressWarnings(as.numeric(x$ms2_count)),
+        stringsAsFactors = FALSE
+    )
+}))
+rank_lab_all <- rank_lab_all[
+    !is.na(rank_lab_all$compound) & rank_lab_all$compound != "", ]
+rownames(rank_lab_all) <- NULL
+head(rank_lab_all)
+```
+
+### Where do NA structure ranks come from? SIRIUS filter
+
+`best_structurePerIdRank` is NA when SIRIUS did not return the curated
+standard in its candidate list. Two possible reasons: (a) no MS2 was
+acquired for the peak, so SIRIUS could not run; (b) MS2 was acquired
+and SIRIUS ran, but the curated standard was not in the returned
+candidates. Cross-tab to see the split:
+
+```{r}
+#| label: na-rank-vs-ms2
+rank_lab_all$has_ms2  <- !is.na(rank_lab_all$ms2_count) &
+                        rank_lab_all$ms2_count > 0
+rank_lab_all$has_rank <- !is.na(rank_lab_all$structure_rank)
+addmargins(table(has_ms2  = rank_lab_all$has_ms2,
+                 has_rank = rank_lab_all$has_rank))
+```
+
+Either way, both cases mean the row is **not actually a SIRIUS
+annotation**. We restrict everything downstream to rows where SIRIUS
+returned the curated structure (`has_rank = TRUE`).
+
+```{r}
+#| label: sirius-filter
+# Compound-level: keep (compound, lab) rows with a SIRIUS rank.
+keep_r <- !is.na(rank_lab_all$structure_rank)
+rank_lab <- rank_lab_all[keep_r,
+    c("lab", "compound", "structure_rank", "ms2_count")]
+rownames(rank_lab) <- NULL
+
+# Peak-level: keep rows whose (compound, lab) survives the rank filter.
+keys_keep <- unique(rank_lab[, c("compound", "lab")])
+long <- merge(long_all, keys_keep, by = c("compound", "lab"))
+rownames(long) <- NULL
+
+cat(sprintf(
+    "Kept %d / %d (peak-level) and %d / %d (compound-level) rows where SIRIUS annotated the compound\n",
+    nrow(long), nrow(long_all),
+    nrow(rank_lab), nrow(rank_lab_all)))
+```
+
+## Load standards metadata
+
+We try to detect a "category"-like column in `standards.xlsx`. If none is
+present, we fall back to grouping by molecular formula.
+
+```{r}
+#| label: load-standards
+std <- as.data.frame(
+    read_xlsx(std_path, skip = 1, .name_repair = "minimal"),
+    check.names = FALSE
+)
+
+# Pick a compound-name column
+name_col <- intersect(c("ChEBI name", "Name", "compound", "compound_name"),
+                      colnames(std))[1]
+stopifnot(!is.na(name_col))
+std$compound <- trimws(as.character(std[[name_col]]))
+
+# Pick a category-like column if it exists
+cat_candidates <- c("Class", "class", "Category", "category",
+                    "ChEBI class", "compound_class", "Compound class",
+                    "Family", "family", "Group", "group", "Subclass")
+cat_col <- intersect(cat_candidates, colnames(std))[1]
+if (is.na(cat_col)) {
+    # Fallback: use molecular formula as a coarse grouping
+    fcol <- intersect(c("formula", "Formula", "Molecular formula"),
+                      colnames(std))[1]
+    if (!is.na(fcol)) {
+        std$category <- as.character(std[[fcol]])
+        message("No category column found; using '", fcol,
+                "' as fallback category.")
+    } else {
+        std$category <- NA_character_
+        message("No category or formula column found in standards.xlsx.")
+    }
+} else {
+    std$category <- as.character(std[[cat_col]])
+    message("Using category column: '", cat_col, "'")
+}
+
+std_lookup <- unique(std[, c("compound", "category")])
+long <- merge(long, std_lookup, by = "compound", all.x = TRUE)
+head(long)
+```
+
+## RT deviation between labs
+
+Per compound, take the lab-level `rtmed` (one value per lab) and compute
+the spread (sd and range) across labs that detected it.
+
+```{r}
+#| label: rt-deviation
+rt_lab <- aggregate(rtmed ~ compound + lab, data = long,
+                    FUN = function(v) mean(v, na.rm = TRUE))
+
+rt_stats <- aggregate(rtmed ~ compound, data = rt_lab,
+                      FUN = function(v) c(n      = length(v),
+                                          mean   = mean(v, na.rm = TRUE),
+                                          sd     = sd(v,   na.rm = TRUE),
+                                          range  = diff(range(v, na.rm = TRUE))))
+rt_stats <- do.call(data.frame, rt_stats)
+colnames(rt_stats) <- c("compound", "n_labs", "rt_mean", "rt_sd", "rt_range")
+rt_stats <- rt_stats[order(-rt_stats$rt_sd), ]
+head(rt_stats, 15)
+```
+
+```{r}
+#| label: rt-deviation-plot
+#| fig-width: 7
+#| fig-height: 4.5
+ggplot(rt_stats[rt_stats$n_labs > 1, ],
+       aes(x = n_labs, y = rt_sd)) +
+    geom_jitter(width = 0.15, alpha = 0.6) +
+    labs(x = "Number of labs detecting compound",
+         y = "RT sd across labs (s)",
+         title = "Between-lab RT variability per compound") +
+    theme_bw()
+```
+
+Top compounds with highest RT spread (showing per-lab RT for the worst 10).
+The y-axis label includes `n_labs` so you can tell at a glance whether the
+spread comes from a 2-, 3-, or 4-lab consensus.
+
+```{r}
+#| label: rt-top-plot
+#| fig-width: 8
+#| fig-height: 5
+worst <- head(rt_stats[rt_stats$n_labs > 1, ], 10)
+sub <- rt_lab[rt_lab$compound %in% worst$compound, ]
+sub <- merge(sub, worst[, c("compound", "n_labs", "rt_range")],
+             by = "compound")
+sub$label <- sprintf("%s (n=%d, range=%.1fs)",
+                     sub$compound, sub$n_labs, sub$rt_range)
+# Order labels by rt_range
+lvls <- unique(sub$label[order(sub$rt_range)])
+sub$label <- factor(sub$label, levels = lvls)
+
+ggplot(sub, aes(x = label, y = rtmed, colour = lab)) +
+    geom_point(size = 2) +
+    coord_flip() +
+    labs(x = NULL, y = "RT (s)",
+         title = "Top 10 compounds by RT spread (n = labs detecting)") +
+    theme_bw()
+```
+
+## m/z deviation between labs
+
+Per (compound, adduct), compute the spread across labs of the observed
+`mz`. We convert spread to ppm against the across-lab mean.
+
+```{r}
+#| label: mz-deviation
+mz_lab <- aggregate(mz ~ compound + adduct + lab, data = long,
+                    FUN = function(v) mean(v, na.rm = TRUE))
+mz_lab <- mz_lab[!is.na(mz_lab$mz), ]
+
+mz_stats <- aggregate(mz ~ compound + adduct, data = mz_lab,
+                      FUN = function(v) c(n     = length(v),
+                                          mean  = mean(v, na.rm = TRUE),
+                                          sd    = sd(v,   na.rm = TRUE),
+                                          range = diff(range(v, na.rm = TRUE))))
+mz_stats <- do.call(data.frame, mz_stats)
+colnames(mz_stats) <- c("compound", "adduct", "n_labs",
+                        "mz_mean", "mz_sd", "mz_range")
+mz_stats$ppm <- 1e6 * mz_stats$mz_range / mz_stats$mz_mean
+mz_stats <- mz_stats[order(-mz_stats$ppm), ]
+head(mz_stats, 15)
+```
+
+```{r}
+#| label: mz-deviation-plot
+#| fig-width: 7
+#| fig-height: 4.5
+ggplot(mz_stats[mz_stats$n_labs > 1, ],
+       aes(x = adduct, y = ppm)) +
+    geom_jitter(width = 0.2, alpha = 0.6) +
+    labs(x = "Adduct", y = "m/z range across labs (ppm)",
+         title = "Between-lab m/z variability per (compound, adduct)") +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Compound-category overlap
+
+For each category, count how many compounds are seen by 1, 2, 3 or 4 labs.
+
+```{r}
+#| label: cat-overlap
+comp_labs <- aggregate(lab ~ compound + category, data = long,
+                       FUN = function(v) length(unique(v)))
+colnames(comp_labs)[3] <- "n_labs"
+
+cat_overlap <- as.data.frame(
+    table(category = comp_labs$category, n_labs = comp_labs$n_labs))
+cat_overlap <- cat_overlap[cat_overlap$Freq > 0, ]
+head(cat_overlap[order(-cat_overlap$Freq), ], 20)
+```
+
+```{r}
+#| label: cat-overlap-plot
+#| fig-width: 8
+#| fig-height: 5
+# Order categories by total compound count
+cat_totals <- aggregate(Freq ~ category, data = cat_overlap, FUN = sum)
+cat_overlap$category <- factor(cat_overlap$category,
+    levels = cat_totals$category[order(cat_totals$Freq)])
+
+ggplot(cat_overlap, aes(x = category, y = Freq, fill = n_labs)) +
+    geom_col() +
+    coord_flip() +
+    labs(x = NULL, y = "Number of compounds",
+         fill = "Labs detecting",
+         title = "Per-category compound counts, split by lab overlap") +
+    theme_bw()
+```
+
+## Lab coverage of unique compounds
+
+```{r}
+#| label: lab-coverage-compounds
+comp_per_lab <- aggregate(compound ~ lab, data = long,
+                          FUN = function(v) length(unique(v)))
+colnames(comp_per_lab)[2] <- "n_compounds"
+comp_per_lab
+```
+
+```{r}
+#| label: lab-coverage-compounds-plot
+#| fig-width: 5
+#| fig-height: 3.5
+ggplot(comp_per_lab, aes(x = lab, y = n_compounds)) +
+    geom_col(fill = "steelblue") +
+    geom_text(aes(label = n_compounds), vjust = -0.3) +
+    labs(x = NULL, y = "Unique compounds",
+         title = "Compounds annotated per lab") +
+    theme_bw()
+```
+
+Presence/absence heatmap (compounds × labs), ordered by how many labs
+detected each compound:
+
+```{r}
+#| label: presence-heatmap
+#| fig-width: 6
+#| fig-height: 8
+pres <- as.data.frame(table(compound = long$compound, lab = long$lab))
+pres$present <- pres$Freq > 0
+
+# Order compounds by total labs
+ord <- aggregate(present ~ compound, data = pres, FUN = sum)
+ord <- ord[order(ord$present, decreasing = TRUE), ]
+pres$compound <- factor(pres$compound, levels = rev(ord$compound))
+
+ggplot(pres, aes(x = lab, y = compound, fill = present)) +
+    geom_tile(colour = "white") +
+    scale_fill_manual(values = c(`TRUE` = "steelblue", `FALSE` = "grey90")) +
+    labs(x = NULL, y = NULL, fill = "Detected",
+         title = "Compound × lab presence") +
+    theme_bw() +
+    theme(axis.text.y = element_text(size = 5))
+```
+
+## Lab coverage of adducts
+
+```{r}
+#| label: adduct-coverage
+ad_lab <- as.data.frame(table(adduct = long$adduct, lab = long$lab))
+ad_lab
+```
+
+```{r}
+#| label: adduct-coverage-plot
+#| fig-width: 7
+#| fig-height: 4.5
+ggplot(ad_lab, aes(x = adduct, y = Freq, fill = lab)) +
+    geom_col(position = "dodge") +
+    labs(x = "Adduct", y = "Number of (compound, peak) annotations",
+         title = "Adduct usage per lab") +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Adduct breadth per compound (how many distinct adducts per compound,
+per lab):
+
+```{r}
+#| label: adduct-breadth-plot
+#| fig-width: 6
+#| fig-height: 4
+ad_per_comp <- aggregate(adduct ~ compound + lab, data = long,
+                         FUN = function(v) length(unique(v)))
+colnames(ad_per_comp)[3] <- "n_adducts"
+
+ggplot(ad_per_comp, aes(x = lab, y = n_adducts)) +
+    geom_boxplot(outlier.shape = NA, fill = "grey90") +
+    geom_jitter(width = 0.15, alpha = 0.4, size = 1) +
+    labs(x = NULL, y = "Adducts per compound",
+         title = "Per-compound adduct breadth, by lab") +
+    theme_bw()
+```
+
+## SIRIUS structure rank of the true standard
+
+`best_structurePerIdRank` is the position of the curated structure in
+SIRIUS's structural candidate list (1 = top hit). Lower is better.
+Because we already filtered to rows with a non-NA rank above, every
+row in `rank_lab` is a real SIRIUS annotation; the summary describes
+the quality of those annotations.
+
+```{r}
+#| label: rank-summary
+rank_summary <- aggregate(structure_rank ~ lab, data = rank_lab,
+    FUN = function(v) c(n         = length(v),
+                        median    = median(v, na.rm = TRUE),
+                        pct_rank1 = mean(v == 1, na.rm = TRUE) * 100,
+                        pct_top3  = mean(v <= 3, na.rm = TRUE) * 100))
+rank_summary <- do.call(data.frame, rank_summary)
+colnames(rank_summary) <- c("lab", "n", "median_rank",
+                            "pct_rank1", "pct_top3")
+rank_summary
+```
+
+Distribution of ranks per lab, binned (a log-scaled rank axis is
+misleading because rank=1 is the modal value — log10(1)=0 squashes the
+"good" cases against the floor while exaggerating the long tail).
+
+```{r}
+#| label: rank-histogram
+#| fig-width: 7
+#| fig-height: 4
+# Bin ranks: 1 / 2-3 / 4-10 / 11-50 / >50
+rank_binned <- rank_lab[!is.na(rank_lab$structure_rank), ]
+rank_binned$bin <- cut(rank_binned$structure_rank,
+                       breaks = c(0, 1, 3, 10, 50, Inf),
+                       labels = c("1", "2-3", "4-10", "11-50", ">50"))
+
+ggplot(rank_binned, aes(x = bin)) +
+    geom_bar(fill = "steelblue") +
+    facet_wrap(~ lab, scales = "free_y") +
+    labs(x = "Structure rank bin",
+         y = "Number of compounds",
+         title = "Structure rank distribution per lab (binned)") +
+    theme_bw()
+```
+
+## Structure rank vs RT shift
+
+The question is: **when a lab's RT for a compound disagrees with the
+other labs, is the SIRIUS structure rank for that lab still good?**
+If high RT shifts come with bad ranks, the curated annotation is
+probably wrong (likely a wrong peak picked); if high shifts come with
+rank=1, the labs are picking the same compound but their chromatography
+runs differently.
+
+### Defining "RT shift"
+
+For each (compound, lab) we use the **leave-one-out (LOO) shift**:
+
+```
+loo_shift(compound, lab) = rtmed(compound, lab)
+                         - median{rtmed(compound, other labs)}
+```
+
+i.e. how far this lab's RT is from the consensus of the *other* labs
+that detected the same compound. This is cleaner than
+`|rt - mean(all labs)|` because the suspect lab is no longer included
+in the reference value.
+
+Caveat — interpretation depends on `n_labs` (how many of the 4 labs
+detected the compound):
+
+- `n_labs = 4`: 3-vs-1 — a large LOO shift means the focal lab is an
+  outlier vs. a real 3-lab consensus.
+- `n_labs = 3`: 2-vs-1 — a large LOO shift means the focal lab differs
+  from 2 labs that agree.
+- `n_labs = 2`: 1-vs-1 — both labs get the same |LOO shift| and we
+  cannot tell which is the outlier. Reported but flagged.
+
+```{r}
+#| label: rt-loo-shift
+n_labs_per_compound <- aggregate(lab ~ compound, data = rt_lab,
+    FUN = function(v) length(unique(v)))
+colnames(n_labs_per_compound)[2] <- "n_labs"
+
+rt_shift <- merge(rt_lab, n_labs_per_compound, by = "compound")
+rt_shift$loo_shift <- NA_real_
+for (cp in unique(rt_shift$compound)) {
+    rows <- which(rt_shift$compound == cp)
+    rts  <- rt_shift$rtmed[rows]
+    if (length(rts) < 2) next
+    for (i in seq_along(rows)) {
+        rt_shift$loo_shift[rows[i]] <-
+            rt_shift$rtmed[rows[i]] - median(rts[-i], na.rm = TRUE)
+    }
+}
+rt_shift$abs_loo_shift <- abs(rt_shift$loo_shift)
+
+rank_rt <- merge(rank_lab,
+    rt_shift[, c("compound", "lab", "n_labs",
+                 "rtmed", "loo_shift", "abs_loo_shift")],
+    by = c("compound", "lab"))
+rank_rt <- rank_rt[!is.na(rank_rt$abs_loo_shift), ]
+```
+
+### How many labs are in the large-RT-shift cases?
+
+Bin the shifts and break down by `n_labs`. This answers the
+"2/4, 3/4, or 4/4 match?" question directly.
+
+```{r}
+#| label: rt-shift-by-nlabs
+rank_rt$shift_bin <- cut(rank_rt$abs_loo_shift,
+    breaks = c(-Inf, 2, 5, 10, Inf),
+    labels = c("<=2s", "2-5s", "5-10s", ">10s"))
+
+# (compound, lab) counts by shift bin x n_labs
+shift_by_nlabs <- as.data.frame(table(
+    n_labs    = rank_rt$n_labs,
+    shift_bin = rank_rt$shift_bin))
+shift_by_nlabs <- shift_by_nlabs[shift_by_nlabs$Freq > 0, ]
+shift_by_nlabs
+```
+
+```{r}
+#| label: rt-shift-by-nlabs-plot
+#| fig-width: 7
+#| fig-height: 3.8
+ggplot(shift_by_nlabs,
+       aes(x = shift_bin, y = Freq, fill = factor(n_labs))) +
+    geom_col(position = "dodge") +
+    geom_text(aes(label = Freq),
+              position = position_dodge(width = 0.9),
+              vjust = -0.3, size = 3) +
+    labs(x = "|LOO RT shift|", y = "(compound, lab) cases",
+         fill = "n_labs detecting",
+         title = "How many labs back up each RT-shift bin") +
+    theme_bw()
+```
+
+### Does a large RT shift mean a bad annotation?
+
+Cross-tabulate shift bin against a coarse rank tier (1 / 2-10 / >10).
+If large shifts are concentrated in the worse rank tiers, the
+annotation is suspicious; if rank stays at 1 across shift bins, the
+labs are calling the same compound on chromatographically different
+peaks.
+
+```{r}
+#| label: shift-vs-rank
+rank_rt$rank_tier <- ifelse(rank_rt$structure_rank == 1,   "1 (top)",
+                     ifelse(rank_rt$structure_rank <= 10,  "2-10",
+                                                           ">10"))
+rank_rt$rank_tier <- factor(rank_rt$rank_tier,
+    levels = c("1 (top)", "2-10", ">10"))
+
+shift_rank <- as.data.frame(table(
+    shift_bin = rank_rt$shift_bin,
+    rank_tier = rank_rt$rank_tier))
+shift_rank <- shift_rank[shift_rank$Freq > 0, ]
+
+# As proportions within each shift bin (easier to read)
+shift_totals <- aggregate(Freq ~ shift_bin, data = shift_rank, FUN = sum)
+shift_rank <- merge(shift_rank, shift_totals, by = "shift_bin",
+                    suffixes = c("", "_total"))
+shift_rank$pct <- 100 * shift_rank$Freq / shift_rank$Freq_total
+shift_rank
+```
+
+```{r}
+#| label: shift-vs-rank-plot
+#| fig-width: 7
+#| fig-height: 4
+ggplot(shift_rank,
+       aes(x = shift_bin, y = pct, fill = rank_tier)) +
+    geom_col() +
+    geom_text(aes(label = ifelse(pct >= 5,
+                                 sprintf("%.0f%%", pct), "")),
+              position = position_stack(vjust = 0.5), size = 3) +
+    labs(x = "|LOO RT shift|", y = "% of (compound, lab) cases",
+         fill = "Structure rank",
+         title = "Annotation quality (rank tier) by RT shift magnitude") +
+    theme_bw()
+```
+
+### Worst RT-shift cases — context per compound
+
+For the 10 (compound, lab) tuples with the highest LOO shift, show the
+RT of *every* lab that detected the compound. Triangle = the focal
+(shifted) lab. The header includes `n_labs` and the focal lab's
+structure rank so you can decide at a glance whether the shift is one
+lab disagreeing with 2 or 3 others, and whether SIRIUS still thinks
+the annotation is correct.
+
+```{r}
+#| label: worst-rtshift-context
+#| fig-width: 9
+#| fig-height: 5
+top_shift <- head(rank_rt[order(-rank_rt$abs_loo_shift), ], 10)
+top_shift$label <- with(top_shift, sprintf(
+    "%s | focal=%s | n=%d | rank=%d | shift=%.1fs",
+    compound, lab, n_labs, structure_rank, loo_shift))
+
+# All lab RTs for those compounds, plus a flag for the focal lab.
+panel <- merge(
+    top_shift[, c("compound", "lab", "label")],
+    rt_lab,
+    by = "compound",
+    suffixes = c("_focal", ""))
+panel$is_focal <- panel$lab == panel$lab_focal
+panel$label <- factor(panel$label, levels = rev(top_shift$label))
+
+ggplot(panel, aes(x = rtmed, y = label,
+                  colour = lab, shape = is_focal, size = is_focal)) +
+    geom_point() +
+    scale_shape_manual(values = c(`TRUE` = 17, `FALSE` = 16),
+                       guide = "none") +
+    scale_size_manual(values = c(`TRUE` = 3.5, `FALSE` = 2.5),
+                      guide = "none") +
+    labs(x = "RT (s)", y = NULL, colour = "lab",
+         title = "Top 10 LOO-RT-shift cases: per-lab RT context",
+         subtitle = "Triangle = focal (shifted) lab; header gives n_labs and SIRIUS rank") +
+    theme_bw()
+```
+
+Read this plot as follows:
+
+- If the triangle sits well apart from the round points (the consensus
+  of the other labs) **and** the rank in the header is 1, the focal
+  lab probably picked the right compound on a chromatographically
+  shifted peak — annotation likely OK.
+- If the triangle is apart **and** the rank is high (e.g. >10), the
+  focal lab's annotation is suspicious — likely a mis-picked peak.
+- If `n_labs = 2`, both labs are equidistant in LOO-space; the
+  triangle and the round point will just be far apart and we cannot
+  decide which is the outlier — use this only as a flag.
+
+## Annotation confidence via the consensus peak table
+
+The consensus peak table from `3_peak_feature_calculation_detected.qmd`
+(`ct_all_samples.csv`) groups peaks across labs into consensus peaks per
+sample, using m/z (20 ppm) and RT (15 s) tolerances on the unfiltered
+detected-peak set. We use the **unfiltered** table — not the 4-lab subset
+`ct_filtered4.csv` — so consensus peaks where only 2 or 3 labs converged
+still count.
+
+For each curated `(sample, compound, adduct)` tuple we ask:
+
+- Does the annotation converge to a single consensus peak (labs picked
+  the same peak), or is it **split** across multiple consensus peaks?
+- For each consensus peak that received the annotation, how many labs
+  annotated it identically, vs. how many detected the underlying peak?
+
+This is a peak-level confidence layer that is independent of the SIRIUS
+rank/confidence — it measures whether the peaks the labs *picked* for a
+given (compound, adduct) are the same peak.
+
+### Load and pivot the consensus table
+
+```{r}
+#| label: load-consensus
+ct_path <- here("5_downstream_analysis", "object", "ct_all_samples.csv")
+ct_wide <- read.csv(ct_path, stringsAsFactors = FALSE)
+
+ct_long <- do.call(rbind, lapply(labs, function(l) {
+    col  <- paste0("chrom_peak_id_", l)
+    keep <- !is.na(ct_wide[[col]])
+    data.frame(
+        consensus_id   = ct_wide$consensus_id[keep],
+        sample         = ct_wide$sample[keep],
+        n_labs_matched = ct_wide$n_labs_matched[keep],
+        lab            = l,
+        chrom_peak_id  = as.character(ct_wide[[col]][keep]),
+        stringsAsFactors = FALSE
+    )
+}))
+head(ct_long)
+```
+
+### Join annotations to consensus peaks
+
+```{r}
+#| label: join-annotations-consensus
+ann_ct <- merge(long, ct_long,
+                by = c("lab", "chrom_peak_id"),
+                all.x = TRUE)
+
+n_total   <- nrow(ann_ct)
+n_matched <- sum(!is.na(ann_ct$consensus_id))
+cat(sprintf("Annotated peaks matched to a consensus group: %d / %d (%.1f%%)\n",
+            n_matched, n_total, 100 * n_matched / n_total))
+```
+
+Annotated peaks with no consensus match either fell outside the 20 ppm ×
+15 s tolerance from any other lab's peak, or come from a sample for which
+only one lab detected the peak. A low match rate here means the rest of
+the section can only speak to a fraction of the curated annotations — it
+is the first thing to check.
+
+### Annotation splitting per (compound, adduct)
+
+For each `(sample, compound, adduct)` tuple, count the distinct consensus
+peaks the annotation was assigned to. **1** = labs converged on the same
+peak; **>1** = the annotation is split across peaks.
+
+```{r}
+#| label: annotation-splitting
+ann_matched <- ann_ct[!is.na(ann_ct$consensus_id), ]
+
+split_stats <- aggregate(consensus_id ~ sample + compound + adduct,
+                         data = ann_matched,
+                         FUN  = function(v) length(unique(v)))
+colnames(split_stats)[4] <- "n_consensus_peaks"
+
+labs_anno <- aggregate(lab ~ sample + compound + adduct,
+                       data = ann_matched,
+                       FUN  = function(v) length(unique(v)))
+colnames(labs_anno)[4] <- "n_labs_annotating"
+
+split_stats <- merge(split_stats, labs_anno,
+                     by = c("sample", "compound", "adduct"))
+
+table(n_labs_annotating = split_stats$n_labs_annotating,
+      n_consensus_peaks = split_stats$n_consensus_peaks)
+```
+
+The first column (`n_consensus_peaks == 1`) is the best case — labs
+converged. The diagonal (`n_labs_annotating == n_consensus_peaks`) is the
+worst — every annotating lab picked a different peak.
+
+```{r}
+#| label: split-plot
+#| fig-width: 6
+#| fig-height: 4
+split_summary <- as.data.frame(table(
+    n_labs_annotating = split_stats$n_labs_annotating,
+    n_consensus_peaks = split_stats$n_consensus_peaks))
+split_summary <- split_summary[split_summary$Freq > 0, ]
+
+ggplot(split_summary,
+       aes(x = n_labs_annotating, y = Freq, fill = n_consensus_peaks)) +
+    geom_col() +
+    labs(x = "Labs annotating the (compound, adduct)",
+         y = "Number of (sample, compound, adduct) tuples",
+         fill = "Distinct consensus\npeaks assigned",
+         title = "Annotation convergence vs. number of annotating labs") +
+    theme_bw()
+```
+
+### Cross-lab agreement per consensus peak
+
+For each consensus peak that received ≥1 annotation, count the labs that
+annotated it with the same `(compound, adduct)`, and compare to how many
+labs *detected* the peak (`n_labs_matched`). A peak detected by 4 labs
+but annotated by 1 is much weaker evidence than a peak detected by 3
+labs and annotated by all 3.
+
+```{r}
+#| label: consensus-agreement
+peak_agree <- aggregate(lab ~ consensus_id + compound + adduct +
+                              sample + n_labs_matched,
+                        data = ann_matched,
+                        FUN  = function(v) length(unique(v)))
+colnames(peak_agree)[6] <- "n_labs_annotating"
+
+table(detected  = peak_agree$n_labs_matched,
+      annotated = peak_agree$n_labs_annotating)
+```
+
+### Confidence tiers
+
+For each `(sample, compound, adduct)`, pick the consensus peak with the
+highest annotation count and assign a tier.
+
+```{r}
+#| label: confidence-tiers
+peak_agree_sorted <- peak_agree[
+    order(peak_agree$sample, peak_agree$compound, peak_agree$adduct,
+          -peak_agree$n_labs_annotating), ]
+key <- with(peak_agree_sorted,
+            paste(sample, compound, adduct, sep = "|"))
+peak_agree_best <- peak_agree_sorted[!duplicated(key), ]
+
+# Drop n_labs_annotating from split_stats (it counts labs per
+# compound/adduct regardless of peak); keep the peak_agree_best one,
+# which counts labs converging on the *same* consensus peak.
+split_stats_for_merge <- split_stats[, setdiff(colnames(split_stats),
+                                               "n_labs_annotating")]
+
+tiered <- merge(split_stats_for_merge,
+                peak_agree_best[, c("sample", "compound", "adduct",
+                                    "n_labs_matched", "n_labs_annotating",
+                                    "consensus_id")],
+                by = c("sample", "compound", "adduct"))
+
+tiered$tier <- with(tiered, ifelse(
+    n_consensus_peaks >  1,                              "C: split across peaks",
+    ifelse(n_labs_annotating >= 3,                       "A: converged, >=3 labs",
+    ifelse(n_labs_annotating == 2,                       "B: converged, 2 labs",
+                                                         "D: single lab"))))
+
+as.data.frame(table(tier = tiered$tier))
+```
+
+```{r}
+#| label: confidence-tiers-plot
+#| fig-width: 6
+#| fig-height: 3.5
+tier_tab <- as.data.frame(table(tier = tiered$tier))
+ggplot(tier_tab, aes(x = tier, y = Freq, fill = tier)) +
+    geom_col() +
+    geom_text(aes(label = Freq), vjust = -0.3) +
+    labs(x = NULL, y = "Number of (sample, compound, adduct) tuples",
+         title = "Annotation confidence tiers") +
+    theme_bw() +
+    theme(legend.position = "none",
+          axis.text.x = element_text(angle = 20, hjust = 1))
+```
+
+Tier A annotations (≥3 labs converging on the same consensus peak) are
+the strongest evidence that the curated identification is correct.
+Tier C splits indicate labs all chose to annotate a compound but
+disagreed on which peak it corresponds to — likely co-elution, isomers,
+or RT/m/z misalignment beyond the consensus tolerance.
+
+### Compounds with the most confident annotations
+
+```{r}
+#| label: confident-compounds
+tier_A <- tiered[tiered$tier == "A: converged, >=3 labs", ]
+conf_per_compound <- aggregate(tier ~ compound, data = tier_A,
+                               FUN = length)
+colnames(conf_per_compound)[2] <- "n_tier_A_tuples"
+conf_per_compound <- conf_per_compound[
+    order(-conf_per_compound$n_tier_A_tuples), ]
+head(conf_per_compound, 20)
+```
+
+### Compounds whose annotations are most often split
+
+```{r}
+#| label: split-compounds
+tier_C <- tiered[tiered$tier == "C: split across peaks", ]
+split_per_compound <- aggregate(n_consensus_peaks ~ compound, data = tier_C,
+                                FUN = function(v) c(n = length(v),
+                                                    max_split = max(v)))
+split_per_compound <- do.call(data.frame, split_per_compound)
+colnames(split_per_compound) <- c("compound", "n_split_tuples", "max_split")
+split_per_compound <- split_per_compound[
+    order(-split_per_compound$n_split_tuples), ]
+head(split_per_compound, 20)
+```

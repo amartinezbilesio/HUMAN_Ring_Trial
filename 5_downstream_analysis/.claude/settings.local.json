@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls \"../3_annotation_manual/HE/3_Sirius_curation/results/\")",
+      "Bash(python -c \"import openpyxl; wb=openpyxl.load_workbook\\(r'C:\\\\Users\\\\plouail\\\\OneDrive - Scientific Network South Tyrol\\\\Documents\\\\GitHub\\\\HUMAN_Ring_Trial\\\\3_annotation_manual\\\\HE\\\\3_Sirius_curation\\\\afekta_lab_annotations_sirius_curated.xlsx', read_only=True\\); ws=wb.active; print\\('cols:'\\); rows=list\\(ws.iter_rows\\(values_only=True\\)\\); print\\(rows[0]\\); print\\(\\); print\\('first row:'\\); print\\(rows[1] if len\\(rows\\)>1 else 'no data'\\); print\\(\\); print\\('nrows:', len\\(rows\\)\\)\")",
+      "Bash(unzip -l \"../3_annotation_manual/HE/3_Sirius_curation/afekta_lab_annotations_sirius_curated.xlsx\")"
+    ]
+  }
+}

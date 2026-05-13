@@ -1508,85 +1508,6 @@ reproducible across labs than ionization response. SNR shows the highest
 variability, reflecting differences in baseline estimation across
 instruments.
 
-## 5.5 Peak Shape Similarity
-
-Beyond intensity metrics, we examine the actual chromatographic peak
-profiles to assess shape reproducibility across labs. For each consensus
-peak, EIC profiles are interpolated to a common 0–1 normalized x-axis
-and compared using Pearson correlation (shape agreement) and Tanimoto
-similarity (intensity distribution overlap). Full details of the
-computation are in `3a_peak_feature_calculation_detected.qmd`.
-
-### 5.5.1 Shape Similarity Summary
-
-```{r load-shape-results}
-shape_results <- read.csv(file.path(base_path, "object/peak_shape_similarity.csv"))
-
-shape_summary <- shape_results |>
-  group_by(pair) |>
-  summarise(
-    n = n(),
-    pearson_median = median(pearson, na.rm = TRUE),
-    pearson_mean = mean(pearson, na.rm = TRUE),
-    tanimoto_median = median(tanimoto, na.rm = TRUE),
-    tanimoto_mean = mean(tanimoto, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-knitr::kable(shape_summary,
-             caption = "Peak Shape Similarity by Lab Pair",
-             digits = 3)
-```
-
-Median Pearson correlations range from 0.59 (hmgu:icl) to 0.73
-(afekta:hmgu). Tanimoto values are broadly similar across pairs
-(0.59–0.64), indicating that absolute profile overlap is more uniform
-than linear shape correlation.
-
-### 5.5.2 Pearson Correlation Distribution
-
-The 0.9 threshold is a standard cutoff for high-quality shape agreement
-in chromatographic peak matching.
-
-```{r pearson-distribution-global}
-#| fig-cap: "Pearson correlation distribution by lab pair. Red dashed line = 0.9 threshold."
-#| fig-width: 10
-#| fig-height: 6
-shape_pearson <- shape_results |> filter(!is.na(pearson))
-
-pct_above <- shape_pearson |>
-  group_by(pair) |>
-  summarise(
-    n_comparisons = n(),
-    n_above_0.9 = sum(pearson >= 0.9),
-    pct_above_0.9 = round(100 * mean(pearson >= 0.9), 1),
-    .groups = "drop"
-  )
-
-knitr::kable(pct_above,
-             caption = "Percentage of consensus peaks with Pearson >= 0.9",
-             col.names = c("Lab Pair", "Total Comparisons",
-                           "N above 0.9", "% above 0.9"))
-
-ggplot(shape_pearson, aes(x = pearson, fill = pair)) +
-  geom_histogram(bins = 50, alpha = 0.7, color = "white", linewidth = 0.2) +
-  facet_wrap(~pair, scales = "free_y") +
-  geom_vline(xintercept = 0.9, linetype = "dashed", color = "red") +
-  labs(
-    title = "Pearson Correlation Distribution by Lab Pair",
-    subtitle = "Red dashed line = 0.9 (high-quality shape match)",
-    x = "Pearson Correlation",
-    y = "Count"
-  ) +
-  theme_minimal() +
-  theme(legend.position = "none")
-```
-
-Only 11–20% of consensus peaks reach the 0.9 threshold depending on the
-lab pair, with afekta:hmgu highest (~20%) and afekta:icl lowest (~11%).
-The distributions are left-skewed with a long tail of poorly correlated
-peaks.
-
 ---
 
 # Summary {#summary}
@@ -1616,12 +1537,7 @@ analyzing 19 standard mixtures in positive and negative ionization modes.
    metrics (area, max intensity), confirming that chromatographic
    behavior is better conserved across instruments.
 
-6. **Peak shape similarity**: Median Pearson correlations range from 0.59
-   to 0.73 across lab pairs. Only 11–20% of consensus peaks exceed the
-   0.9 high-quality threshold, indicating substantial room for
-   improvement.
-
-7. **Negative mode bias**: Consistent ~9% systematic bias between Agilent
+6. **Negative mode bias**: Consistent ~9% systematic bias between Agilent
    labs; needs further investigation.
 
 ---
