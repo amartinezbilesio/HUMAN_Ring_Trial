@@ -174,7 +174,9 @@ progressively removes technical variance.
 
 ```{r, echo=FALSE, out.width="50%", eval = FALSE}
 #| fig-cap: "**Graphical Abstract**: Progressive refinement of the TIC from Full Signal to Detected Signal to Consensus Signal."
-knitr::include_graphics("C:/Users/amart/Desktop/HUMAN Ring Trial/HUMAN_Ring_Trial-main/HUMAN_Ring_Trial-main/5_downstream_analysis/FullSignal_DetectedSignal_ConsensusSignal.png")
+knitr::include_graphics(
+  file.path(base_path, "FullSignal_DetectedSignal_ConsensusSignal.svg")
+)
 ```
 
 ---
@@ -511,14 +513,14 @@ plot_pca_by_polarity(
 ```
 
 ```{r pca-detected-tic}
-#| fig-cap: "**Figure 1.1.3.1.2**: PCA of Detected Peaks, Positive and Negative polarity. Colour = mixture, shape = lab. Lab clusters weaken and same-colour points start to group together — feature extraction recovers biological signal."
+#| fig-cap: "**Figure 1.1.3.1.2**: PCA of Raw TIC Detected Peaks, Positive and Negative polarity. Colour = mixture, shape = lab. Lab clusters weaken and same-colour points start to group together — feature extraction recovers biological signal."
 #| fig-width: 12
 #| fig-height: 6
 
 plot_pca_by_polarity(
   pos = pca_scores_df(pca_detect_pos, "Positive"),
   neg = pca_scores_df(pca_detect_neg, "Negative"),
-  title = "PCA: Detected Peaks (Peak-Picked Signal)",
+  title = "PCA: Raw TIC Detected Peaks (Peak-Picked Signal)",
   subtitle = "Shapes disperse, colours begin to group — mixture signal emerges"
 )
 ```
@@ -537,7 +539,7 @@ plot_pca_by_polarity(
 ```
 
 ```{r consensus-matrix-example}
-#| fig-cap: "**Table 1.1**: Example structure of the consensus peak matrix."
+#| fig-cap: "**Table 1.1.3.1**: Example structure of the consensus peak matrix."
 #| echo: FALSE
 #| message: FALSE
 #| warning: FALSE
@@ -571,12 +573,133 @@ kable(
   caption = paste0(
     "<span style='white-space: nowrap;'><b>Example structure of the consensus peak matrix.</b></span>",
     "<br>",
-    "Each consensus peak is only present within one mixture (across laboratories), producing many zeros."
+    "<span style='white-space: nowrap;'>",
+    "Each consensus peak is only present within one mixture ",
+    "(across laboratories), producing many zeros.",
+    "</span>",
+    "<br><br>"
   ),
   align = "lccc",
   escape = FALSE
 )
 ```
+
+# Uniform Manifold Approximation and Projection (UMAP)
+UMAP works much better with sparse data, local structures, partial presence/absence and non-linear relationships. It also tends to reveal much clearer biological clusters.
+
+```{r umap-consensus-tic}
+#| fig-cap: "**Figure 1.1.3.1.4**: UMAP projection of Consensus Peaks. Colour = mixture, shape = lab. UMAP preserves local similarity structure in sparse consensus matrices better than PCA, revealing tight mixture-specific clusters across laboratories."
+#| fig-width: 10
+#| fig-height: 6
+
+library(uwot)
+library(dplyr)
+library(ggplot2)
+
+run_umap <- function(pca_list, polarity_label) {
+
+  um <- umap(
+    log1p(pca_list$data),
+    n_neighbors = 10,
+    min_dist = 0.2,
+    metric = "cosine",
+    scale = TRUE
+  )
+
+  data.frame(
+    UMAP1 = um[,1],
+    UMAP2 = um[,2],
+    lab = pca_list$meta$lab,
+    mixture = pca_list$meta$mixture,
+    polarity = polarity_label
+  )
+}
+
+umap_pos <- run_umap(pca_consensus_pos, "Positive")
+umap_neg <- run_umap(pca_consensus_neg, "Negative")
+
+umap_scores <- bind_rows(umap_pos, umap_neg) |>
+  mutate(
+    polarity = factor(polarity,
+                      levels = c("Positive", "Negative"))
+  )
+
+ggplot(
+  umap_scores,
+  aes(x = UMAP1, y = UMAP2,
+      color = mixture,
+      shape = lab)
+) +
+  geom_point(size = 3, alpha = 0.9) +
+  facet_wrap(~polarity) +
+  scale_color_viridis_d(option = "turbo") +
+  guides(color = guide_legend(ncol = 2)) +
+  labs(
+    title = "UMAP: Consensus Peaks",
+    subtitle = "UMAP handles sparse consensus matrices better than PCA",
+    x = "UMAP1",
+    y = "UMAP2",
+    color = "Mixture",
+    shape = "Laboratory"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "right"
+  )
+```
+
+# Presence/absence Heatmap
+This option is convenient for visually illustrating the conceptual problem.
+Here, it is possible to immediately understand that each mixture has its own cluster of peaks and the rest are zeros, which is why PCA fails
+
+```{r heatmap-consensus-presence}
+#| fig-cap: "**Figure 1.1.3.1.5**: Presence/absence heatmap of Consensus Peaks. Each mixture contains a distinct subset of consensus peaks shared across laboratories, producing a highly sparse block-structured matrix."
+#| fig-width: 12
+#| fig-height: 8
+
+library(pheatmap)
+library(dplyr)
+
+# Positive mode example
+consensus_binary <- ifelse(pca_consensus_pos$data > 0, 1, 0)
+
+# Sample annotations
+annotation_df <- data.frame(
+  Mixture = pca_consensus_pos$meta$mixture,
+  Lab = pca_consensus_pos$meta$lab
+)
+
+rownames(annotation_df) <- rownames(consensus_binary)
+
+# Optional: keep only variable peaks
+keep_cols <- colSums(consensus_binary) > 0
+consensus_binary <- consensus_binary[, keep_cols]
+
+ann_colors <- list(
+  Lab = c(
+    afekta = "#E57373",
+    hmgu   = "#64B5F6",
+    icl    = "#81C784",
+    cembio = "#FFD54F"
+  )
+)
+
+# Plot
+pheatmap(
+  consensus_binary,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  show_rownames = FALSE,
+  show_colnames = FALSE,
+  annotation_row = annotation_df,
+  annotation_colors = ann_colors,
+  main = "Consensus Peak Presence/Absence Matrix\nRows = Samples | Columns = Consensus Peaks",
+  border_color = NA
+)
+```
+
+Consensus peak matrices are highly sparse because each consensus feature is only present within a single biological mixture across laboratories. Under this structure, Euclidean PCA becomes dominated by absence patterns and zero inflation. Therefore, non-Euclidean similarity methods better suited for sparse compositional data (UMAP with cosine distance and PCoA using Jaccard distance) were additionally employed.
 
 #### 1.1.3.2 BPC
 
@@ -715,14 +838,14 @@ plot_pca_by_polarity(
 ```
 
 ```{r pca-detected-bpc}
-#| fig-cap: "**Figure 1.1.3.2.2**: PCA of Detected Peaks, Positive and Negative polarity. Colour = mixture, shape = lab. Lab clusters weaken and same-colour points start to group together — feature extraction recovers biological signal."
+#| fig-cap: "**Figure 1.1.3.2.2**: PCA of BPC Detected Peaks, Positive and Negative polarity. Colour = mixture, shape = lab. Lab clusters weaken and same-colour points start to group together — feature extraction recovers biological signal."
 #| fig-width: 12
 #| fig-height: 6
 
 plot_pca_by_polarity(
   pos = pca_scores_df(pca_detect_pos, "Positive"),
   neg = pca_scores_df(pca_detect_neg, "Negative"),
-  title = "PCA: Detected Peaks (Peak-Picked Signal)",
+  title = "PCA: BPC Detected Peaks (Peak-Picked Signal)",
   subtitle = "Shapes disperse, colours begin to group — mixture signal emerges"
 )
 ```
@@ -738,10 +861,12 @@ plot_pca_by_polarity(
   title = "PCA: Consensus Peaks (Cross-Lab Matched Signal)",
   subtitle = "Colours cluster by mixture across all shapes — biology dominates technical variance"
 )
+
+# The PCA of Consensus Peaks in the BPC section is the same as the PCA of Consensus Peaks in the Raw TIC section, given that pca_consensus_pos and pca_consensus_neg have only been able to be constructed from pk_metrics using areaUnderTic (areaUnderBpc was not found)
+
 ```
 
-**Conclusion:** Raw profile data cannot be integrated across labs;
-feature extraction followed by cross-lab matching is required.
+**Conclusion:** Raw profile data cannot be integrated across labs; feature extraction followed by cross-lab matching is required.
 
 ## 1.2 ICC: Full Signal vs Detected Signal
 
@@ -785,12 +910,57 @@ for (pol in c("Positive", "Negative")) {
 }
 ```
 
+```{r icc-computation-afekta-cembio}
+# Raw signal ICC only — Afekta vs Cembio comparison
+
+icc_all_results_afekta_cembio <- data.frame()
+
+for (pol in c("Positive", "Negative")) {
+  for (level in c("Full Signal", "Detected Signal", "Consensus Signal")) {
+
+    data_subset <- metrics_combined |>
+      filter(
+        polarity == pol,
+        data_level == level,
+        lab %in% c("afekta", "cembio")
+      )
+
+    results <- compute_icc(data_subset, "tic")
+
+    if (!all(is.na(data_subset$bpc))) {
+      results <- bind_rows(
+        results,
+        compute_icc(data_subset, "bpc")
+      )
+    }
+
+    results <- results |>
+      mutate(
+        Polarity = pol,
+        Data_Level = level,
+        Metric_Label = case_when(
+          Metric == "tic" ~ "TIC",
+          Metric == "bpc" ~ "BPC",
+          TRUE ~ Metric
+        )
+      )
+
+    icc_all_results_afekta_cembio <- bind_rows(
+      icc_all_results_afekta_cembio,
+      results
+    )
+  }
+}
+```
+
 ### 1.2.2 Peak Detection Impact
 
 #### 1.2.2.1 Raw TIC
 
+##### 1.2.2.1.1 All Labs
+
 ```{r peak-detection-impact-tic}
-#| fig-cap: "**Table 1.2.2.1**: ICC improvement from peak detection (raw TIC) in both positive and negative mode."
+#| fig-cap: "**Table 1.2.2.1.1**: ICC improvement from peak detection (raw TIC) in both positive and negative mode."
 
 icc_comparison_tic <- icc_all_results |>
   filter(Metric == "tic") |>
@@ -803,7 +973,7 @@ knitr::kable(icc_comparison_tic,
 ```
 
 ```{r peak-detection-plot-tic}
-#| fig-cap: "**Figure 1.2.2.1**: Raw TIC ICC across data levels. Peak detection improves ICC on raw TIC. Consensus Signal (matched peaks) achieves ICC = 0.436, far above Full and Detected Signal levels. Consensus peaks reveal the true signal ceiling. Peak matching is the critical bottleneck, not peak detection alone."
+#| fig-cap: "**Figure 1.2.2.1.1**: Raw TIC ICC across data levels. Peak detection improves ICC on raw TIC. Consensus Signal (matched peaks) achieves ICC = 0.436, far above Full and Detected Signal levels. Consensus peaks reveal the true signal ceiling. Peak matching is the critical bottleneck, not peak detection alone."
 
 default_cols <- scales::hue_pal()(3)
 
@@ -834,10 +1004,75 @@ ggplot(icc_all_results |>
   ylim(0, 1)
 ```
 
+##### 1.2.2.1.2 Afekta vs Cembio
+
+```{r peak-detection-impact-tic-afekta-cembio}
+#| fig-cap: "**Table 1.2.2.1.2**: ICC improvement from peak detection (raw TIC) comparing only Afekta and Cembio."
+
+icc_comparison_tic_afekta_cembio <- icc_all_results_afekta_cembio |>
+  filter(Metric == "tic") |>
+  select(Polarity, Data_Level, ICC) |>
+  pivot_wider(names_from = Data_Level, values_from = ICC)
+
+knitr::kable(
+  icc_comparison_tic_afekta_cembio,
+  caption = "ICC improvement from peak detection (raw TIC) — Afekta vs Cembio",
+  digits = 3
+)
+```
+
+```{r}
+#| fig-cap: "**Figure 1.2.2.1.2**: Raw TIC ICC across data levels comparing Afekta vs Cembio only. Consensus Signal achieves substantially higher ICC than Full or Detected Signal, demonstrating that cross-lab matched peaks recover the underlying biological structure."
+
+default_cols <- scales::hue_pal()(3)
+
+custom_cols <- c(
+  "Full Signal" = default_cols[3],
+  "Detected Signal" = default_cols[2],
+  "Consensus Signal" = default_cols[1]
+)
+
+ggplot(
+  icc_all_results_afekta_cembio |>
+    filter(Metric == "tic") |>
+    mutate(
+      Data_Level = factor(
+        Data_Level,
+        levels = c("Full Signal", "Detected Signal", "Consensus Signal")
+      ),
+      Polarity = factor(
+        Polarity,
+        levels = c("Positive", "Negative")
+      )
+    ),
+  aes(x = Polarity, y = ICC, fill = Data_Level)
+) +
+  geom_col(position = "dodge", alpha = 0.8) +
+  geom_text(
+    aes(label = sprintf("%.3f", ICC)),
+    position = position_dodge(0.9),
+    vjust = -0.5
+  ) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "red") +
+  scale_fill_manual(values = custom_cols) +
+  labs(
+    title = "Impact of Peak Detection on Reproducibility",
+    subtitle = "Afekta vs Cembio only; Raw TIC (no normalization)",
+    y = "ICC",
+    x = "Polarity",
+    fill = "Processing Level"
+  ) +
+  theme_bw() +
+  theme(legend.position = "top") +
+  ylim(0, 1)
+```
+
 #### 1.2.2.2 BPC
 
+##### 1.2.2.2.1 All Labs 
+
 ```{r peak-detection-impact-bpc}
-#| fig-cap: "**Table 1.2.2.2**: ICC improvement from peak detection (BPC) in both positive and negative mode."
+#| fig-cap: "**Table 1.2.2.2.1**: ICC improvement from peak detection (BPC) in both positive and negative mode."
 
 icc_comparison_tic <- icc_all_results |>
   filter(Metric == "bpc") |>
@@ -850,7 +1085,7 @@ knitr::kable(icc_comparison_tic,
 ```
 
 ```{r peak-detection-plot-bpc}
-#| fig-cap: "**Figure 1.2.2.2**: BPC ICC across data levels. Peak detection improves ICC on BPC. Consensus Signal (matched peaks) achieves ICC = 0.441, far above Full and Detected Signal levels. Consensus peaks reveal the true signal ceiling. Peak matching is the critical bottleneck, not peak detection alone."
+#| fig-cap: "**Figure 1.2.2.2.1**: BPC ICC across data levels. Peak detection improves ICC on BPC. Consensus Signal (matched peaks) achieves ICC = 0.441, far above Full and Detected Signal levels. Consensus peaks reveal the true signal ceiling. Peak matching is the critical bottleneck, not peak detection alone."
 
 default_cols <- scales::hue_pal()(3)
 
@@ -876,6 +1111,69 @@ ggplot(icc_all_results |>
   labs(title = "Impact of Peak Detection on Reproducibility",
        subtitle = "BPC (no normalization); dashed = 0.5 threshold",
        y = "ICC", x = "Polarity", fill = "Processing Level") +
+  theme_bw() +
+  theme(legend.position = "top") +
+  ylim(0, 1)
+```
+
+##### 1.2.2.2.2 Afekta vs Cembio
+
+```{r peak-detection-impact-bpc-afekta-cembio}
+#| fig-cap: "**Table 1.2.2.2.2**: ICC improvement from peak detection (BPC) comparing only Afekta and Cembio."
+
+icc_comparison_bpc_afekta_cembio <- icc_all_results_afekta_cembio |>
+  filter(Metric == "bpc") |>
+  select(Polarity, Data_Level, ICC) |>
+  pivot_wider(names_from = Data_Level, values_from = ICC)
+
+knitr::kable(
+  icc_comparison_bpc_afekta_cembio,
+  caption = "ICC improvement from peak detection (BPC) — Afekta vs Cembio",
+  digits = 3
+)
+```
+
+```{r}
+#| fig-cap: "**Figure 1.2.2.2.2**: BPC ICC across data levels comparing Afekta vs Cembio only. Consensus Signal achieves substantially higher ICC than Full or Detected Signal, demonstrating that cross-lab matched peaks recover the underlying biological structure."
+
+default_cols <- scales::hue_pal()(3)
+
+custom_cols <- c(
+  "Full Signal" = default_cols[3],
+  "Detected Signal" = default_cols[2],
+  "Consensus Signal" = default_cols[1]
+)
+
+ggplot(
+  icc_all_results_afekta_cembio |>
+    filter(Metric == "bpc") |>
+    mutate(
+      Data_Level = factor(
+        Data_Level,
+        levels = c("Full Signal", "Detected Signal", "Consensus Signal")
+      ),
+      Polarity = factor(
+        Polarity,
+        levels = c("Positive", "Negative")
+      )
+    ),
+  aes(x = Polarity, y = ICC, fill = Data_Level)
+) +
+  geom_col(position = "dodge", alpha = 0.8) +
+  geom_text(
+    aes(label = sprintf("%.3f", ICC)),
+    position = position_dodge(0.9),
+    vjust = -0.5
+  ) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "red") +
+  scale_fill_manual(values = custom_cols) +
+  labs(
+    title = "Impact of Peak Detection on Reproducibility",
+    subtitle = "Afekta vs Cembio only; BPC (no normalization)",
+    y = "ICC",
+    x = "Polarity",
+    fill = "Processing Level"
+  ) +
   theme_bw() +
   theme(legend.position = "top") +
   ylim(0, 1)
