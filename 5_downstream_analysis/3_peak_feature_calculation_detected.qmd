@@ -124,7 +124,7 @@ group_sample <- function(pt_all, sample_id,
   mz_vec <- sub$mz
   rt_vec <- sub$rt
 
-  cap  <- 1024L
+  cap  <- 1024L # what is this cap ? 
   from <- integer(cap); to <- integer(cap); k <- 0L
 
   for (i in seq_len(n - 1)) {

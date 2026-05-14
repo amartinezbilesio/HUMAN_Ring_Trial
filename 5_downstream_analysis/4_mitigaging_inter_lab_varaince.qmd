@@ -172,7 +172,7 @@ metrics_combined <- bind_rows(metrics_full, metrics_detect, metrics_consensus)
 Progression Full → Detected → Consensus tests whether computational processing
 progressively removes technical variance.
 
-```{r, echo=FALSE, out.width="50%"}
+```{r, echo=FALSE, out.width="50%", eval = FALSE}
 #| fig-cap: "**Graphical Abstract**: Progressive refinement of the TIC from Full Signal to Detected Signal to Consensus Signal."
 knitr::include_graphics("C:/Users/amart/Desktop/HUMAN Ring Trial/HUMAN_Ring_Trial-main/HUMAN_Ring_Trial-main/5_downstream_analysis/FullSignal_DetectedSignal_ConsensusSignal.png")
 ```
@@ -589,11 +589,11 @@ kable(
 prepare_pca_data <- function(data_level = "full", polarity = "Positive") {
   if (data_level == "full") {
     # Load full signal data
-    load(file.path(base_path, "data/bpc_full.RData"))
+    load(file.path(base_path, "object/bpc_full.RData"))
     chr_data <- bpc_full[bpc_full$polarity == ifelse(polarity == "Positive", 1, 0)]
   } else {
     # Load detected signal data
-    load(file.path(base_path, "data/bpc_detect.RData"))
+    load(file.path(base_path, "object/bpc_detect.RData"))
     chr_data <- bpc_detect[bpc_detect$polarity == ifelse(polarity == "Positive", 1, 0)]
   }
 
@@ -1159,7 +1159,7 @@ ICL: Q1 +0.24 → Q4 −0.78 (positive). Cembio: Q3 +1.55 log2 deviation (negati
 
 ```{r sensitivity-profile-bpc}
 compute_consortium_sensitivity <- function(polarity) {
-  load(file.path(base_path, "data/bpc_detect.RData"))
+  load(file.path(base_path, "object/bpc_detect.RData"))
   bpc_data <- bpc_detect[bpc_detect$polarity == polarity]
   breaks <- quantile(unlist(rtime(bpc_data)),
                      probs = seq(0, 1, 0.25), na.rm = TRUE)
