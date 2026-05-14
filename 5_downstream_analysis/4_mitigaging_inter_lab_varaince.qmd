@@ -639,7 +639,7 @@ pca_detect_neg <- prepare_pca_data("detect", "Negative")
 # Filter to one polarity at a time — consensus_ids are disjoint across polarities
 # and the two modes have different intensity scales.
 pk_metrics <- read.csv(file.path(base_path,
-                                 "data/peak_metrics_detected_all4labs.csv"))
+                                 "object/peak_metrics_detected_all4labs.csv"))
 
 prepare_pca_consensus <- function(polarity_int) {
   wide <- pk_metrics |>
@@ -2161,6 +2161,7 @@ intensity reproducibility.
 
 ```{r abundance-correlation}
 LABS <- c("afekta", "cembio", "hmgu", "icl")
+lab_pairs <- combn(LABS, 2, simplify = FALSE)
 
 abund_wide <- pk_metrics |>
   filter(!is.na(polarity_label),
