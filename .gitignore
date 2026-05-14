@@ -1,6 +1,4 @@
 *.mzML
-*.html
-*.png
 *.sqlite
 /standard_mixes_prep
 /example/results
