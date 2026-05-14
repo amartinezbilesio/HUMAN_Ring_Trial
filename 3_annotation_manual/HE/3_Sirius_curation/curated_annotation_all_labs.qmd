@@ -1,0 +1,90 @@
+---
+title: "Curated SIRIUS annotations across labs"
+format: html
+---
+
+The goal here is to create a table with the compound name (adducts separated
+by rows) as rows and the lab as columns; the cell content is the
+`chrom_peak_id`. The input is the `*_curated.xlsx` sheet for each lab.
+
+```{r}
+#| label: setup
+#| message: false
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(stringr)
+library(here)
+library(writexl)
+```
+
+```{r}
+#| label: config
+labs <- c("afekta", "cembio", "hmgu", "icl")
+
+curated_dir <- here("3_annotation_manual", "HE", "3_Sirius_curation")
+output_dir  <- file.path(curated_dir, "results")
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+## Load and unnest
+
+Each curated row carries pipe-separated `chrom_peak_id` and `adduct` values
+of equal length. We split them into one row per (compound, adduct, peak).
+
+```{r}
+#| label: load-curated
+read_curated <- function(lab) {
+    f <- file.path(curated_dir,
+                   paste0(lab, "_lab_annotations_sirius_curated.xlsx"))
+    read_xlsx(f) |>
+        mutate(lab = lab)
+}
+
+curated <- map_dfr(labs, read_curated)
+
+long <- curated |>
+    select(lab, compound = target_ChEBI.name,
+           chrom_peak_id, adduct) |>
+    mutate(chrom_peak_id = str_split(chrom_peak_id, fixed("|")),
+           adduct        = str_split(adduct,        fixed("|"))) |>
+    mutate(n_cp = lengths(chrom_peak_id),
+           n_ad = lengths(adduct))
+
+# Sanity check: lengths must match within each row
+stopifnot(all(long$n_cp == long$n_ad))
+
+long <- long |>
+    select(-n_cp, -n_ad) |>
+    unnest(c(chrom_peak_id, adduct)) |>
+    mutate(across(c(compound, adduct, chrom_peak_id), str_trim))
+```
+
+## Pivot to wide
+
+Rows: compound + adduct. Columns: lab. Values: `chrom_peak_id`
+(collapsed with `,` if more than one peak per cell).
+
+```{r}
+#| label: pivot
+wide <- long |>
+    group_by(compound, adduct, lab) |>
+    summarise(chrom_peak_id = paste(unique(chrom_peak_id), collapse = ","),
+              .groups = "drop") |>
+    pivot_wider(names_from = lab,
+                values_from = chrom_peak_id) |>
+    arrange(compound, adduct)
+
+wide
+```
+
+## Save
+
+```{r}
+#| label: save
+out_file <- file.path(output_dir, "curated_annotation_all_labs.xlsx")
+write_xlsx(wide, out_file)
+out_file
+```
+

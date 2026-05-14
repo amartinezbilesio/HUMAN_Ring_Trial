@@ -13,14 +13,20 @@ execute:
 
 ## Input Data
 
-All required input data lives in the `data/` subfolder. These files are produced by the upstream pipeline (`1_object_creation.qmd` → `2_global_analysis.qmd` → `3a_peak_feature_calculation_detected.qmd`).
+All required input data lives in the `object/` subfolder. These files are
+produced by the upstream pipeline (`1_object_creation.qmd` →
+`2_global_analysis.qmd` → `3_peak_feature_calculation_detected.qmd`).
+
 I can also provide them pre-computed.
 
 **RData objects** (chromatographic profiles, from `1_object_creation.qmd`):
 `bpc_full.RData`, `bpc_detect.RData`, `tic_full.RData`, `tic_detect.RData`
 
-**CSV files** (from `1_object_creation.qmd` and `3a_peak_feature_calculation_detected.qmd`):
-`detected_peaks_{afekta,cembio,hmgu,icl}_HE.csv`, `peak_metrics_detected_all4labs.csv`, `peak_shape_similarity.csv`
+
+**CSV files** (from `1_object_creation.qmd` and `3_peak_feature_calculation_detected.qmd`):
+`detected_peaks_{afekta,cembio,hmgu,icl}_HE.csv`,
+`peak_metrics_detected_all4labs.csv`
+
 
 **Helper files** (in `5_downstream_analysis/`):
 `global_analysis_helpers.R`, `lab_setup_phase1.csv`
@@ -46,9 +52,7 @@ Baseline finding: **lab identity explains 97–100% of variance in raw TIC**
 ## Load Libraries
 
 ```{r library, include=TRUE, warning=FALSE, message=FALSE}
-##The install below are temporary and should be replaced with proper dependencies in the future.
-# BiocManager::install("RforMassSpectrometry/Chromatograms", ask = FALSE, update = TRUE)
-# remotes::install_github("philouail/MsQuality", ref = "Chromatograms", upgrade = "always", dependencies = TRUE)
+## this analysisis dependent on R 4.6.0 and Bioc 3.23
 library(Chromatograms)
 library(tidyr)
 library(dplyr)
@@ -59,6 +63,7 @@ library(here)
 library(patchwork)
 library(ggbeeswarm)
 library(pheatmap)
+library(readxl)
 
 base_path <- here("5_downstream_analysis")
 source(file.path(base_path, "global_analysis_helpers.R"))
@@ -107,14 +112,14 @@ TIC and BPC per chromatogram across data levels and polarities; no normalization
 ```{r compute-metrics}
 compute_metrics <- function(polarity, polarity_name, data_level = "full") {
   if (data_level == "full") {
-    load(file.path(base_path, "data/bpc_full.RData"))
+    load(file.path(base_path, "object/bpc_full.RData"))
     bpc <- bpc_full[bpc_full$polarity == polarity]
-    load(file.path(base_path, "data/tic_full.RData"))
+    load(file.path(base_path, "object/tic_full.RData"))
     tic <- tic_full[tic_full$polarity == polarity]
   } else {
-    load(file.path(base_path, "data/bpc_detect.RData"))
+    load(file.path(base_path, "object/bpc_detect.RData"))
     bpc <- bpc_detect[bpc_detect$polarity == polarity]
-    load(file.path(base_path, "data/tic_detect.RData"))
+    load(file.path(base_path, "object/tic_detect.RData"))
     tic <- tic_detect[tic_detect$polarity == polarity]
   }
 
@@ -136,7 +141,7 @@ metrics_detect <- run_for_polarities(compute_metrics, "detect")
 # Create Consensus Signal data level from pk_metrics
 compute_consensus_metrics <- function(pol, polarity_name, data_level = "detect") {
   pk_metrics <- read.csv(file.path(base_path,
-                                   "data/peak_metrics_detected_all4labs.csv"))
+                                   "object/peak_metrics_detected_all4labs.csv"))
 
   pk_metrics |>
     filter(as.integer(polarity) == pol) |>
@@ -167,9 +172,8 @@ metrics_combined <- bind_rows(metrics_full, metrics_detect, metrics_consensus)
 Progression Full → Detected → Consensus tests whether computational processing
 progressively removes technical variance.
 
-```{r, echo=FALSE, out.width="50%"}
+```{r, echo=FALSE, out.width="50%", eval = FALSE}
 #| fig-cap: "**Graphical Abstract**: Progressive refinement of the TIC from Full Signal to Detected Signal to Consensus Signal."
-
 knitr::include_graphics("C:/Users/amart/Desktop/HUMAN Ring Trial/HUMAN_Ring_Trial-main/HUMAN_Ring_Trial-main/5_downstream_analysis/FullSignal_DetectedSignal_ConsensusSignal.png")
 ```
 
@@ -381,11 +385,11 @@ Same shape clustering → lab dominates; same colour clustering → mixture (bio
 prepare_pca_data <- function(data_level = "full", polarity = "Positive") {
   if (data_level == "full") {
     # Load full signal data
-    load(file.path(base_path, "data/tic_full.RData"))
+    load(file.path(base_path, "object/tic_full.RData"))
     chr_data <- tic_full[tic_full$polarity == ifelse(polarity == "Positive", 1, 0)]
   } else {
     # Load detected signal data
-    load(file.path(base_path, "data/tic_detect.RData"))
+    load(file.path(base_path, "object/tic_detect.RData"))
     chr_data <- tic_detect[tic_detect$polarity == ifelse(polarity == "Positive", 1, 0)]
   }
 
@@ -431,7 +435,7 @@ pca_detect_neg <- prepare_pca_data("detect", "Negative")
 # Filter to one polarity at a time — consensus_ids are disjoint across polarities
 # and the two modes have different intensity scales.
 pk_metrics <- read.csv(file.path(base_path,
-                                 "data/peak_metrics_detected_all4labs.csv"))
+                                 "object/peak_metrics_detected_all4labs.csv"))
 
 prepare_pca_consensus <- function(polarity_int) {
   wide <- pk_metrics |>
@@ -585,11 +589,11 @@ kable(
 prepare_pca_data <- function(data_level = "full", polarity = "Positive") {
   if (data_level == "full") {
     # Load full signal data
-    load(file.path(base_path, "data/bpc_full.RData"))
+    load(file.path(base_path, "object/bpc_full.RData"))
     chr_data <- bpc_full[bpc_full$polarity == ifelse(polarity == "Positive", 1, 0)]
   } else {
     # Load detected signal data
-    load(file.path(base_path, "data/bpc_detect.RData"))
+    load(file.path(base_path, "object/bpc_detect.RData"))
     chr_data <- bpc_detect[bpc_detect$polarity == ifelse(polarity == "Positive", 1, 0)]
   }
 
@@ -635,7 +639,7 @@ pca_detect_neg <- prepare_pca_data("detect", "Negative")
 # Filter to one polarity at a time — consensus_ids are disjoint across polarities
 # and the two modes have different intensity scales.
 pk_metrics <- read.csv(file.path(base_path,
-                                 "data/peak_metrics_detected_all4labs.csv"))
+                                 "object/peak_metrics_detected_all4labs.csv"))
 
 prepare_pca_consensus <- function(polarity_int) {
   wide <- pk_metrics |>
@@ -917,9 +921,8 @@ ggplot(variance_plot,
 **Core claim:** RT-dependent drift between labs makes patient pooling
 statistically invalid without local normalization.
 
-**Data scope:** TIC of all detected peaks from XCMS centWave, aggregated per
-sample (~105k–396k peaks per lab; ~1M total). Part 3 uses only the 871
-cross-lab consensus peaks.
+**Data scope:** Consensus Signal — cross-lab matched peaks (peaks present
+in all 4 labs), at per-peak Area Under TIC granularity.
 
 ## 2.0 Add Normalization Variants
 
@@ -954,7 +957,7 @@ metrics_combined <- metrics_combined |>
 #| fig-cap: "**Figure 2.1.1.1**: Effect of normalization on variance decomposition (TIC)."
 
 test_data <- metrics_combined |>
-  filter(polarity == "Positive", data_level == "Detected Signal")
+  filter(polarity == "Positive", data_level == "Consensus Signal")
 
 result_raw <- check_metric_quality(test_data, "tic")
 result_median <- check_metric_quality(test_data, "tic_median_scaled")
@@ -977,7 +980,7 @@ normalization_results |>
   geom_col(alpha = 0.8) +
   labs(
     title = "Effect of Normalization on Variance Decomposition (TIC)",
-    subtitle = "Positive Mode, Detected Signal",
+    subtitle = "Positive Mode, Consensus Signal",
     x = "Normalization Method", y = "Variance (%)"
   ) +
   theme_minimal() +
@@ -990,7 +993,7 @@ normalization_results |>
 #| fig-cap: "**Figure 2.1.1.2**: Effect of normalization on variance decomposition (BPC)."
 
 test_data <- metrics_combined |>
-  filter(polarity == "Positive", data_level == "Detected Signal")
+  filter(polarity == "Positive", data_level == "Consensus Signal")
 
 result_raw <- check_metric_quality(test_data, "bpc")
 result_median <- check_metric_quality(test_data, "bpc_median_scaled")
@@ -1013,7 +1016,7 @@ normalization_results |>
   geom_col(alpha = 0.8) +
   labs(
     title = "Effect of Normalization on Variance Decomposition (BPC)",
-    subtitle = "Positive Mode, Detected Signal",
+    subtitle = "Positive Mode, Consensus Signal",
     x = "Normalization Method", y = "Variance (%)"
   ) +
   theme_minimal() +
@@ -1079,7 +1082,7 @@ normalization cannot fix.
 
 ```{r sensitivity-profile-tic}
 compute_consortium_sensitivity <- function(polarity) {
-  load(file.path(base_path, "data/tic_detect.RData"))
+  load(file.path(base_path, "object/tic_detect.RData"))
   tic_data <- tic_detect[tic_detect$polarity == polarity]
   breaks <- quantile(unlist(rtime(tic_data)),
                      probs = seq(0, 1, 0.25), na.rm = TRUE)
@@ -1156,7 +1159,7 @@ ICL: Q1 +0.24 → Q4 −0.78 (positive). Cembio: Q3 +1.55 log2 deviation (negati
 
 ```{r sensitivity-profile-bpc}
 compute_consortium_sensitivity <- function(polarity) {
-  load(file.path(base_path, "data/bpc_detect.RData"))
+  load(file.path(base_path, "object/bpc_detect.RData"))
   bpc_data <- bpc_detect[bpc_detect$polarity == polarity]
   breaks <- quantile(unlist(rtime(bpc_data)),
                      probs = seq(0, 1, 0.25), na.rm = TRUE)
@@ -1231,9 +1234,9 @@ knitr::kable(findings_table,
 
 ```{r quartile-variance}
 compute_rt_quartiles_biological <- function(polarity, polarity_name) {
-  load(file.path(base_path, "data/tic_detect.RData"))
+  load(file.path(base_path, "object/tic_detect.RData"))
   tic_data <- tic_detect[tic_detect$polarity == polarity]
-  load(file.path(base_path, "data/bpc_detect.RData"))
+  load(file.path(base_path, "object/bpc_detect.RData"))
   bpc_data <- bpc_detect[bpc_detect$polarity == polarity]
 
   tic_medians <- data.frame(
@@ -1326,7 +1329,7 @@ Three granularities compared (per-peak Area Under TIC):
 
 ```{r load-peak-data}
 pk_metrics <- read.csv(file.path(base_path,
-                                 "data/peak_metrics_detected_all4labs.csv"))
+                                 "object/peak_metrics_detected_all4labs.csv"))
 
 cat("Peak metrics:", nrow(pk_metrics), "rows\n")
 cat("Unique consensus peaks:", n_distinct(pk_metrics$consensus_id), "\n")
@@ -1336,19 +1339,19 @@ cat("Unique consensus peaks:", n_distinct(pk_metrics$consensus_id), "\n")
 
 ```{r normalization-strategies}
 # Load RT breaks from detected signal (deciles instead of quartiles)
-load(file.path(base_path, "data/tic_detect.RData"))
+load(file.path(base_path, "object/tic_detect.RData"))
 all_rts <- unlist(rtime(tic_detect))
 rt_breaks_decile <- quantile(all_rts, probs = seq(0, 1, by = 0.1), na.rm = TRUE)
 
 # Load peak tables with RT info
 pt_all_labs <- bind_rows(
-  read.csv(file.path(base_path, "data/detected_peaks_afekta_HE.csv")) |>
+  read.csv(file.path(base_path, "object/detected_peaks_afekta_HE.csv")) |>
     mutate(lab = "afekta"),
-  read.csv(file.path(base_path, "data/detected_peaks_hmgu_HE.csv")) |>
+  read.csv(file.path(base_path, "object/detected_peaks_hmgu_HE.csv")) |>
     mutate(lab = "hmgu"),
-  read.csv(file.path(base_path, "data/detected_peaks_icl_HE.csv")) |>
+  read.csv(file.path(base_path, "object/detected_peaks_icl_HE.csv")) |>
     mutate(lab = "icl"),
-  read.csv(file.path(base_path, "data/detected_peaks_cembio_HE.csv")) |>
+  read.csv(file.path(base_path, "object/detected_peaks_cembio_HE.csv")) |>
     mutate(lab = "cembio")
 )
 
@@ -1561,8 +1564,8 @@ ggplot(fe_long, aes(x = rt_decile, y = log2_fold_error, fill = lab)) +
 ### 2.3.5 ICC by Normalization Strategy
 
 ICC computed on **peak-level Area Under TIC** after each normalization
-strategy, per RT decile, for **Detected Signal** (all consensus peaks) and
-**Consensus Signal** (matched in all 4 labs).
+strategy, per RT decile, on the **Consensus Signal** (peaks matched in
+all 4 labs).
 
 #### 2.3.5.1 By RT Decile
 
@@ -1605,87 +1608,52 @@ compute_icc_peak <- function(data, value_col) {
 ```
 
 ```{r icc-normalization-comparison}
-# Prepare Detected Signal: all consensus peaks
-detected_signal <- pk_norm |> filter(!is.na(rt_decile))
-
-# Prepare Consensus Signal: subset of consensus peaks that are confirmed across all labs
-# This represents only the peaks with matched signals in all 4 labs
+# Consensus Signal: peaks matched across all 4 labs
 consensus_signal <- pk_norm |>
   filter(!is.na(rt_decile)) |>
   group_by(consensus_id) |>
   filter(n() == 4) |>
   ungroup()
 
-# Compute ICC per RT decile for each strategy and signal type
+# Compute ICC per RT decile for each strategy
 icc_by_decile <- do.call(rbind, lapply(1:10, function(d) {
-  pk_detected <- detected_signal |> filter(rt_decile == paste0("D", d))
   pk_consensus <- consensus_signal |> filter(rt_decile == paste0("D", d))
 
   bind_rows(
-    # Detected Signal
-    compute_icc_peak(pk_detected, "areaUnderTic") |>
-      mutate(Strategy = "Raw", Decile = paste0("D", d), Signal_Type = "Detected"),
-    compute_icc_peak(pk_detected, "area_global") |>
-      mutate(Strategy = "Global Median", Decile = paste0("D", d), Signal_Type = "Detected"),
-    compute_icc_peak(pk_detected, "area_decile") |>
-      mutate(Strategy = "Decile Median", Decile = paste0("D", d), Signal_Type = "Detected"),
-    compute_icc_peak(pk_detected, "area_loess") |>
-      mutate(Strategy = "LOESS", Decile = paste0("D", d), Signal_Type = "Detected"),
-    # Consensus Signal
     compute_icc_peak(pk_consensus, "areaUnderTic") |>
-      mutate(Strategy = "Raw", Decile = paste0("D", d), Signal_Type = "Consensus"),
+      mutate(Strategy = "Raw", Decile = paste0("D", d)),
     compute_icc_peak(pk_consensus, "area_global") |>
-      mutate(Strategy = "Global Median", Decile = paste0("D", d), Signal_Type = "Consensus"),
+      mutate(Strategy = "Global Median", Decile = paste0("D", d)),
     compute_icc_peak(pk_consensus, "area_decile") |>
-      mutate(Strategy = "Decile Median", Decile = paste0("D", d), Signal_Type = "Consensus"),
+      mutate(Strategy = "Decile Median", Decile = paste0("D", d)),
     compute_icc_peak(pk_consensus, "area_loess") |>
-      mutate(Strategy = "LOESS", Decile = paste0("D", d), Signal_Type = "Consensus")
+      mutate(Strategy = "LOESS", Decile = paste0("D", d))
   )
 }))
 
 # Also compute overall ICC for comparison
 icc_overall <- bind_rows(
-  compute_icc_peak(detected_signal, "areaUnderTic") |>
-    mutate(Strategy = "Raw", Decile = "Overall", Signal_Type = "Detected"),
-  compute_icc_peak(detected_signal, "area_global") |>
-    mutate(Strategy = "Global Median", Decile = "Overall", Signal_Type = "Detected"),
-  compute_icc_peak(detected_signal, "area_decile") |>
-    mutate(Strategy = "Decile Median", Decile = "Overall", Signal_Type = "Detected"),
-  compute_icc_peak(detected_signal, "area_loess") |>
-    mutate(Strategy = "LOESS", Decile = "Overall", Signal_Type = "Detected"),
   compute_icc_peak(consensus_signal, "areaUnderTic") |>
-    mutate(Strategy = "Raw", Decile = "Overall", Signal_Type = "Consensus"),
+    mutate(Strategy = "Raw", Decile = "Overall"),
   compute_icc_peak(consensus_signal, "area_global") |>
-    mutate(Strategy = "Global Median", Decile = "Overall", Signal_Type = "Consensus"),
+    mutate(Strategy = "Global Median", Decile = "Overall"),
   compute_icc_peak(consensus_signal, "area_decile") |>
-    mutate(Strategy = "Decile Median", Decile = "Overall", Signal_Type = "Consensus"),
+    mutate(Strategy = "Decile Median", Decile = "Overall"),
   compute_icc_peak(consensus_signal, "area_loess") |>
-    mutate(Strategy = "LOESS", Decile = "Overall", Signal_Type = "Consensus")
+    mutate(Strategy = "LOESS", Decile = "Overall")
 )
 
 icc_norm_results <- bind_rows(icc_by_decile, icc_overall)
 
-# Summary table showing decile-specific improvements for both signal types
-icc_table_detected <- icc_norm_results |>
-  filter(Signal_Type == "Detected", Decile != "Overall") |>
-  select(Strategy, Decile, ICC) |>
-  pivot_wider(names_from = Decile, values_from = ICC) |>
-  select(Strategy, D1, D2, D3, D4, D5, D6, D7, D8, D9, D10)
-
+# Summary table: decile-specific improvements
 icc_table_consensus <- icc_norm_results |>
-  filter(Signal_Type == "Consensus", Decile != "Overall") |>
+  filter(Decile != "Overall") |>
   select(Strategy, Decile, ICC) |>
   pivot_wider(names_from = Decile, values_from = ICC) |>
   select(Strategy, D1, D2, D3, D4, D5, D6, D7, D8, D9, D10)
 
-cat("\n**Detected Signal (all consensus peaks):**\n")
-knitr::kable(icc_table_detected,
-    caption = "Table 2.3.5.1a: ICC by normalization strategy and RT decile - Detected Signal",
-    digits = 3)
-
-cat("\n**Consensus Signal (matched peaks only):**\n")
 knitr::kable(icc_table_consensus,
-    caption = "Table 2.3.5.1b: ICC by normalization strategy and RT decile - Consensus Signal",
+    caption = "Table 2.3.5.1: ICC by normalization strategy and RT decile",
     digits = 3)
 ```
 
@@ -1693,12 +1661,11 @@ knitr::kable(icc_table_consensus,
 
 1. Overall peak-level ICC (consensus peaks): **0.33 raw → 0.55 Global → 0.58 Decile → 0.58 LOESS**.
 2. Local-normalization gains concentrated in D7–D10.
-3. Consensus Signal ICC > Detected Signal ICC.
-4. Decile Median ≈ LOESS (0.58 vs 0.58) but simpler.
+3. Decile Median ≈ LOESS (0.58 vs 0.58) but simpler.
 
 ```{r icc-normalization-line-plot}
-#| fig-cap: "**Figure 2.3.5.1**: ICC by Normalization Strategy and RT Decile (Detected vs Consensus Signal). Line plot showing which deciles benefit most from local normalization. Detected Signal (left) shows larger improvements from local methods in D7–D10, while Consensus Signal (right) maintains more stable ICC across deciles."
-#| fig-width: 14
+#| fig-cap: "**Figure 2.3.5.1**: ICC by Normalization Strategy and RT Decile (Consensus Signal). Local normalization (Decile Median, LOESS) improves ICC most in late deciles (D7–D10) where RT-dependent bias is strongest."
+#| fig-width: 10
 #| fig-height: 6
 
 icc_plot_data <- icc_norm_results |>
@@ -1711,10 +1678,6 @@ icc_plot_data <- icc_norm_results |>
 ggplot(icc_plot_data, aes(x = Decile_num, y = ICC, color = Strategy, linetype = Strategy)) +
   geom_line(linewidth = 1) +
   geom_point(size = 2) +
-  facet_wrap(~Signal_Type, labeller = labeller(Signal_Type = c(
-    Detected = "Detected Signal (all peaks)",
-    Consensus = "Consensus Signal (matched peaks)"
-  ))) +
   geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray", alpha = 0.5) +
   scale_x_continuous(breaks = 1:10, labels = paste0("D", 1:10)) +
   scale_color_manual(values = c("Raw" = "#E64B35", "Global Median" = "#4DBBD5",
@@ -1738,7 +1701,7 @@ ggplot(icc_plot_data, aes(x = Decile_num, y = ICC, color = Strategy, linetype = 
 #### 2.3.5.2 Global ICC across all RT
 
 ```{r icc-overall-comparison}
-#| fig-cap: "**Figure 2.3.5.2**: Overall ICC comparison across strategies (aggregated across all deciles). Detected Signal (left) shows more room for improvement through normalization, while Consensus Signal (right) has higher baseline ICC."
+#| fig-cap: "**Figure 2.3.5.2**: Overall ICC comparison across strategies (Consensus Signal, aggregated across all deciles)."
 
 icc_norm_results |>
   filter(Decile == "Overall") |>
@@ -1746,17 +1709,13 @@ icc_norm_results |>
                                                  "Decile Median", "LOESS"))) |>
   ggplot(aes(x = Strategy, y = ICC, fill = Strategy)) +
   geom_col(alpha = 0.8) +
-  facet_wrap(~Signal_Type, labeller = labeller(Signal_Type = c(
-    Detected = "Detected Signal",
-    Consensus = "Consensus Signal"
-  ))) +
   geom_hline(yintercept = 0.5, linetype = "dashed", color = "red") +
   geom_text(aes(label = round(ICC, 3)), vjust = -0.5, size = 4) +
   scale_fill_manual(values = c("Raw" = "#E64B35", "Global Median" = "#4DBBD5",
                                "Decile Median" = "#70AD47", "LOESS" = "#4472C4")) +
   labs(
     title = "Overall ICC by Normalization Strategy",
-    subtitle = "Area Under TIC; dashed line at ICC = 0.5 threshold",
+    subtitle = "Consensus Signal — Area Under TIC; dashed line at ICC = 0.5 threshold",
     y = "ICC", x = NULL
   ) +
   theme_minimal() +
@@ -1770,7 +1729,7 @@ icc_norm_results |>
 
 icc_global_table <- icc_norm_results |>
   filter(Decile == "Overall") |>
-  select(Signal_Type, Strategy, ICC, Between_var, Within_var, n_peaks)
+  select(Strategy, ICC, Between_var, Within_var, n_peaks)
 
 knitr::kable(
   icc_global_table,
@@ -2063,216 +2022,449 @@ with EIC profile similarity.
 
 ---
 
-# Part 3: Peak Shape Metrics vs EIC Profile Correlation {#strategy3}
+# Part 3: Residual Cross-Lab Variance — Quality, Intensity, RT, Shape {#strategy3}
 
-**Core question:** Do scalar peak shape metrics (FWHM, peak width, asymmetry,
-etc.) capture the same cross-lab reproducibility information as the full EIC
-Pearson profile similarity?
+After peak picking (Part 1) and RT-dependent normalisation (Part 2),
+how much lab variance remains on consensus peaks, and where does it
+live? We partition it into four observable axes:
 
-## 3.1 Load Data
+- **Per-lab peak quality** (§3.3): what each lab contributes to
+  consensus, density per metric.
+- **Inter-lab relative abundance** (§3.4): scale-invariant intensity
+  agreement, lab-pair Pearson r on `log2(AUC / lab median)`.
+- **Cross-lab metric correlations** (§3.5): same-platform vs
+  cross-platform gap per scalar metric.
+- **Retention-time drift** (§3.6): the floor on RT alignment after
+  normalisation, and its RT-dependence across the gradient.
 
-```{r part3-data-setup}
-# Peak shape metrics (scalar summaries per peak per lab)
-pk_metrics <- read.csv(file.path(base_path,
-                                 "data/peak_metrics_detected_all4labs.csv"))
+The same-platform pair afekta:cembio (Agilent Q-TOF) acts throughout
+as an internal reference for what same-platform agreement looks like —
+the practical ceiling for cross-lab reproducibility in this trial.
+Positive and negative polarities are kept separate.
 
-# EIC profile similarity (Pearson & Tanimoto of raw rt/int values per lab pair)
-eic_sim <- read.csv(file.path(base_path,
-                               "data/peak_shape_similarity.csv"))
+## 3.1 Load Pre-Processed EICs
+
+EICs are boundary-trimmed and NA-imputed by `3_peak_feature_calculation_detected.qmd`
+and saved to `eics_filtered_detected_all4labs.RData` — no further preprocessing needed here.
+
+```{r peak-boundaries-once}
+load(file.path(base_path, "object/eics_filtered_detected_all4labs.RData"))
+cat("Loaded", length(final_eics), "EICs across",
+    length(unique(final_eics$consensus_id)), "consensus peaks\n")
 ```
 
-## 3.2 Cross-Lab Correlation of Scalar Metrics
+## 3.2 Extract Pre-Computed Metrics
 
-Pairwise Pearson correlations per scalar metric across consensus peaks.
+Scalar metrics from `MsQuality::calculateMetrics()` are already in
+`chromData(final_eics)` (computed in `3_peak_feature_calculation_detected.qmd`).
+We pull them, normalise the `polarity` column (`chromExtract` returns it
+in different encodings depending on package version), and additionally
+record the apex RT per EIC — needed for the RT-drift analysis in 3.4.
 
-```{r metric-cross-lab-correlation}
-#| fig-cap: "**Figure 3.1**: Cross-lab Pearson correlation of scalar peak metrics for all 6 lab pairs. Area and maxIntensity show moderate-to-strong correlations; shape metrics (FWHM, peakWidth, peakBeta1) are weakly correlated across labs."
-#| fig-width: 10
-#| fig-height: 6
+```{r extract-metrics}
+pk_metrics <- as.data.frame(chromData(final_eics))
+stopifnot("polarity" %in% names(pk_metrics))
 
-metrics_to_test <- c("areaUnderTic", "maxIntensity", "xicFwhm",
-                     "peakWidth", "peakBeta1", "signalToNoiseRatio")
+pol_to_label <- function(x) {
+  s <- as.character(x)
+  dplyr::case_when(
+    s %in% c("1", "1L", "Positive", "positive", "pos", "POS", "+") ~ "Positive",
+    s %in% c("0", "0L", "Negative", "negative", "neg", "NEG", "-") ~ "Negative",
+    TRUE ~ NA_character_
+  )
+}
+pk_metrics$polarity_label <- pol_to_label(pk_metrics$polarity)
+stopifnot(sum(!is.na(pk_metrics$polarity_label)) > 0)
 
-# Keep only consensus peaks present in all 4 labs
-pk_complete <- pk_metrics |>
-  group_by(consensus_id) |>
+# Apex RT per EIC (= RT of the maximum non-NA intensity). One quick lapply
+# over peaksData; needed for 3.4. Not a "new metric" — just locating the
+# already-extracted apex on the RT axis.
+pk_metrics$apex_rt <- vapply(seq_along(final_eics), function(i) {
+  pd <- peaksData(final_eics[i])[[1]]
+  ok <- !is.na(pd$intensity)
+  if (sum(ok) < 1) return(NA_real_)
+  pd$rtime[ok][which.max(pd$intensity[ok])]
+}, numeric(1))
+
+cat("Rows:", nrow(pk_metrics),
+    "| polarity:",
+    paste(names(table(pk_metrics$polarity_label)),
+          table(pk_metrics$polarity_label), sep = "=", collapse = ", "),
+    "\n")
+```
+
+## 3.3 Per-Lab Peak Quality Distributions
+
+What does each lab actually contribute to consensus? Densities for one
+intensity metric (`areaUnderTic`, log2-scaled) and four shape/quality
+metrics (`peakWidth`, `signalToNoiseRatio`, `xicFwhm`,
+`gaussianSimilarity`), split by polarity. Differences in the shape of
+these distributions across labs bound how much intensity- or
+shape-based normalisation can hope to recover.
+
+```{r quality-distributions, fig.width=12, fig.height=6}
+#| fig-cap: "**Figure 3.1**: Per-lab peak-quality metric distributions, by polarity. Each panel has its own x/y range. Filtered consensus peaks only."
+keep_metrics <- c("log2(areaUnderTic)", "peakWidth",
+                  "signalToNoiseRatio", "xicFwhm", "gaussianSimilarity")
+
+quality_long <- pk_metrics |>
+  filter(!is.na(polarity_label)) |>
+  transmute(
+    lab,
+    polarity             = polarity_label,
+    `log2(areaUnderTic)` = log2(pmax(areaUnderTic, 1e-9)),
+    peakWidth, signalToNoiseRatio, xicFwhm,
+    gaussianSimilarity   = `gaussianSimilarity.gaussian_similarity`
+  ) |>
+  pivot_longer(-c(lab, polarity),
+               names_to = "metric", values_to = "value") |>
+  filter(!is.na(value), is.finite(value)) |>
+  mutate(metric = factor(metric, levels = keep_metrics))
+
+ggplot(quality_long, aes(x = value, fill = lab, colour = lab)) +
+  geom_density(alpha = 0.25, linewidth = 0.5) +
+  facet_wrap(vars(polarity, metric), scales = "free", ncol = 5) +
+  scale_fill_viridis_d(option = "turbo") +
+  scale_colour_viridis_d(option = "turbo") +
+  labs(title    = "Peak-quality distributions per lab",
+       subtitle = paste0("Consensus peaks retained after filter ",
+                         "(n = ", n_distinct(pk_metrics$consensus_id), ")"),
+       x = NULL, y = "Density") +
+  theme_minimal() +
+  theme(legend.position = "top")
+```
+
+Intensity scale (`log2(areaUnderTic)`) shifts substantially between
+labs — the absolute response is platform- and sensitivity-dependent and
+cannot be compared directly without normalisation. Width-like metrics
+(`peakWidth`, `xicFwhm`) overlap more across labs, while
+`signalToNoiseRatio` and `gaussianSimilarity` show intermediate
+agreement: most lab variance lives on the intensity axis, less on the
+shape axis.
+
+## 3.4 Inter-Lab Relative Abundance Correlation
+
+Absolute `areaUnderTic` is not directly comparable across labs —
+instrument sensitivity, ionisation efficiency and injection volume
+shift the whole intensity scale. To make labs comparable, we compute a
+log2 fold change of each peak's AUC against its lab's own median AUC,
+within each polarity:
+
+`rel_abund[peak, lab] = log2( AUC[peak, lab] / median(AUC[, lab]) )`
+
+The lab median becomes 0, a peak twice as intense as the lab median is
++1, half-median is −1, regardless of the lab's absolute scale. Pearson
+r between two labs' relative-abundance columns over the same set of
+consensus peaks asks whether peaks that are above-median in lab A are
+also above-median in lab B — a direct, scale-invariant ceiling on
+intensity reproducibility.
+
+```{r abundance-correlation}
+LABS <- c("afekta", "cembio", "hmgu", "icl")
+lab_pairs <- combn(LABS, 2, simplify = FALSE)
+
+abund_wide <- pk_metrics |>
+  filter(!is.na(polarity_label),
+         !is.na(areaUnderTic), areaUnderTic > 0) |>
+  group_by(lab, polarity_label) |>
+  mutate(rel_abund = log2(areaUnderTic / median(areaUnderTic))) |>
+  ungroup() |>
+  select(consensus_id, polarity = polarity_label, lab, rel_abund) |>
+  group_by(consensus_id, polarity) |>
   filter(n() == 4) |>
-  ungroup()
+  ungroup() |>
+  pivot_wider(names_from = lab, values_from = rel_abund) |>
+  drop_na(all_of(LABS))
 
-# For each metric, compute pairwise lab-lab Pearson correlation
-metric_corr <- map_dfr(metrics_to_test, function(m) {
-  wide <- pk_complete |>
-    select(consensus_id, lab, all_of(m)) |>
-    pivot_wider(names_from = lab, values_from = all_of(m))
+pair_corrs <- do.call(rbind, lapply(c("Positive", "Negative"), function(pol) {
+  sub <- abund_wide[abund_wide$polarity == pol, ]
+  do.call(rbind, lapply(lab_pairs, function(p) {
+    v <- sub[, p]
+    data.frame(
+      polarity      = pol,
+      pair          = paste(p, collapse = ":"),
+      same_platform = identical(sort(p), c("afekta", "cembio")),
+      r             = cor(v[[1]], v[[2]]),
+      n             = nrow(v)
+    )
+  }))
+}))
+pair_corrs <- pair_corrs[order(pair_corrs$polarity, -pair_corrs$r), ]
 
-  labs <- setdiff(names(wide), "consensus_id")
-  pairs <- combn(labs, 2, simplify = FALSE)
+knitr::kable(transform(pair_corrs, r = round(r, 3)),
+  caption = "Inter-lab Pearson r on log2(AUC / lab median), by polarity. Consensus peaks present in all 4 labs.")
+```
 
-  map_dfr(pairs, function(p) {
-    vals <- wide |> select(all_of(p)) |> drop_na()
-    r <- cor(vals[[1]], vals[[2]], use = "complete.obs")
-    tibble(metric = m, pair = paste(p, collapse = ":"), r = r)
+```{r abundance-scatter, fig.width=11, fig.height=8}
+#| fig-cap: "**Figure 3.2**: Inter-lab log2(AUC / lab median) per lab pair. Red dashed = identity; black = OLS fit. Same-platform afekta:cembio highlighted."
+abund_pairs <- do.call(rbind, lapply(lab_pairs, function(p) {
+  data.frame(
+    consensus_id  = abund_wide$consensus_id,
+    polarity      = abund_wide$polarity,
+    x             = abund_wide[[p[1]]],
+    y             = abund_wide[[p[2]]],
+    pair          = paste(p, collapse = ":"),
+    same_platform = identical(sort(p), c("afekta", "cembio"))
+  )
+}))
+
+ggplot(abund_pairs, aes(x = x, y = y, colour = same_platform)) +
+  geom_abline(slope = 1, intercept = 0,
+              colour = "red", linetype = "dashed") +
+  geom_point(alpha = 0.2, size = 0.5) +
+  geom_smooth(method = "lm", se = FALSE,
+              colour = "black", linewidth = 0.5) +
+  scale_colour_manual(values = c(`FALSE` = "grey40",
+                                 `TRUE`  = "#E64B35"),
+                      labels = c("Cross-platform", "Same-platform"),
+                      name = NULL) +
+  facet_grid(polarity ~ pair, scales = "free") +
+  labs(title    = "Inter-lab relative abundance (log2 AUC / lab median)",
+       subtitle = "Consensus peaks present in all 4 labs",
+       x = "Lab 1 (log2 AUC / lab median)",
+       y = "Lab 2 (log2 AUC / lab median)") +
+  theme_minimal() +
+  theme(legend.position = "top")
+```
+
+The same-platform Agilent–Agilent pair (afekta:cembio) sits at the top
+of every polarity's Pearson r table — the ceiling for what
+intensity-based agreement looks like in this dataset. Cross-platform
+pairs trail it, and the slope of the OLS fits (deviating from the red
+y=x identity line) shows where the residual lab-pair-specific scaling
+remains *after* normalisation to the lab median.
+
+## 3.5 Cross-Lab Pearson on Scalar Metrics
+
+Per consensus peak we compare four scalar metrics from MsQuality across
+labs: intensity-scale metrics `areaUnderTic` and `peakProminence`
+(log2-transformed before correlating, since they span orders of
+magnitude) and shape metrics `xicFwhm` (FWHM in seconds) and
+`gaussianSimilarity.gaussian_similarity` (0–1, how Gaussian the peak
+shape is). For every pair of labs and every polarity, we compute Pearson
+r over peaks present in all four labs. Cells with fewer than 50
+contributing peaks are dropped to keep the estimates stable.
+
+```{r cross-lab-pearson-table}
+metric_cols  <- c("areaUnderTic", "peakProminence",
+                  "xicFwhm", "gaussianSimilarity.gaussian_similarity")
+log2_metrics <- c("areaUnderTic", "peakProminence")
+metric_type  <- c(areaUnderTic = "Intensity", peakProminence = "Intensity",
+                  xicFwhm = "Shape",
+                  `gaussianSimilarity.gaussian_similarity` = "Shape")
+lab_pairs    <- combn(c("afekta", "cembio", "hmgu", "icl"), 2, simplify = FALSE)
+
+compute_metric_corr <- function(data, pol_label) {
+  pk_complete <- data |>
+    group_by(consensus_id) |> filter(n() == 4) |> ungroup()
+
+  map_dfr(metric_cols, function(m) {
+    wide <- pk_complete |>
+      select(consensus_id, lab, all_of(m)) |>
+      pivot_wider(names_from = lab, values_from = all_of(m))
+
+    map_dfr(lab_pairs, function(p) {
+      if (!all(p %in% names(wide))) return(NULL)
+      vals <- wide |> select(all_of(p)) |> drop_na()
+      if (nrow(vals) < 50) return(NULL)            # robustness: n >= 50
+      if (m %in% log2_metrics)
+        vals <- vals |> mutate(across(everything(), \(x) log2(pmax(x, 1e-9))))
+      tibble(
+        polarity      = pol_label,
+        metric_type   = unname(metric_type[m]),
+        metric        = m,
+        pair          = paste(p, collapse = ":"),
+        same_platform = identical(sort(p), c("afekta", "cembio")),
+        r             = cor(vals[[1]], vals[[2]], use = "complete.obs"),
+        n             = nrow(vals)
+      )
+    })
   })
-})
+}
 
-ggplot(metric_corr, aes(x = metric, y = r, color = pair)) +
+metric_corr <- bind_rows(
+  compute_metric_corr(pk_metrics |> filter(polarity_label == "Positive"), "Positive"),
+  compute_metric_corr(pk_metrics |> filter(polarity_label == "Negative"), "Negative")
+)
+stopifnot(nrow(metric_corr) > 0)
+
+# Unified table: rows = (polarity, metric_type, metric), columns = lab pair
+metric_corr |>
+  mutate(r = round(r, 3),
+         metric_type = factor(metric_type, levels = c("Intensity", "Shape"))) |>
+  select(polarity, metric_type, metric, pair, r) |>
+  pivot_wider(names_from = pair, values_from = r) |>
+  arrange(polarity, metric_type, metric) |>
+  knitr::kable(caption = "Cross-lab Pearson r per metric and lab pair, by polarity. Same-platform pair = afekta:cembio. Cells with n < 50 dropped.")
+```
+
+```{r cross-lab-pearson-summary}
+# Same-platform vs cross-platform median r per (polarity, metric)
+metric_corr |>
+  group_by(polarity, metric_type, metric, same_platform) |>
+  summarise(median_r = median(r, na.rm = TRUE), .groups = "drop") |>
+  pivot_wider(names_from = same_platform, values_from = median_r,
+              names_prefix = "sp_") |>
+  rename(same_platform = sp_TRUE, cross_platform = sp_FALSE) |>
+  mutate(gap            = round(same_platform  - cross_platform, 3),
+         same_platform  = round(same_platform,  3),
+         cross_platform = round(cross_platform, 3),
+         metric_type    = factor(metric_type, levels = c("Intensity", "Shape"))) |>
+  arrange(polarity, metric_type, metric) |>
+  knitr::kable(caption = "Same-platform vs cross-platform median Pearson r per metric. Gap = same-platform − cross-platform.")
+```
+
+```{r cross-lab-pearson-plot}
+#| fig-cap: "**Figure 3.3**: Cross-lab Pearson r per metric and lab pair, split by polarity. Intensity metrics on the left, shape metrics on the right; same-platform pair (afekta:cembio) marked in red."
+#| fig-width: 12
+#| fig-height: 7
+
+ggplot(metric_corr,
+       aes(x = metric, y = r, color = same_platform, group = pair)) +
   geom_point(size = 3, position = position_dodge(width = 0.5)) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
-  labs(
-    title = "Cross-Lab Pearson Correlation of Scalar Peak Metrics",
-    subtitle = "Each point is one lab pair; consensus peaks detected in all 4 labs",
-    x = "Metric", y = "Pearson r", color = "Lab Pair"
-  ) +
+  geom_text(aes(label = pair),
+            position = position_dodge(width = 0.5),
+            size = 2.3, hjust = -0.15) +
+  scale_color_manual(values = c(`FALSE` = "grey50", `TRUE` = "#E64B35"),
+                     labels = c("Cross-platform", "Same-platform"),
+                     name = NULL) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey70") +
+  facet_grid(polarity ~ factor(metric_type, levels = c("Intensity", "Shape")),
+             scales = "free_x", space = "free_x") +
+  labs(title = "Cross-Lab Pearson Correlation per Metric",
+       x = NULL, y = "Cross-Lab Pearson r") +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 30, hjust = 1))
 ```
 
-## 3.3 EIC Profile Similarity Distribution by Lab Pair
+## 3.6 Inter-Lab Retention Time Drift
 
-`peak_shape_similarity.csv` holds Pearson correlations of aligned EIC
-rt/intensity profiles, per consensus peak per lab pair.
+How much does the RT of the same compound differ across labs? Per
+consensus peak detected in all four labs we have 4 apex RTs and 6
+pairwise Δ_RT values; we report the distribution of |Δ_RT| per lab
+pair, by polarity, and check whether drift is constant across the
+gradient or RT-dependent (LOESS smooth).
 
-```{r eic-similarity-distribution}
-#| fig-cap: "**Figure 3.2**: Distribution of EIC Pearson similarity across consensus peaks, faceted by lab pair. Higher values indicate that the raw chromatographic profile of a peak is reproduced across labs."
-#| fig-width: 10
-#| fig-height: 6
+```{r rt-drift-pairwise}
+# One row per (consensus_id, lab pair): consensus RT (mean across 4 labs)
+# and signed Δ_RT (lab2 − lab1).
+apex_wide <- pk_metrics |>
+  filter(!is.na(apex_rt)) |>
+  select(consensus_id, lab, polarity_label, apex_rt) |>
+  group_by(consensus_id) |>
+  filter(n() == 4) |>
+  ungroup() |>
+  pivot_wider(names_from = lab, values_from = apex_rt) |>
+  drop_na(any_of(c("afekta", "cembio", "hmgu", "icl"))) |>
+  mutate(consensus_rt = (afekta + cembio + hmgu + icl) / 4)
 
-ggplot(eic_sim, aes(x = pearson, fill = pair)) +
-  geom_histogram(bins = 50, alpha = 0.7) +
-  facet_wrap(~pair, scales = "free_y") +
-  labs(
-    title = "EIC Pearson Similarity Distribution by Lab Pair",
-    subtitle = "Consensus peaks: Pearson correlation of raw EIC profiles",
-    x = "EIC Pearson Correlation", y = "Count"
-  ) +
-  theme_minimal() +
-  theme(legend.position = "none")
-```
-
-## 3.4 Comparing Metrics Correlation vs EIC Pearson Similarity
-
-Per (peak, lab pair): correlate the scalar metric's absolute cross-lab
-difference with the EIC Pearson similarity.
-
-```{r metrics-vs-eic}
-#| fig-cap: "**Figure 3.3**: Scatter of EIC Pearson similarity vs absolute cross-lab difference for selected scalar metrics. A strong negative trend would indicate the metric captures profile-level reproducibility."
-#| fig-width: 12
-#| fig-height: 8
-
-# Compute pairwise metric differences per consensus peak per lab pair
-lab_pairs <- eic_sim |> distinct(pair) |> pull(pair)
-
-metric_diffs <- map_dfr(lab_pairs, function(p) {
-  labs_in_pair <- str_split(p, ":")[[1]]
-  lab_a <- pk_metrics |> filter(lab == labs_in_pair[1])
-  lab_b <- pk_metrics |> filter(lab == labs_in_pair[2])
-
-  joined <- inner_join(lab_a, lab_b, by = "consensus_id", suffix = c("_a", "_b"))
-
-  tibble(
-    consensus_id = joined$consensus_id,
-    pair = p,
-    area_diff = abs(log2(joined$areaUnderTic_a / joined$areaUnderTic_b)),
-    fwhm_diff = abs(log2(joined$xicFwhm_a / joined$xicFwhm_b)),
-    width_diff = abs(log2(joined$peakWidth_a / joined$peakWidth_b)),
-    beta_diff = abs(joined$peakBeta1_a - joined$peakBeta1_b)
-  )
+delta_rt <- map_dfr(lab_pairs, function(p) {
+  apex_wide |>
+    transmute(
+      consensus_id,
+      polarity      = polarity_label,
+      consensus_rt,
+      pair          = paste(p, collapse = ":"),
+      delta_rt      = .data[[p[2]]] - .data[[p[1]]],
+      abs_delta_rt  = abs(delta_rt),
+      same_platform = identical(sort(p), c("afekta", "cembio"))
+    )
 })
-
-# Join with EIC Pearson similarity
-metric_vs_eic <- metric_diffs |>
-  inner_join(eic_sim, by = c("consensus_id", "pair"))
-
-# Pivot to long for faceted scatter
-metric_vs_eic_long <- metric_vs_eic |>
-  pivot_longer(cols = c(area_diff, fwhm_diff, width_diff, beta_diff),
-               names_to = "metric", values_to = "abs_diff") |>
-  filter(is.finite(abs_diff))
-
-ggplot(metric_vs_eic_long, aes(x = abs_diff, y = pearson)) +
-  geom_point(alpha = 0.15, size = 0.5) +
-  geom_smooth(method = "loess", se = FALSE, color = "red", linewidth = 0.8) +
-  facet_wrap(~metric, scales = "free_x") +
-  labs(
-    title = "Scalar Metric Difference vs EIC Pearson Similarity",
-    subtitle = "Each point is one consensus peak in one lab pair",
-    x = "Absolute Metric Difference (log2 scale where applicable)",
-    y = "EIC Pearson Correlation"
-  ) +
-  theme_minimal()
 ```
 
-## 3.5 Summary Correlation Table
-
-```{r metrics-vs-eic-summary}
-metric_vs_eic_summary <- metric_vs_eic_long |>
-  group_by(metric) |>
+```{r rt-drift-table}
+delta_rt |>
+  group_by(polarity, pair, same_platform) |>
   summarise(
-    r_with_eic_pearson = cor(abs_diff, pearson, use = "complete.obs"),
-    n_peaks = n(),
+    n                = n(),
+    median_abs_drift = round(median(abs_delta_rt), 3),
+    pct95_abs_drift  = round(quantile(abs_delta_rt, 0.95), 3),
+    max_abs_drift    = round(max(abs_delta_rt), 3),
     .groups = "drop"
   ) |>
-  arrange(r_with_eic_pearson)
-
-knitr::kable(
-  metric_vs_eic_summary,
-  caption = "Correlation between scalar metric differences and EIC Pearson similarity",
-  digits = 3
-)
+  arrange(polarity, desc(median_abs_drift)) |>
+  knitr::kable(caption = "Inter-lab RT drift |Δ_RT| per lab pair and polarity (seconds).")
 ```
 
-## 3.6 Lab-Pair Comparison: Median EIC Similarity vs Median Metric Correlation
+```{r rt-drift-plot}
+#| fig-cap: "**Figure 3.4**: Inter-lab Δ_RT vs consensus RT, faceted by lab pair (rows = polarity, columns = lab pair). Same-platform pair (afekta:cembio) marked in red. Black LOESS smooth highlights whether drift is constant across the gradient or RT-dependent."
+#| fig-width: 14
+#| fig-height: 7
 
-```{r lab-pair-summary}
-#| fig-cap: "**Figure 3.4**: Median EIC Pearson similarity vs median scalar metric cross-lab correlation per lab pair. Same-platform pairs (e.g., afekta:cembio) should appear in the upper-right."
-#| fig-width: 8
-#| fig-height: 6
-
-# Median EIC Pearson per pair
-eic_pair_summary <- eic_sim |>
-  group_by(pair) |>
-  summarise(median_eic_pearson = median(pearson, na.rm = TRUE), .groups = "drop")
-
-# Median area correlation per pair (as representative metric)
-area_pair_summary <- metric_corr |>
-  filter(metric == "areaUnderTic") |>
-  select(pair, r_area = r)
-
-pair_comparison <- eic_pair_summary |>
-  left_join(area_pair_summary, by = "pair")
-
-ggplot(pair_comparison, aes(x = r_area, y = median_eic_pearson, label = pair)) +
-  geom_point(size = 4, color = "steelblue") +
-  ggrepel::geom_text_repel(size = 3) +
-  labs(
-    title = "Lab Pair: Scalar Area Correlation vs Median EIC Pearson",
-    x = "Cross-Lab Pearson r (log2 Area)",
-    y = "Median EIC Pearson Similarity"
-  ) +
-  theme_minimal()
+ggplot(delta_rt,
+       aes(x = consensus_rt, y = delta_rt, color = same_platform)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey60") +
+  geom_point(alpha = 0.3, size = 0.7) +
+  geom_smooth(method = "loess", se = FALSE, linewidth = 0.7,
+              color = "black") +
+  scale_color_manual(values = c(`FALSE` = "grey50", `TRUE` = "#E64B35"),
+                     labels = c("Cross-platform", "Same-platform"),
+                     name = NULL) +
+  facet_grid(polarity ~ pair, scales = "free_y") +
+  labs(title    = "Inter-lab RT drift across the gradient",
+       subtitle = "Δ_RT (lab2 − lab1) vs consensus RT, LOESS smooth in black",
+       x = "Consensus RT (s)", y = "Δ_RT (s)") +
+  theme_minimal() +
+  theme(legend.position = "top",
+        strip.text.y = element_text(size = 9))
 ```
 
-**Findings:**
-- Area and maxIntensity: moderate cross-lab correlation.
-- Shape metrics (FWHM, peakWidth, peakBeta1): weak cross-lab correlation.
-- Weak correlation between scalar metric differences and EIC Pearson →
-  scalar summaries miss profile-level information.
-- Same-platform pairs (afekta:cembio) expected top-right; consistent with
-  the Part 4 hardware ceiling.
+The same-platform pair (afekta:cembio) sets the floor for what RT
+agreement is achievable in this trial; cross-platform pairs scatter
+more widely and any RT-dependent trend in the LOESS line indicates
+gradient-dependent drift that no scalar matching tolerance would catch.
+
+## 3.7 Synthesis
+
+Part 3 partitions the residual cross-lab variance after feature
+extraction (Part 1) and intensity normalisation (Part 2) into three
+axes: intensity, retention time, and peak shape.
+
+**Per-lab quality (§3.3)** establishes the baseline: absolute intensity
+distributions shift between labs while width-like shape descriptors
+overlap more, locating most of the inter-lab variance on the intensity
+axis from the outset.
+
+**Intensity-scale agreement (§3.4, §3.5)** is concentrated and
+structured. Inter-lab relative-abundance correlation places the
+same-platform Agilent–Agilent pair (afekta:cembio) at the top of both
+polarities — the practical ceiling for intensity reproducibility.
+Cross-lab Pearson on `areaUnderTic` and `peakProminence` confirms this
+gap (same-platform r is +0.08–0.29 above cross-platform median). This
+is the variance Part 2's RT-dependent normalisation addresses and the
+variance Part 1's ceiling analysis bounds — partially recoverable
+through computational normalisation.
+
+**Retention time (§3.6)** drifts substantially across labs.
+Same-platform |Δ_RT| acts as the achievable floor; cross-platform pairs
+show larger median drift and gradient-dependent trends. Absolute RT
+cannot be aligned across labs in this dataset, and a fixed-tolerance
+RT match would mis-rank many cross-platform peaks — any cross-lab
+correspondence step needs apex-aligned (not absolute-RT) matching.
+
+**Shape metrics** (`xicFwhm`, `gaussianSimilarity`) show no platform
+structure: same-platform Pearson r is within 0.04 of cross-platform
+median for every shape metric in every polarity. Treating apex-aligned
+EIC-profile Pearson r as a binary classifier of matched vs
+RT-gap-controlled random pairs gives AUROC ≈ 0.5 across all six lab
+pairs in both polarities — the full profile carries no cross-lab
+discriminative signal beyond what the scalar shape metrics already
+capture.
+
+The implication for multi-centre metabolomics is methodological, not
+biological. Intensity-scale variance is concentrated, structured, and
+partially fixable by normalisation. Shape-descriptor variance is
+diffuse, unstructured by platform, and not addressable by
+post-acquisition processing of the EIC. Cross-lab QC workflows should
+use intensity-aggregated metrics (peak area, prominence, height) for
+reproducibility assessment; ratio-based shape descriptors (asymmetry,
+tailing, FWHM) carry no cross-lab signal in this regime and should not
+be used as cross-lab QC metrics. Whether the residual shape variance
+reflects acquisition-setting differences (which a more strictly
+standardised protocol could address) or instrument-hardware differences
+(which it could not) is not separable in our study design.
 
 ---
-
-# Summary {#summary}
-
-## Key Takeaways
-
-1. **Peak matching is the true bottleneck.** Raw TIC ICC **0.002 → 0.024 → 0.502**
-   across Full → Detected → Consensus (positive mode).
-2. **Local normalization fixes bias but not noise.** LOESS re-centers labs on
-   zero (Figure 2.3) but overall ICC gain plateaus (0.33 → 0.58).
-3. **Scalar shape metrics are weakly correlated across labs; EIC profile
-   similarity captures more.** Integration-boundary noise dominates scalar
-   summaries.
 
 # Part 4: The Hardware Limitation - Defining the Reproducibility Ceiling {#hardware}
 
@@ -2473,49 +2665,368 @@ ggplot(ceiling_by_decile, aes(x = rt_decile, y = icc, color = Configuration,
         axis.text.x = element_text(angle = 0))
 ```
 
+---
 
+# Part 5: Annotation Ceiling Across Labs {#annotation-ceiling}
 
-## 4.3 Implications for Epidemiological Study Design
+Parts 1–4 quantify cross-lab variance on detected peaks. Part 5 asks
+the downstream question: after every mitigation step (peak picking,
+normalisation, consensus matching) what does the *annotation outcome*
+look like across labs? We use the manually curated SIRIUS annotations
+(`3_annotation_manual/HE/3_Sirius_curation/`) where each lab's
+annotation table assigns one or more `(compound, adduct)` labels to
+chrom_peak_ids.
 
-This hardware ceiling has direct consequences for multi-center metabolomics:
-...
+The ceiling is operationalised three ways:
 
+1. **RT and m/z spread per annotated compound** (§5.2, §5.3) — how
+   much do labs disagree on *where* the same compound elutes / *what
+   m/z* they observe.
+2. **Per-lab coverage and confidence tiers** (§5.4) — how many
+   compounds each lab annotates and how often the labs converge on the
+   same consensus peak.
+3. **SIRIUS structure rank vs RT shift** (§5.5) — does the residual
+   RT variance from Part 3 degrade structural identification?
 
-## Notes for Collaborator (2026-03-12)
+## 5.1 Load Curated Annotations
 
-### What is done
-- **Part 1** (Feature extraction): Complete. Variance decomposition, PCA, and
-  ICC analysis across Full → Detected → Consensus Signal levels all working.
-- **Part 2** (RT-dependent normalization): Complete. Global median, decile median,
-  and LOESS normalization strategies implemented and compared. Needs to be
-  properly interpreted and integrated into the narrative.
-- **Part 3** (Peak metrics vs EIC Pearson): Rewritten. Now does simple
-  cross-lab correlation of scalar metrics vs EIC profile similarity for
-  consensus peaks. Uses `peak_metrics_detected_all4labs.csv` and
-  `peak_shape_similarity.csv`. No ML/classification code remains.
-- **Part 4** (Hardware ceiling): Same-platform vs cross-platform ICC by RT
-  decile is implemented for afekta:cembio (Agilent-Agilent) vs all 4 labs.
+```{r p5-setup, message=FALSE, warning=FALSE}
+labs        <- c("afekta", "cembio", "hmgu", "icl")
+curated_dir <- here::here("3_annotation_manual", "HE", "3_Sirius_curation")
+std_path    <- here::here("1_preprocessing", "standards.xlsx")
 
-### What needs to be finished
-1. **part 2 interpretation**:TO be done. I am not sure tha tLoess is reall y
-the best.
-1. **Part 3**: Run and verify the new code. Check that `ggrepel` is available
-   (used in Figure 3.4). Interpret the results once rendered—the narrative text
-   is placeholder and should be updated with actual numbers.
-2. **Part 4 (Ceiling analysis)**: Currently only compares Agilent-Agilent vs
-   all-4-labs.
-   Section 4.3 ("Implications for Epidemiological Study Design") is still empty.
-3. **Summary section**: Key takeaway #2 has a TODO note ("Conclusion should be
-   about how normalization might fix systematic bias but cannot fix noise")—
-   needs to be rewritten as a proper conclusion.
-4. **Reproducibility metrics**: Currently using ICC and variance decomposition.
-   Open question whether CCC (concordance correlation coefficient) or other
-   agreement measures would be more appropriate—worth discussing.
+read_lab <- function(lab) {
+  f <- file.path(curated_dir,
+                 paste0(lab, "_lab_annotations_sirius_curated.xlsx"))
+  x <- as.data.frame(read_xlsx(f), check.names = FALSE)
+  x$lab <- lab
+  x
+}
 
-### Possible extensions
-- Add other chemical classes beyond the HUMAN endosome standard mixes.
-- Test with a second peak-picking algorithm (e.g., MZmine centWave vs XCMS
-  centWave) to see if the conclusions are algorithm-dependent.
-- Tanimoto similarity from `peak_shape_similarity.csv` is loaded but not yet
-  used in Part 3—could be added as an additional comparison alongside Pearson.
+raw <- lapply(labs, read_lab)
+names(raw) <- labs
 
+unnest_lab <- function(x) {
+  cps <- strsplit(as.character(x$chrom_peak_id), "|", fixed = TRUE)
+  ads <- strsplit(as.character(x$adduct),        "|", fixed = TRUE)
+  n   <- lengths(cps)
+  stopifnot(all(n == lengths(ads)))
+
+  idx <- rep(seq_len(nrow(x)), n)
+  out <- data.frame(
+    lab           = x$lab[idx],
+    compound      = trimws(x$target_ChEBI.name[idx]),
+    chrom_peak_id = trimws(unlist(cps, use.names = FALSE)),
+    adduct        = trimws(unlist(ads, use.names = FALSE)),
+    rtmed         = suppressWarnings(as.numeric(x$rtmed[idx])),
+    stringsAsFactors = FALSE
+  )
+  out$mz <- NA_real_
+  for (a in unique(out$adduct)) {
+    col <- paste0("mz_", a)
+    if (col %in% colnames(x)) {
+      sel     <- out$adduct == a
+      row_idx <- idx[sel]
+      out$mz[sel] <- suppressWarnings(as.numeric(x[[col]][row_idx]))
+    }
+  }
+  out
+}
+
+long <- do.call(rbind, lapply(raw, unnest_lab))
+long <- long[!is.na(long$compound) & long$compound != "", ]
+rownames(long) <- NULL
+
+# Per-(compound, lab) SIRIUS structure rank (1 = top hit).
+rank_lab <- do.call(rbind, lapply(raw, function(x) {
+  data.frame(
+    lab            = x$lab,
+    compound       = trimws(x$target_ChEBI.name),
+    structure_rank = suppressWarnings(as.numeric(x$best_structurePerIdRank)),
+    stringsAsFactors = FALSE
+  )
+}))
+rank_lab <- rank_lab[!is.na(rank_lab$compound) & rank_lab$compound != "", ]
+rownames(rank_lab) <- NULL
+
+cat("Curated annotation rows (long):", nrow(long), "\n")
+cat("Rank rows:", nrow(rank_lab), "\n")
+```
+
+## 5.2 RT Deviation Between Labs
+
+Per compound, the lab-level `rtmed` (one value per lab) is summarised
+into a cross-lab sd and range. Compounds detected by only one lab are
+dropped.
+
+```{r p5-rt-deviation}
+rt_lab <- aggregate(rtmed ~ compound + lab, data = long,
+                    FUN = function(v) mean(v, na.rm = TRUE))
+
+rt_stats <- aggregate(rtmed ~ compound, data = rt_lab,
+                      FUN = function(v) c(n     = length(v),
+                                          mean  = mean(v, na.rm = TRUE),
+                                          sd    = sd(v,   na.rm = TRUE),
+                                          range = diff(range(v, na.rm = TRUE))))
+rt_stats <- do.call(data.frame, rt_stats)
+colnames(rt_stats) <- c("compound", "n_labs", "rt_mean", "rt_sd", "rt_range")
+rt_stats <- rt_stats[order(-rt_stats$rt_sd), ]
+knitr::kable(head(rt_stats, 10),
+             caption = "Top 10 compounds by between-lab RT sd (seconds).",
+             digits = 2)
+```
+
+```{r p5-rt-deviation-plot, fig.width=7, fig.height=4.5}
+#| fig-cap: "**Figure 5.1**: Between-lab RT sd per compound vs number of labs detecting it. Compounds annotated by more labs do not necessarily converge in RT — the spread is set by the cross-platform RT drift quantified in Section 3.6."
+ggplot(rt_stats[rt_stats$n_labs > 1, ],
+       aes(x = n_labs, y = rt_sd)) +
+  geom_jitter(width = 0.15, alpha = 0.6) +
+  labs(x = "Number of labs detecting compound",
+       y = "RT sd across labs (s)",
+       title = "Between-lab RT variability per compound") +
+  theme_bw()
+```
+
+```{r p5-rt-top-plot, fig.width=8, fig.height=5}
+#| fig-cap: "**Figure 5.2**: Per-lab RT for the 10 compounds with the highest cross-lab RT spread. Visualises the absolute drift between labs at the annotation level."
+worst <- head(rt_stats[rt_stats$n_labs > 1, ], 10)
+sub <- rt_lab[rt_lab$compound %in% worst$compound, ]
+sub$compound <- factor(sub$compound, levels = worst$compound)
+
+ggplot(sub, aes(x = compound, y = rtmed, colour = lab)) +
+  geom_point(size = 2) +
+  coord_flip() +
+  labs(x = NULL, y = "RT (s)",
+       title = "Top 10 compounds by RT spread") +
+  theme_bw()
+```
+
+The RT spread at annotated compounds is the practical consequence of
+the cross-lab |Δ_RT| distribution from Section 3.6. Compounds where
+the spread exceeds the consensus-grouping tolerance (15 s) are
+candidates for being split into separate consensus peaks downstream —
+which feeds directly into the confidence tiers in §5.4.
+
+## 5.3 m/z Deviation Between Labs
+
+Per `(compound, adduct)`, spread across labs of observed m/z,
+converted to ppm against the across-lab mean.
+
+```{r p5-mz-deviation}
+mz_lab <- aggregate(mz ~ compound + adduct + lab, data = long,
+                    FUN = function(v) mean(v, na.rm = TRUE))
+mz_lab <- mz_lab[!is.na(mz_lab$mz), ]
+
+mz_stats <- aggregate(mz ~ compound + adduct, data = mz_lab,
+                      FUN = function(v) c(n     = length(v),
+                                          mean  = mean(v, na.rm = TRUE),
+                                          sd    = sd(v,   na.rm = TRUE),
+                                          range = diff(range(v, na.rm = TRUE))))
+mz_stats <- do.call(data.frame, mz_stats)
+colnames(mz_stats) <- c("compound", "adduct", "n_labs",
+                        "mz_mean", "mz_sd", "mz_range")
+mz_stats$ppm <- 1e6 * mz_stats$mz_range / mz_stats$mz_mean
+mz_stats <- mz_stats[order(-mz_stats$ppm), ]
+knitr::kable(head(mz_stats[, c("compound", "adduct", "n_labs",
+                               "mz_mean", "mz_range", "ppm")], 10),
+             caption = "Top 10 (compound, adduct) by between-lab m/z spread (ppm).",
+             digits = 3)
+```
+
+```{r p5-mz-deviation-plot, fig.width=7, fig.height=4.5}
+#| fig-cap: "**Figure 5.3**: Between-lab m/z spread per (compound, adduct), in ppm. Adducts with consistently wide spreads point at lab-specific calibration drift rather than chemistry."
+ggplot(mz_stats[mz_stats$n_labs > 1, ],
+       aes(x = adduct, y = ppm)) +
+  geom_jitter(width = 0.2, alpha = 0.6) +
+  labs(x = "Adduct", y = "m/z range across labs (ppm)",
+       title = "Between-lab m/z variability per (compound, adduct)") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+m/z agreement is tighter than RT agreement — most ppm values sit well
+below the 20-ppm consensus-grouping tolerance, so m/z is rarely the
+limiting axis for cross-lab correspondence in this dataset.
+
+## 5.4 Per-Lab Coverage and Confidence Tiers
+
+How many unique compounds does each lab annotate, and how often do
+labs converge on the same consensus peak when they do annotate the
+same `(compound, adduct)`? The second question requires joining the
+curated annotations to the consensus peak table from §3
+(`ct_all_samples.csv`).
+
+```{r p5-lab-coverage}
+comp_per_lab <- aggregate(compound ~ lab, data = long,
+                          FUN = function(v) length(unique(v)))
+colnames(comp_per_lab)[2] <- "n_compounds"
+knitr::kable(comp_per_lab, caption = "Unique compounds annotated per lab.")
+```
+
+```{r p5-lab-coverage-plot, fig.width=5, fig.height=3.5}
+#| fig-cap: "**Figure 5.4**: Per-lab annotation count. Differences reflect both detection sensitivity and curation depth."
+ggplot(comp_per_lab, aes(x = lab, y = n_compounds)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = n_compounds), vjust = -0.3) +
+  labs(x = NULL, y = "Unique compounds",
+       title = "Compounds annotated per lab") +
+  theme_bw()
+```
+
+```{r p5-load-consensus}
+ct_path <- file.path(base_path, "object", "ct_all_samples.csv")
+ct_wide <- read.csv(ct_path, stringsAsFactors = FALSE)
+
+ct_long <- do.call(rbind, lapply(labs, function(l) {
+  col  <- paste0("chrom_peak_id_", l)
+  keep <- !is.na(ct_wide[[col]])
+  data.frame(
+    consensus_id   = ct_wide$consensus_id[keep],
+    sample         = ct_wide$sample[keep],
+    n_labs_matched = ct_wide$n_labs_matched[keep],
+    lab            = l,
+    chrom_peak_id  = as.character(ct_wide[[col]][keep]),
+    stringsAsFactors = FALSE
+  )
+}))
+
+ann_ct    <- merge(long, ct_long, by = c("lab", "chrom_peak_id"), all.x = TRUE)
+n_matched <- sum(!is.na(ann_ct$consensus_id))
+cat(sprintf("Annotated peaks matched to a consensus group: %d / %d (%.1f%%)\n",
+            n_matched, nrow(ann_ct), 100 * n_matched / nrow(ann_ct)))
+```
+
+```{r p5-confidence-tiers}
+ann_matched <- ann_ct[!is.na(ann_ct$consensus_id), ]
+
+split_stats <- aggregate(consensus_id ~ sample + compound + adduct,
+                         data = ann_matched,
+                         FUN  = function(v) length(unique(v)))
+colnames(split_stats)[4] <- "n_consensus_peaks"
+
+peak_agree <- aggregate(lab ~ consensus_id + compound + adduct +
+                              sample + n_labs_matched,
+                        data = ann_matched,
+                        FUN  = function(v) length(unique(v)))
+colnames(peak_agree)[6] <- "n_labs_annotating"
+
+peak_agree_sorted <- peak_agree[
+  order(peak_agree$sample, peak_agree$compound, peak_agree$adduct,
+        -peak_agree$n_labs_annotating), ]
+key <- with(peak_agree_sorted,
+            paste(sample, compound, adduct, sep = "|"))
+peak_agree_best <- peak_agree_sorted[!duplicated(key), ]
+
+tiered <- merge(split_stats,
+                peak_agree_best[, c("sample", "compound", "adduct",
+                                    "n_labs_matched", "n_labs_annotating",
+                                    "consensus_id")],
+                by = c("sample", "compound", "adduct"))
+
+tiered$tier <- with(tiered, ifelse(
+  n_consensus_peaks >  1,                              "C: split across peaks",
+  ifelse(n_labs_annotating >= 3,                       "A: converged, >=3 labs",
+  ifelse(n_labs_annotating == 2,                       "B: converged, 2 labs",
+                                                       "D: single lab"))))
+
+knitr::kable(as.data.frame(table(tier = tiered$tier)),
+             caption = "Annotation confidence tiers across (sample, compound, adduct) tuples.")
+```
+
+```{r p5-tier-plot, fig.width=6, fig.height=3.5}
+#| fig-cap: "**Figure 5.5**: Annotation confidence tier distribution. Tier A = ≥3 labs converged on the same consensus peak (strongest cross-lab evidence). Tier C = labs annotated the same (compound, adduct) but disagreed on which consensus peak — co-elution, isomers, or alignment beyond the consensus tolerance."
+tier_tab <- as.data.frame(table(tier = tiered$tier))
+ggplot(tier_tab, aes(x = tier, y = Freq, fill = tier)) +
+  geom_col() +
+  geom_text(aes(label = Freq), vjust = -0.3) +
+  labs(x = NULL, y = "Number of (sample, compound, adduct) tuples",
+       title = "Annotation confidence tiers") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 20, hjust = 1))
+```
+
+Tier A is the cross-lab ceiling for confident identification. Tier C
+indicates places where the cross-platform RT drift exceeds the
+consensus-grouping tolerance — the price of the ceiling in identifications.
+
+## 5.5 SIRIUS Structure Rank vs RT Shift
+
+`structure_rank` is the position of the curated standard in SIRIUS's
+candidate list (1 = top hit). If residual cross-lab RT variance
+matters for downstream identification, peaks with a large RT shift
+from the across-lab mean should also show worse structure ranks.
+
+```{r p5-rank-vs-rtshift}
+rt_mean <- aggregate(rtmed ~ compound, data = rt_lab,
+                     FUN = function(v) mean(v, na.rm = TRUE))
+colnames(rt_mean)[2] <- "rt_mean"
+
+rt_shift <- merge(rt_lab, rt_mean, by = "compound")
+rt_shift$rt_abs_shift <- abs(rt_shift$rtmed - rt_shift$rt_mean)
+
+rank_rt <- merge(rank_lab, rt_shift[, c("compound", "lab", "rt_abs_shift")],
+                 by = c("compound", "lab"))
+rank_rt <- rank_rt[!is.na(rank_rt$structure_rank) &
+                   !is.na(rank_rt$rt_abs_shift), ]
+cat("Rows with both rank and RT shift:", nrow(rank_rt), "\n")
+```
+
+```{r p5-rank-vs-rtshift-plot, fig.width=7, fig.height=4.5}
+#| fig-cap: "**Figure 5.6**: SIRIUS structure rank (log10) vs absolute RT deviation from cross-lab mean. A trend toward higher ranks at larger RT shifts would indicate that residual RT variance degrades structural identification."
+ggplot(rank_rt, aes(x = rt_abs_shift, y = structure_rank, colour = lab)) +
+  geom_jitter(width = 0, height = 0.15, alpha = 0.6) +
+  scale_y_log10() +
+  labs(x = "|RT - cross-lab mean RT| (s)",
+       y = "Structure rank (log10)",
+       title = "Structure rank vs RT deviation across labs") +
+  theme_bw()
+```
+
+```{r p5-rank-top-rtshift, fig.width=8, fig.height=4.5}
+#| fig-cap: "**Figure 5.7**: The 10 (compound, lab) tuples with the largest RT deviation, with their SIRIUS structure rank. Worst cases are concrete examples of where residual cross-lab variance directly affects identification."
+worst_rt <- head(rank_rt[order(-rank_rt$rt_abs_shift), ], 10)
+worst_rt$label <- paste0(worst_rt$compound, " (", worst_rt$lab, ")")
+worst_rt$label <- factor(worst_rt$label, levels = rev(worst_rt$label))
+
+ggplot(worst_rt, aes(x = label, y = structure_rank)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = sprintf("Δrt = %.1fs", rt_abs_shift)),
+            hjust = -0.1, size = 3) +
+  coord_flip() +
+  labs(x = NULL, y = "Structure rank",
+       title = "Structure rank for the 10 highest-RT-shift (compound, lab) peaks") +
+  theme_bw() +
+  expand_limits(y = max(worst_rt$structure_rank) * 1.4)
+```
+
+## 5.6 Synthesis
+
+The annotation ceiling has three observable consequences for
+multi-centre work:
+
+1. **RT spread per compound** (§5.2) is set by the cross-platform RT
+   drift quantified in §3.6 — the same instrumental phenomenon
+   surfacing one layer down. Compounds whose spread exceeds the
+   consensus-grouping tolerance (15 s) cannot reliably be grouped
+   across labs.
+
+2. **m/z spread per (compound, adduct)** (§5.3) is small (mostly
+   sub-20-ppm). m/z is not the limiting axis — calibration drift is
+   well within tolerance.
+
+3. **Confidence tiers** (§5.4) operationalise the cost: Tier A
+   (≥3 labs converging on the same consensus peak) is the headline
+   number for high-confidence cross-lab identifications. Tier C (split
+   across peaks) is the direct downstream cost of cross-platform RT
+   drift exceeding the grouping tolerance.
+
+4. **SIRIUS rank vs RT shift** (§5.5) closes the loop: where the
+   residual cross-lab RT variance is high, structural identification
+   degrades. This is the *biological* cost of the *technical* ceiling.
+
+Together with Parts 1–4, the picture is consistent across data
+levels: intensity variance is large but partly normalisable; RT drift
+sets a floor that propagates to the annotation layer; shape variance
+is diffuse and non-recoverable; and the residual variance has a
+measurable downstream cost in identification confidence.

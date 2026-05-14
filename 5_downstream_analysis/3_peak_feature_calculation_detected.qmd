@@ -41,6 +41,7 @@ library(janitor)
 library(pheatmap)
 library(UpSetR)
 library(MsQuality)
+library(igraph)
 
 base_path <- here::here("5_downstream_analysis")
 source(file.path(base_path, "rt_analysis_function.R"))
@@ -76,18 +77,140 @@ barplot(
 )
 ```
 
+## Method
+
+Correspondence is computed per sample (one mixture × polarity), on
+**all detected peaks** from the four labs (no annotation filter). For
+each sample:
+
+1. Peaks from the four labs are pooled and sorted by m/z.
+2. A graph is built where peaks are nodes and an edge connects two peaks
+   whenever |Δmz| ≤ `PPM_TOL` × m/z × 10⁻⁶ **and** |Δrt| ≤ `RT_TOL` s.
+   The edge list is constructed by a two-pointer sweep over the
+   m/z-sorted peaks.
+3. Connected components of the graph are the consensus peaks; every
+   peak in the same component shares a candidate match with at least one
+   other peak in the component.
+4. When a single lab contributes more than one peak to a component, the
+   peak closest to the centroid (anchored on labs that contribute
+   exactly one peak) is kept, where distance is mz+rt distance
+   normalised by `PPM_TOL` and `RT_TOL`.
+
+Only m/z and RT are used to define correspondence — no FWHM or other
+shape-based information.
+
 ```{r build-consensus-peaks}
-# the table will be generated on the cluster. and loaded below
-# the parameter used for mclosest are: ppm tol = 10 and rt tol = 10
-# Load all consensus_all_sample*.csv files (excluding _edge.csv files)
-consensus_dir <- file.path(base_path, "object/consensus_tables")
-consensus_files <- list.files(consensus_dir,
- pattern = "^consensus_all_sample[0-9]+\\.csv$", full.names = TRUE)
+PPM_TOL <- 20    # m/z tolerance (parts per million)
+RT_TOL  <- 15    # RT tolerance (seconds)
+LABS    <- c("afekta", "hmgu", "icl", "cembio")
 
-ct_all_samples <- do.call(rbind, lapply(consensus_files, read.csv))
-rownames(ct_all_samples) <- NULL
+# Pool peaks from the four labs, tag with lab id, drop NAs in intb.
+pt_all <- rbind(
+  transform(pt_afekta, lab = "afekta"),
+  transform(pt_hmgu,   lab = "hmgu"),
+  transform(pt_icl,    lab = "icl"),
+  transform(pt_cembio, lab = "cembio")
+)
+pt_all <- pt_all[!is.na(pt_all$intb), ]
 
-nrow(ct_all_samples)
+# Per-sample mz+rt graph grouping (two-pointer sweep + connected components)
+group_sample <- function(pt_all, sample_id,
+                         ppm = PPM_TOL, rt_tol = RT_TOL) {
+  sub <- pt_all[pt_all$sample == sample_id, ]
+  sub <- sub[order(sub$mz), ]
+  sub$peak_idx <- seq_len(nrow(sub))
+
+  n      <- nrow(sub)
+  mz_vec <- sub$mz
+  rt_vec <- sub$rt
+
+  cap  <- 1024L # what is this cap ? 
+  from <- integer(cap); to <- integer(cap); k <- 0L
+
+  for (i in seq_len(n - 1)) {
+    tol_i <- mz_vec[i] * ppm * 1e-6
+    j     <- i + 1L
+    while (j <= n && mz_vec[j] - mz_vec[i] <= tol_i) {
+      if (abs(rt_vec[j] - rt_vec[i]) <= rt_tol) {
+        k <- k + 1L
+        if (k > cap) {
+          cap <- cap * 2L
+          length(from) <- cap; length(to) <- cap
+        }
+        from[k] <- i; to[k] <- j
+      }
+      j <- j + 1L
+    }
+  }
+  edges <- data.frame(from = from[seq_len(k)], to = to[seq_len(k)])
+
+  g <- graph_from_data_frame(edges, directed = FALSE,
+                             vertices = data.frame(name = sub$peak_idx))
+  sub$consensus_id <- components(g)$membership
+  sub
+}
+
+corr_cache <- file.path(base_path, "object/correspondence_grouped.rds")
+if (file.exists(corr_cache)) {
+  grouped <- readRDS(corr_cache)
+} else {
+  samples <- sort(unique(pt_all$sample))
+  grouped <- do.call(rbind, lapply(samples, function(s) {
+    g <- group_sample(pt_all, s)
+    g$consensus_id <- paste(s, g$consensus_id, sep = "_")
+    g
+  }))
+  grouped$consensus_id <- as.integer(factor(grouped$consensus_id))
+  saveRDS(grouped, corr_cache)
+}
+cat("Pooled peaks:", nrow(grouped),
+    "in", length(unique(grouped$consensus_id)), "consensus groups\n")
+```
+
+```{r disambiguate-and-build-ct}
+# Disambiguate: when one lab contributes >1 peak to a group, pick the peak
+# closest to the centroid defined by the anchor labs (those contributing
+# exactly one peak).
+disambig <- grouped |>
+  group_by(consensus_id) |>
+  mutate(
+    n_per_lab = ave(seq_along(lab), lab, FUN = length),
+    anchor    = n_per_lab == 1L,
+    ref_mz    = if (any(anchor)) median(mz[anchor]) else median(mz),
+    ref_rt    = if (any(anchor)) median(rt[anchor]) else median(rt),
+    score     = abs(mz - ref_mz) / (ref_mz * PPM_TOL * 1e-6) +
+                abs(rt - ref_rt) / RT_TOL
+  ) |>
+  group_by(consensus_id, lab) |>
+  slice_min(score, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  select(-n_per_lab, -anchor, -ref_mz, -ref_rt, -score, -peak_idx)
+
+# Pivot to wide consensus-table format expected downstream:
+# one row per (sample, consensus_id), one column per lab.
+ct_all_samples <- disambig |>
+  select(sample, consensus_id, lab, chrom_peak_id) |>
+  pivot_wider(
+    id_cols     = c(sample, consensus_id),
+    names_from  = lab,
+    values_from = chrom_peak_id,
+    names_prefix = "chrom_peak_id_"
+  ) |>
+  mutate(
+    idx_afekta = chrom_peak_id_afekta,
+    idx_hmgu   = chrom_peak_id_hmgu,
+    idx_icl    = chrom_peak_id_icl,
+    idx_cembio = chrom_peak_id_cembio,
+    n_labs_matched = (!is.na(chrom_peak_id_afekta)) +
+                    (!is.na(chrom_peak_id_hmgu))   +
+                    (!is.na(chrom_peak_id_icl))    +
+                    (!is.na(chrom_peak_id_cembio))
+  ) |>
+  as.data.frame()
+
+cat("Consensus peaks (any lab count):", nrow(ct_all_samples), "\n")
+cat("Consensus peaks present in all 4 labs:",
+    sum(ct_all_samples$n_labs_matched == 4), "\n")
 ```
 
 
@@ -404,37 +527,35 @@ eics
 ## Compute metrics
 
 
-```{r}
-## need to look into the peakCount before calcualting fwhm.
-metrics <- c(
-  "peakCount",
-  "xicFwhm",
-  "areaUnderTic",
-  "maxIntensity",
-  "baselineIntensity",
-  "signalToNoiseRatio",
-  "peakWidth",
-  "peakBoundary",
-  "peakProminence",
-  "peakBeta"
-)
+```{r compute-metrics}
+# Step 1: peak boundaries — now in Chromatograms, no longer a calculateMetrics metric
+cat("Computing peak boundaries...\n")
+pb <- Chromatograms::peakBoundary(eics)
+cat("peakBoundary columns:", paste(names(pb), collapse = ", "), "\n")
+chromData(eics) <- cbind(chromData(eics), pb)
+
+# Step 2: quality metrics used for filtering and downstream doc-3 analysis
+# Removed: peakBoundary (above), gaussianSimilarity (computed on narrow EICs below)
+# Removed: f = seq_len() — not a valid parameter in current MsQuality
 pk <- calculateMetrics(
   eics,
-  metrics = metrics,
+  metrics = c(
+    "peakCount", "xicFwhm", "maxIntensity",
+    "baselineIntensity", "signalToNoiseRatio",
+    "peakWidth", "peakProminence"
+  ),
   na.rm = TRUE,
   filterEmptyObject = FALSE,
-  f = seq_len(length(eics)),
-  probs = 0.05, # for BAseline intensity,
-  method = "adaptive",  ## might need ot change smooth to 1 bc narrow peaks,
-  minPeakWidth = 3 # in seconds, to avoid too narrow peaks
+  probs = 0.05
 )
 
 chromData(eics) <- cbind(chromData(eics), pk)
+cat("Metrics computed for", length(eics), "EICs\n")
 ```
 
 ## Filter bad peaks
 
-Remove consensus peaks with poor quality metrics in a single step:
+Remove consensus peaks with poor quality metrics in a single step.
 
 ```{r filter-bad-peaks}
 # Consolidate all filtering criteria
@@ -451,61 +572,117 @@ cat("Remaining EICs:", length(eics), "\n")
 cat("Unique consensus IDs:", length(unique(eics$consensus_id)), "\n")
 ```
 
+### Concordant peaks per mixture
+
+```{r concordant-per-mixture, fig.width=10, fig.height=4}
+#| fig-cap: "Number of consensus peaks detected in all 4 labs per mixture (post-filter)."
+mix_counts <- as.data.frame(chromData(eics)) |>
+  distinct(consensus_id, mixture, polarity) |>
+  count(mixture, polarity, name = "n_peaks") |>
+  mutate(polarity = ifelse(polarity == 1L, "Positive", "Negative"))
+
+ggplot(mix_counts, aes(x = mixture, y = n_peaks)) +
+  geom_col(fill = "steelblue", alpha = 0.85) +
+  geom_text(aes(label = n_peaks), vjust = -0.3, size = 3) +
+  facet_wrap(~polarity, ncol = 1, scales = "free_y") +
+  labs(x = "Mixture", y = "Concordant peaks (all 4 labs)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
 ## Re-extract EICs using peak boundaries
 
 ```{r re-extract}
+# NOTE: delete the cached RData below if you want to force re-extraction
+# (necessary after changes to boundary computation or imputation).
+rdata_path <- file.path(base_path, "object/eics_filtered_detected_all4labs.RData")
 
-if (!file.exists(file.path(base_path, "object/eics_filtered_detected_all4labs.RData"))) {
-  final_eics <- lapply(split(eics, seq_len(length(eics))), function(eic) {
-    eic <- filterPeaksData(
-      eic,
-      variables = "rtime",
-      ranges = c(eic$peakBoundary1 - 0.05, eic$peakBoundary2 + 0.05) # add a small margin to ensure we capture the whole peak
-            )
-    eic <- applyProcessing(eic)
-    eic
+if (!file.exists(rdata_path)) {
+  # Trim each EIC to its peak boundaries + small margin, then impute edge NAs.
+  # peakBoundary column names are printed above — adjust if different.
+  final_eics <- lapply(seq_along(eics), function(i) {
+    eic  <- eics[i]
+    rt1  <- eic$left_boundary
+    rt2  <- eic$right_boundary
+    if (is.na(rt1) || is.na(rt2)) return(eic)
+    eic  <- filterPeaksData(eic, variables = "rtime",
+                            ranges = c(rt1 - 0.5, rt2 + 0.5))
+    applyProcessing(eic)
   })
   final_eics <- concatenateChromatograms(final_eics)
-  save(final_eics, file = file.path(base_path,
-  "object/eics_filtered_detected_all4labs.RData"))
+  # Impute residual NAs (boundary edge artefacts from scan-grid misalignment)
+  final_eics <- imputePeaksData(final_eics, method = "linear")
+  save(final_eics, file = rdata_path)
 } else {
-  load(file.path(base_path, "object/eics_filtered_detected_all4labs.RData"))
+  load(rdata_path)
 }
 
-## i want check wether the saame order is kept after the filtering
-all(final_eics$consensus_id == eics$consensus_id) # should be TRUE
+stopifnot(all(final_eics$consensus_id == eics$consensus_id))
+cat("Re-extracted EICs:", length(final_eics), "\n")
+
+# Patch remaining edge NAs — linear imputation cannot fill leading/trailing NAs
+# because there is no boundary value to interpolate toward.  At peak boundaries
+# the signal approaches baseline, so 0 is the appropriate fill value.
+# This block also runs on a loaded cache, so stale objects self-heal.
+n_na <- sum(is.na(unlist(intensity(final_eics))))
+cat("NAs after linear imputation:", n_na, "\n")
+if (n_na > 0) {
+  cat("  -> filling", n_na, "edge NAs with 0 (signal at peak boundary ≈ baseline)...\n")
+  pd <- peaksData(final_eics)
+  pd <- lapply(pd, function(df) {
+    df$intensity[is.na(df$intensity)] <- 0
+    df
+  })
+  peaksData(final_eics) <- pd
+  cat("NAs after 0-fill:", sum(is.na(unlist(intensity(final_eics)))), "\n")
+  save(final_eics, file = rdata_path)  # patch the cache so next load is already clean
+} else {
+  cat("  -> no edge NAs found.\n")
+}
 ```
 
-```{r}
-metrics <- c(
-  "peakCount",
-  "xicFwhm",
-  "areaUnderTic",
-  "maxIntensity",
-  "baselineIntensity",
-  "signalToNoiseRatio",
-  "peakBeta"
-)
+```{r compute-metrics-final}
+# Second metrics round — computed on boundary-trimmed, imputed EICs.
+# Only the three metrics needed by 4_mitigating_inter_lab_variance.qmd.
+# (areaUnderTic and xicFwhm on narrow EICs are more accurate than on wide EICs.)
+# Guard: skip if metrics are already stored in the loaded RData.
+if (!("areaUnderTic" %in% names(chromData(final_eics)))) {
+  cat("Computing tight-EIC metrics (areaUnderTic, xicFwhm, gaussianSimilarity)...\n")
+  pk2 <- calculateMetrics(
+    final_eics,
+    metrics = c("areaUnderTic", "xicFwhm", "gaussianSimilarity"),
+    na.rm = TRUE,
+    filterEmptyObject = FALSE
+  )
+  # Store metrics in chromData(final_eics) so doc 4 can access them after
+  # loading the same RData object it needs for compareChromatograms anyway.
+  chromData(final_eics) <- cbind(chromData(final_eics), pk2)
+  save(final_eics, file = rdata_path)
+  cat("Metrics stored in chromData and RData re-saved.\n")
+} else {
+  cat("Tight-EIC metrics already in chromData — skipping calculateMetrics.\n")
+  pk2 <- as.data.frame(chromData(final_eics))[,
+    intersect(c("areaUnderTic", "xicFwhm",
+                "gaussianSimilarity.gaussian_similarity",
+                "gaussianSimilarity.gaussian_residuals"),
+              names(chromData(final_eics)))
+  ]
+}
 
-## replace the old metrics with the new ones
-pk_filtered <- calculateMetrics(
-  final_eics,
-  metrics = metrics,
-  na.rm = TRUE,
-  filterEmptyObject = FALSE,
-  f = seq_len(length(final_eics)),
-  probs = 0.05, # for BAseline intensity,
-)
-
-## finalise the metric table
-# which columns do i need from eics
-# lab , consensus_id, mixture, polarity, mz, chrom_peak_id, peakWidth,
-# peakBoundary1, peakBoundary2
+# Build the full analysis table for doc-3 analysis: tight-EIC metrics +
+# QC metrics from the first round.
+# left_boundary/right_boundary column names must match what peakBoundary() added.
 pk_filtered <- cbind(
-  chromData(eics)[, c("lab", "consensus_id", "mixture", "polarity", "mz",
-   "chrom_peak_id", "peakWidth", "peakBoundary1", "peakBoundary2")],
-  pk_filtered
+  chromData(eics)[, c(
+    "lab", "consensus_id", "mixture", "polarity", "mz", "chrom_peak_id",
+    "peakCount", "maxIntensity", "baselineIntensity", "signalToNoiseRatio",
+    "peakWidth", "peakProminence", "left_boundary", "right_boundary"
+  )],
+  pk2
 )
+
+cat("pk_filtered columns:", paste(names(pk_filtered), collapse = ", "), "\n")
+cat("Rows:", nrow(pk_filtered), "\n")
 
 write.csv(
   pk_filtered,
@@ -514,632 +691,155 @@ write.csv(
 )
 ```
 
-# Peak Feature analysis
+# Peak Quality Diagnostics
 
-This section analyzes peak metrics to assess inter-laboratory reproducibility
-at the individual peak level. We examine whether peaks with the same
-consensus ID show consistent metrics across labs.
+## Distributions per Lab
 
-## Metric Summary Statistics by Lab
+Per-lab density of one intensity metric (`areaUnderTic`, log2-scaled)
+and four shape/quality metrics (`peakWidth`, `signalToNoiseRatio`,
+`xicFwhm`, `gaussianSimilarity`), shown separately for positive and
+negative polarity. Each panel has its own independent x and y range
+so distributions are not squashed by metrics on a wider scale.
 
-```{r metric-summary}
-metric_summary <- pk_filtered |>
-  group_by(lab) |>
-  summarise(
-    n_peaks = n(),
-    mean_area = mean(areaUnderTic, na.rm = TRUE),
-    median_area = median(areaUnderTic, na.rm = TRUE),
-    mean_fwhm = mean(xicFwhm, na.rm = TRUE),
-    median_fwhm = median(xicFwhm, na.rm = TRUE),
-    mean_snr = mean(signalToNoiseRatio, na.rm = TRUE),
-    median_snr = median(signalToNoiseRatio, na.rm = TRUE),
-    mean_peakwidth = mean(peakWidth, na.rm = TRUE),
-    .groups = "drop"
-  )
+```{r quality-distributions, fig.width=12, fig.height=6}
+#| fig-cap: "Peak-quality metric distributions per lab, by polarity. Each panel has its own x/y range. Filtered consensus peaks only."
+keep_metrics <- c("log2(areaUnderTic)", "peakWidth",
+                  "signalToNoiseRatio", "xicFwhm", "gaussianSimilarity")
 
-knitr::kable(metric_summary,
-             caption = "Peak Metric Summary by Lab",
-             digits = 2)
-```
-
-## Inter-Lab Coefficient of Variation
-
-Compute CV for each consensus peak across all 4 labs:
-
-```{r cv-analysis}
-cv_by_peak <- pk_filtered |>
-  group_by(consensus_id) |>
-  summarise(
-    n_labs = n(),
-    cv_area = sd(areaUnderTic, na.rm = TRUE) / mean(areaUnderTic, na.rm = TRUE),
-    cv_max = sd(maxIntensity, na.rm = TRUE) / mean(maxIntensity, na.rm = TRUE),
-    cv_fwhm = sd(xicFwhm, na.rm = TRUE) / mean(xicFwhm, na.rm = TRUE),
-    cv_peakwidth = sd(peakWidth, na.rm = TRUE) / mean(peakWidth, na.rm = TRUE),
-    cv_snr = sd(signalToNoiseRatio, na.rm = TRUE) / mean(signalToNoiseRatio,
-    na.rm = TRUE),
-    .groups = "drop"
+quality_long <- pk_filtered |>
+  mutate(polarity = ifelse(polarity == 1L, "Positive", "Negative")) |>
+  transmute(
+    lab, polarity,
+    `log2(areaUnderTic)` = log2(areaUnderTic),
+    peakWidth, signalToNoiseRatio, xicFwhm,
+    gaussianSimilarity   = `gaussianSimilarity.gaussian_similarity`
   ) |>
-  filter(n_labs == 4)
+  pivot_longer(-c(lab, polarity),
+               names_to = "metric", values_to = "value") |>
+  filter(!is.na(value), is.finite(value)) |>
+  mutate(metric = factor(metric, levels = keep_metrics))
 
-cat("Consensus peaks with all 4 labs:", nrow(cv_by_peak), "\n\n")
-
-cv_summary <- cv_by_peak |>
-  summarise(
-    across(starts_with("cv_"), list(
-      median = ~median(.x, na.rm = TRUE),
-      mean = ~mean(.x, na.rm = TRUE),
-      q25 = ~quantile(.x, 0.25, na.rm = TRUE),
-      q75 = ~quantile(.x, 0.75, na.rm = TRUE)
-    ))
-  )
-
-# Reshape for display
-cv_table <- data.frame(
-  Metric = c("Area Under TIC", "Max Intensity", "FWHM", "Peak Width", "SNR"),
-  Median_CV = c(cv_summary$cv_area_median, cv_summary$cv_max_median,
-                cv_summary$cv_fwhm_median, cv_summary$cv_peakwidth_median,
-                cv_summary$cv_snr_median),
-  Mean_CV = c(cv_summary$cv_area_mean, cv_summary$cv_max_mean,
-              cv_summary$cv_fwhm_mean, cv_summary$cv_peakwidth_mean,
-              cv_summary$cv_snr_mean),
-  IQR = c(cv_summary$cv_area_q75 - cv_summary$cv_area_q25,
-          cv_summary$cv_max_q75 - cv_summary$cv_max_q25,
-          cv_summary$cv_fwhm_q75 - cv_summary$cv_fwhm_q25,
-          cv_summary$cv_peakwidth_q75 - cv_summary$cv_peakwidth_q25,
-          cv_summary$cv_snr_q75 - cv_summary$cv_snr_q25)
-)
-
-knitr::kable(cv_table,
-             caption = "Inter-Lab CV for Consensus Peaks",
-             digits = 3)
-```
-
-## CV Distribution Visualization
-
-```{r cv-distribution-plot, fig.width=10, fig.height=6}
-cv_long <- cv_by_peak |>
-  pivot_longer(
-    cols = starts_with("cv_"),
-    names_to = "metric",
-    names_prefix = "cv_",
-    values_to = "cv"
-  ) |>
-  mutate(metric = case_when(
-    metric == "area" ~ "Area",
-    metric == "max" ~ "Max Intensity",
-    metric == "fwhm" ~ "FWHM",
-    metric == "peakwidth" ~ "Peak Width",
-    metric == "snr" ~ "SNR"
-  ))
-
-ggplot(cv_long |> filter(!is.na(cv) & cv < 2),
-       aes(x = metric, y = cv, fill = metric)) +
-  geom_violin(trim = FALSE, alpha = 0.6) +
-  geom_boxplot(width = 0.15, fill = "white", outlier.size = 0.5) +
-  geom_hline(yintercept = 0.3, linetype = "dashed", color = "red") +
-  labs(
-    title = "Inter-Lab Coefficient of Variation",
-    subtitle = "For consensus peaks detected in all 4 labs",
-    x = "Metric",
-    y = "CV"
-  ) +
+ggplot(quality_long, aes(x = value, fill = lab, colour = lab)) +
+  geom_density(alpha = 0.25, linewidth = 0.5) +
+  facet_wrap(vars(polarity, metric), scales = "free", ncol = 5) +
+  scale_fill_viridis_d(option = "turbo") +
+  scale_colour_viridis_d(option = "turbo") +
+  labs(title = "Peak-quality distributions per lab",
+       subtitle = paste0("Consensus peaks retained after filter ",
+                         "(n = ", n_distinct(pk_filtered$consensus_id), ")"),
+       x = NULL, y = "Density") +
   theme_minimal() +
-  theme(legend.position = "none")
+  theme(legend.position = "top")
 ```
 
-Shape metrics (FWHM, peak width) show lower CV than intensity metrics,
-suggesting chromatographic behavior is more reproducible than ionization.
+## Inter-Lab Relative Abundance Correlation
 
-Note that CV (standard deviation / mean) is inherently scale-normalized:
-it measures relative spread regardless of absolute intensity differences
-between labs. Normalizing AUC or max intensity beforehand would not
-change the CV values.
+Absolute `areaUnderTic` is not directly comparable across labs —
+instrument sensitivity, ionisation efficiency and injection volume
+shift the whole intensity scale. To make labs comparable, for each
+peak we compute a log2 fold change of its AUC against the lab's
+own median AUC, within each polarity:
 
-## Spearman Correlation with Recalculated Intensities
+`rel_abund[peak, lab] = log2( AUC[peak, lab] / median(AUC[, lab]) )`
 
-We use Spearman (rank-based) correlation rather than Pearson because
-absolute intensity values differ substantially across labs due to
-instrument sensitivity, ionization efficiency, and injection volume.
-Spearman tests whether peaks that are relatively intense in one lab are
-also relatively intense in another — i.e., whether the **rank order** of
-peak intensities is preserved. This makes it robust to the non-linear
-scale differences across labs without requiring explicit normalization.
+The lab median becomes 0, a peak twice as intense as the lab median is
++1, half-median is −1, regardless of the lab's absolute scale.
 
-```{r spearman-recalculated}
-# Pivot to wide format
-intensity_wide <- pk_filtered |>
-  select(consensus_id, lab, areaUnderTic, maxIntensity) |>
-  pivot_wider(
-    id_cols = consensus_id,
-    names_from = lab,
-    values_from = c(areaUnderTic, maxIntensity)
-  )
+For each consensus peak we then have a 4-vector
+`(rel_abund_afekta, rel_abund_cembio, rel_abund_hmgu, rel_abund_icl)`.
+Stacking those vectors across all consensus peaks gives, per lab pair,
+two columns of relative abundances over the same set of peaks.
+**Pearson r between those two columns is the inter-lab relative
+abundance correlation** — it asks whether peaks that are above-median
+in lab A are also above-median in lab B.
 
-# Spearman correlation
-area_cols <- paste0("areaUnderTic_", c("afekta", "hmgu", "icl", "cembio"))
-area_matrix <- intensity_wide[, area_cols]
-names(area_matrix) <- c("afekta", "hmgu", "icl", "cembio")
+Polarities are kept separate because positive and negative AUCs are
+on different scales and would otherwise need their own normalisation.
 
-cor_area <- cor(area_matrix, method = "spearman", use = "pairwise.complete.obs")
-cat("Spearman Correlation - Area Under TIC (Recalculated):\n")
-print(round(cor_area, 3))
-```
+```{r abundance-correlation}
+LABS <- c("afekta", "cembio", "hmgu", "icl")
 
-Afekta and Cembio show the strongest rank correlation (ρ ≈ 0.76),
-consistent with their shared instrument platform. All other pairs are
-moderate (ρ ≈ 0.4–0.5), indicating that relative peak intensity rankings
-are partially conserved across labs but with substantial instrument-
-specific variation.
+abund_wide <- pk_filtered |>
+  mutate(polarity = ifelse(polarity == 1L, "Positive", "Negative")) |>
+  filter(!is.na(areaUnderTic), areaUnderTic > 0) |>
+  group_by(lab, polarity) |>
+  mutate(rel_abund = log2(areaUnderTic / median(areaUnderTic))) |>
+  ungroup() |>
+  select(consensus_id, polarity, lab, rel_abund) |>
+  group_by(consensus_id, polarity) |>
+  filter(n() == 4) |>
+  ungroup() |>
+  pivot_wider(names_from = lab, values_from = rel_abund) |>
+  drop_na(all_of(LABS))
 
-# Peak shape analysis
+lab_pairs <- combn(LABS, 2, simplify = FALSE)
 
-This section examines the actual chromatographic peak profiles to assess
-shape similarity across laboratories using both Pearson correlation and
-Tanimoto similarity (from the `philentropy` package).
-
-**Similarity metrics:**
-
-- **Pearson correlation**: Measures linear relationship between intensity
-  profiles. Sensitive to shape but invariant to scale.
-- **Tanimoto similarity**: Originally for binary data, but can be applied
-  to continuous vectors. More sensitive to differences in peak
-  presence/absence.
-
-## Peak Profile Visualization
-
-```{r shape-example}
-# Plot example consensus peak across all 4 labs
-example_id <- unique(final_eics$consensus_id)[1]
-eic_example <- final_eics[final_eics$consensus_id == example_id]
-
-plotChromatograms(eic_example,
-                  main = paste("Consensus ID:", example_id,
-                               "- Labs:", paste(eic_example$lab,
-                               collapse = ", ")))
-```
-
-## Peak Shape Similarity Function (Pearson + Tanimoto)
-
-Pearson correlation and Tanimoto similarity both require vectors of equal
-length. Peaks from different labs often have different numbers of data
-points (due to scan rate or peak boundary differences). To handle this,
-we interpolate all profiles within a consensus ID to match the length of
-the profile with the most data points. Interpolation uses a normalized
-0–1 x-axis (ignoring absolute RT), so we compare shape only, not
-position.
-
-```{r shape-similarity-function}
-library(philentropy)
-
-compute_shape_similarity <- function(eics_subset) {
-  if (length(eics_subset) < 2) return(NULL)
-
-  labs_present <- eics_subset$lab
-  int_list <- intensity(eics_subset)
-  n_points <- sapply(int_list, length)
-
-  # Use the highest peakCount as the reference length
-  target_n <- max(n_points)
-
-  # Interpolate all profiles to target_n points (0-1 normalized x-axis)
-  interp_matrix <- sapply(seq_along(eics_subset), function(i) {
-    y <- int_list[[i]]
-    y[is.na(y)] <- 0
-    n <- length(y)
-    if (n < 2) return(rep(0, target_n))
-    if (n == target_n) return(y)
-    approx(seq(0, 1, length.out = n), y,
-           xout = seq(0, 1, length.out = target_n))$y
-  })
-  colnames(interp_matrix) <- labs_present
-
-  # Normalize for Tanimoto
-  interp_norm <- apply(interp_matrix, 2, function(x) {
-    x[is.na(x) | x < 0] <- 0
-    s <- sum(x)
-    if (is.na(s) || s == 0) x else x / s
-  })
-
-  pairs <- combn(labs_present, 2, simplify = FALSE)
-
-  results <- lapply(pairs, function(p) {
-    v1 <- interp_matrix[, p[1]]
-    v2 <- interp_matrix[, p[2]]
-
-    # Pearson (NA if flat or contains NAs)
-    sd1 <- sd(v1, na.rm = TRUE)
-    sd2 <- sd(v2, na.rm = TRUE)
-    pearson <- if (is.na(sd1) || is.na(sd2) || sd1 == 0 || sd2 == 0)
-      NA_real_ else cor(v1, v2, method = "pearson", use = "complete.obs")
-
-    # Tanimoto
-    tanimoto <- tryCatch(
-      1 - distance(rbind(interp_norm[, p[1]], interp_norm[, p[2]]),
-                   method = "tanimoto", mute.message = TRUE),
-      error = function(e) NA_real_
-    )
-
+pair_corrs <- do.call(rbind, lapply(c("Positive", "Negative"), function(pol) {
+  sub <- abund_wide[abund_wide$polarity == pol, ]
+  do.call(rbind, lapply(lab_pairs, function(p) {
+    v <- sub[, p]
     data.frame(
-      pair = paste(p, collapse = ":"),
-      pearson = pearson,
-      tanimoto = as.numeric(tanimoto)
+      polarity      = pol,
+      pair          = paste(p, collapse = ":"),
+      same_platform = identical(sort(p), c("afekta", "cembio")),
+      r             = cor(v[[1]], v[[2]]),
+      n             = nrow(v)
     )
-  })
+  }))
+}))
+pair_corrs <- pair_corrs[order(pair_corrs$polarity, -pair_corrs$r), ]
 
-  do.call(rbind, results)
-}
+knitr::kable(transform(pair_corrs, r = round(r, 3)),
+  caption = "Inter-lab Pearson r on log2(AUC / lab median), by polarity. Consensus peaks present in all 4 labs.")
 ```
 
-## Compute Shape Similarities (All Consensus Peaks)
-
-```{r compute-shape-similarities, message=FALSE, warning=FALSE}
-# Compute for all consensus peaks
-all_consensus_ids <- unique(final_eics$consensus_id)
-cat("Computing shape similarities for", length(all_consensus_ids),
-    "consensus peaks...\n")
-
-shape_results <- lapply(all_consensus_ids, function(cid) {
-  eics_subset <- final_eics[final_eics$consensus_id == cid]
-  res <- compute_shape_similarity(eics_subset)
-  if (!is.null(res)) {
-    res$consensus_id <- cid
-  }
-  res
-}) |>
-  do.call(rbind, args = _)
-
-cat("Successfully computed:", nrow(shape_results), "pairwise comparisons\n")
-cat("NA Pearson values:", sum(is.na(shape_results$pearson)), "\n")
-cat("NA Tanimoto values:", sum(is.na(shape_results$tanimoto)), "\n")
-```
-
-## Shape Similarity Summary
-
-```{r shape-summary-table}
-if (!is.null(shape_results) && nrow(shape_results) > 0) {
-  shape_summary <- shape_results |>
-    group_by(pair) |>
-    summarise(
-      n = n(),
-      pearson_median = median(pearson, na.rm = TRUE),
-      pearson_mean = mean(pearson, na.rm = TRUE),
-      pearson_sd = sd(pearson, na.rm = TRUE),
-      tanimoto_median = median(tanimoto, na.rm = TRUE),
-      tanimoto_mean = mean(tanimoto, na.rm = TRUE),
-      tanimoto_sd = sd(tanimoto, na.rm = TRUE),
-      .groups = "drop"
-    )
-
-  knitr::kable(shape_summary,
-               caption = "Peak Shape Similarity by Lab Pair (Pearson & Tanimoto)",
-               digits = 3)
-}
-```
-
-## Peak Count Analysis
-
-Do peaks with more data points produce better quality metrics and higher
-inter-lab reproducibility? We examine two relationships:
-
-1. **Peak count vs quality metrics** — Does higher `peakCount` correlate
-   with better `peakBeta1` (Gaussian fit, 0–1) and `peakBeta2`
-   (signal-to-noise of the beta fit)?
-2. **Peak count vs inter-lab shape agreement** — Do consensus peaks with
-   more data points show higher Pearson/Tanimoto similarity across labs?
-
-### Peak Count vs Quality Metrics
-
-```{r peak-count-quality, fig.width=10, fig.height=5}
-# Per-EIC relationship: peakCount vs quality metrics
-pq <- pk_filtered |>
-  filter(!is.na(peakBeta1), !is.na(peakBeta2))
-
-cat("Spearman cor (peakCount vs peakBeta1):",
-    round(cor(pq$peakCount, pq$peakBeta1,
-              method = "spearman", use = "complete.obs"), 3), "\n")
-cat("Spearman cor (peakCount vs peakBeta2):",
-    round(cor(pq$peakCount, pq$peakBeta2,
-              method = "spearman", use = "complete.obs"), 3), "\n")
-
-p1 <- ggplot(pq, aes(x = peakCount, y = peakBeta1)) +
-  geom_bin2d(bins = 50) +
-  scale_fill_viridis_c(option = "inferno", trans = "log10") +
-  geom_smooth(method = "loess", se = FALSE, color = "red",
-              linewidth = 0.8) +
-  labs(
-    title = "Peak Count vs Peak Beta1",
-    x = "Peak Count (data points)",
-    y = "Peak Beta1 (Gaussian fit, 0\u20131)"
-  ) +
-  theme_minimal()
-
-p2 <- ggplot(pq, aes(x = peakCount, y = peakBeta2)) +
-  geom_bin2d(bins = 50) +
-  scale_fill_viridis_c(option = "inferno", trans = "log10") +
-  geom_smooth(method = "loess", se = FALSE, color = "red",
-              linewidth = 0.8) +
-  labs(
-    title = "Peak Count vs Peak Beta2",
-    x = "Peak Count (data points)",
-    y = "Peak Beta2 (fit SNR)"
-  ) +
-  theme_minimal()
-
-ggarrange(p1, p2, ncol = 2)
-```
-
-The negative Spearman correlation between `peakCount` and `peakBeta1`
-(ρ ≈ −0.40) indicates that peaks with more data points tend to have
-*lower* Gaussian-fit scores. This is expected: broader peaks (more scans)
-deviate more from an ideal Gaussian shape. In contrast, `peakBeta2` shows
-a weak positive correlation (ρ ≈ 0.20), suggesting that more data points
-modestly improve the signal-to-noise of the fit.
-
-### Peak Count vs Inter-Lab Shape Agreement
-
-```{r peak-count-shape, fig.width=10, fig.height=5}
-# Mean peakCount per consensus peak (across labs)
-pc_summary <- pk_filtered |>
-  group_by(consensus_id) |>
-  summarise(
-    mean_peakCount = mean(peakCount, na.rm = TRUE),
-    min_peakCount = min(peakCount, na.rm = TRUE),
-    .groups = "drop"
+```{r abundance-scatter, fig.width=11, fig.height=8}
+#| fig-cap: "Inter-lab log2(AUC / lab median) per lab pair. Red dashed = identity; black = OLS fit. Same-platform afekta:cembio highlighted."
+abund_pairs <- do.call(rbind, lapply(lab_pairs, function(p) {
+  data.frame(
+    consensus_id  = abund_wide$consensus_id,
+    polarity      = abund_wide$polarity,
+    x             = abund_wide[[p[1]]],
+    y             = abund_wide[[p[2]]],
+    pair          = paste(p, collapse = ":"),
+    same_platform = identical(sort(p), c("afekta", "cembio"))
   )
+}))
 
-# Median similarity per consensus peak
-sim_summary <- shape_results |>
-  group_by(consensus_id) |>
-  summarise(
-    median_pearson = median(pearson, na.rm = TRUE),
-    median_tanimoto = median(tanimoto, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-pc_sim <- inner_join(pc_summary, sim_summary, by = "consensus_id") |>
-  filter(!is.na(median_pearson), !is.na(median_tanimoto))
-
-cat("Spearman cor (peakCount vs Pearson):",
-    round(cor(pc_sim$mean_peakCount, pc_sim$median_pearson,
-              method = "spearman", use = "complete.obs"), 3), "\n")
-cat("Spearman cor (peakCount vs Tanimoto):",
-    round(cor(pc_sim$mean_peakCount, pc_sim$median_tanimoto,
-              method = "spearman", use = "complete.obs"), 3), "\n")
-
-p1 <- ggplot(pc_sim, aes(x = mean_peakCount, y = median_pearson)) +
-  geom_bin2d(bins = 50) +
-  scale_fill_viridis_c(option = "inferno", trans = "log10") +
-  geom_smooth(method = "loess", se = FALSE, color = "red",
-              linewidth = 0.8) +
-  labs(
-    title = "Peak Count vs Pearson Correlation",
-    x = "Mean Peak Count (across labs)",
-    y = "Median Pearson (per consensus peak)"
-  ) +
-  theme_minimal()
-
-p2 <- ggplot(pc_sim, aes(x = mean_peakCount, y = median_tanimoto)) +
-  geom_bin2d(bins = 50) +
-  scale_fill_viridis_c(option = "inferno", trans = "log10") +
-  geom_smooth(method = "loess", se = FALSE, color = "red",
-              linewidth = 0.8) +
-  labs(
-    title = "Peak Count vs Tanimoto Similarity",
-    x = "Mean Peak Count (across labs)",
-    y = "Median Tanimoto (per consensus peak)"
-  ) +
-  theme_minimal()
-
-ggarrange(p1, p2, ncol = 2)
+ggplot(abund_pairs, aes(x = x, y = y, colour = same_platform)) +
+  geom_abline(slope = 1, intercept = 0,
+              colour = "red", linetype = "dashed") +
+  geom_point(alpha = 0.2, size = 0.5) +
+  geom_smooth(method = "lm", se = FALSE,
+              colour = "black", linewidth = 0.5) +
+  scale_colour_manual(values = c(`FALSE` = "grey40",
+                                 `TRUE`  = "#E64B35"),
+                      labels = c("Cross-platform", "Same-platform"),
+                      name = NULL) +
+  facet_grid(polarity ~ pair, scales = "free") +
+  labs(title = "Inter-lab relative abundance (log2 AUC / lab median)",
+       subtitle = "Consensus peaks present in all 4 labs",
+       x = "Lab 1 (log2 AUC / lab median)",
+       y = "Lab 2 (log2 AUC / lab median)") +
+  theme_minimal() +
+  theme(legend.position = "top")
 ```
 
-Peak count shows a weak negative correlation with Pearson similarity
-(ρ ≈ −0.19) and essentially no relationship with Tanimoto (ρ ≈ 0.00).
-More data points do not improve — and may slightly worsen — inter-lab
-shape agreement, likely because broader peaks introduce more
-opportunities for shape divergence between instruments.
+## Note on EIC profile correlation
 
-## Pearson Correlation Distribution
-
-The 0.9 threshold is a commonly used cutoff in chromatographic peak
-matching to distinguish high-quality shape agreement from moderate or
-poor matches.
-
-The table below shows, for each lab pair, the percentage of consensus
-peaks where the Pearson correlation exceeds 0.9 — i.e., the fraction of
-peaks with high-quality shape agreement between the two labs.
-
-```{r pearson-distribution, fig.width=10, fig.height=6}
-if (!is.null(shape_results) && nrow(shape_results) > 0) {
-  shape_pearson <- shape_results |> filter(!is.na(pearson))
-
-  pct_above <- shape_pearson |>
-    group_by(pair) |>
-    summarise(
-      n_comparisons = n(),
-      n_above_0.9 = sum(pearson >= 0.9),
-      pct_above_0.9 = round(100 * mean(pearson >= 0.9), 1),
-      .groups = "drop"
-    )
-  knitr::kable(pct_above,
-               caption = "Percentage of consensus peaks with Pearson >= 0.9",
-               col.names = c("Lab Pair", "Total Comparisons",
-                             "N above 0.9", "% above 0.9"))
-
-  ggplot(shape_pearson, aes(x = pearson, fill = pair)) +
-    geom_histogram(bins = 50, alpha = 0.7, color = "white",
-                   linewidth = 0.2) +
-    facet_wrap(~pair, scales = "free_y") +
-    geom_vline(xintercept = 0.9, linetype = "dashed", color = "red") +
-    labs(
-      title = "Pearson Correlation Distribution by Lab Pair",
-      subtitle = "Red dashed line = 0.9 (high-quality shape match)",
-      x = "Pearson Correlation",
-      y = "Count"
-    ) +
-    theme_minimal() +
-    theme(legend.position = "none")
-}
-```
-
-Only 11–20% of consensus peaks reach the 0.9 Pearson threshold depending
-on the lab pair, with afekta:hmgu highest (~20%) and afekta:icl lowest
-(~11%). The distributions are left-skewed with a long tail of poorly
-correlated peaks, suggesting that while many peaks have good shape
-agreement, a substantial fraction diverges across labs.
-
-## Tanimoto Similarity Distribution
-
-```{r tanimoto-distribution, fig.width=10, fig.height=6}
-if (!is.null(shape_results) && nrow(shape_results) > 0) {
-  shape_tanimoto <- shape_results |> filter(!is.na(tanimoto))
-
-  ggplot(shape_tanimoto, aes(x = tanimoto, fill = pair)) +
-    geom_histogram(bins = 50, alpha = 0.7, color = "white", linewidth = 0.2) +
-    facet_wrap(~pair, scales = "free_y") +
-    geom_vline(xintercept = 0.9, linetype = "dashed", color = "red") +
-    labs(
-      title = "Tanimoto Similarity Distribution by Lab Pair",
-      subtitle = "Red dashed line = 0.9 threshold",
-      x = "Tanimoto Similarity",
-      y = "Count"
-    ) +
-    theme_minimal() +
-    theme(legend.position = "none")
-}
-```
-
-Tanimoto distributions are broadly similar across lab pairs, with most
-values clustering between 0.4 and 0.8. The distributions are more
-symmetric than Pearson's, reflecting Tanimoto's sensitivity to absolute
-profile differences rather than just linear correlation.
-
-## Pearson vs Tanimoto Comparison
-
-```{r pearson-vs-tanimoto, fig.width=10, fig.height=6}
-if (!is.null(shape_results) && nrow(shape_results) > 0) {
-  # Filter out rows with NA in either metric
-  shape_complete <- shape_results |>
-    filter(!is.na(pearson), !is.na(tanimoto))
-
-  cat("Complete cases:", nrow(shape_complete), "of", nrow(shape_results),
-      "total comparisons\n")
-  cat("Removed:", nrow(shape_results) - nrow(shape_complete),
-      "rows with NA values\n")
-
-  ggplot(shape_complete, aes(x = pearson, y = tanimoto)) +
-    geom_bin2d(bins = 40) +
-    scale_fill_viridis_c(option = "inferno", trans = "log10",
-                         name = "Count") +
-    geom_abline(slope = 1, intercept = 0, linetype = "dashed",
-                color = "white", linewidth = 0.5) +
-    facet_wrap(~pair) +
-    labs(
-      title = "Pearson vs Tanimoto Similarity",
-      subtitle = "Density heatmap; diagonal = perfect agreement",
-      x = "Pearson Correlation",
-      y = "Tanimoto Similarity"
-    ) +
-    theme_minimal() +
-    coord_cartesian(xlim = c(-0.5, 1), ylim = c(0, 1))
-}
-```
-
-Pearson and Tanimoto generally agree but are not redundant: peaks with
-high Pearson (similar shape) can have moderate Tanimoto (different
-intensity distribution), and vice versa. The two metrics are
-complementary — Pearson captures shape correlation while Tanimoto is
-more sensitive to absolute profile overlap.
-
-## Identify Poorly Matched Peaks
-
-Peaks with low similarity scores may indicate:
-
-- Mismatched consensus assignments
-- Different peak shapes due to co-elution or matrix effects
-- Instrument-specific artifacts
-
-```{r low-similarity-peaks}
-if (!is.null(shape_results) && nrow(shape_results) > 0) {
-  # Find peaks with low Pearson OR low Tanimoto
-  low_similarity <- shape_results |>
-    filter(pearson < 0.7 | tanimoto < 0.7) |>
-    arrange(pearson)
-
-  cat("Peaks with low similarity (Pearson < 0.7 or Tanimoto < 0.7):",
-      nrow(low_similarity), "\n")
-  cat("Unique consensus IDs affected:",
-      length(unique(low_similarity$consensus_id)), "\n\n")
-
-  if (nrow(low_similarity) > 0) {
-    knitr::kable(head(low_similarity, 10),
-                 caption = "Top 10 Lowest Similarity Peaks",
-                 digits = 3)
-  }
-}
-```
-
-## Visualize Low Similarity Example
-
-```{r plot-low-similarity}
-if (!is.null(shape_results) && nrow(shape_results) > 0) {
-  low_sim_ids <- shape_results |>
-    filter(pearson < 0.7) |>
-    pull(consensus_id) |>
-    unique()
-
-  if (length(low_sim_ids) > 0) {
-    # Plot first low similarity example
-    example_low <- final_eics[final_eics$consensus_id == low_sim_ids[1]]
-    plotChromatograms(example_low,
-                      main = paste("Low Similarity Example - Consensus ID:",
-                                   low_sim_ids[1]))
-  }
-}
-```
-
-## Save Shape Similarity Results
-
-```{r save-shape-results}
-if (!is.null(shape_results) && nrow(shape_results) > 0) {
-  write.csv(
-    shape_results,
-    file = file.path(base_path, "object/peak_shape_similarity.csv"),
-    row.names = FALSE
-  )
-  cat("Shape similarity results saved to peak_shape_similarity.csv\n")
-}
-```
-
-## Summary
-
-Key findings from the peak feature and shape analysis:
-
-1. **CV analysis**: Shape metrics (FWHM, peak width) show lower inter-lab
-   CV than intensity metrics, confirming that chromatographic behavior is
-   more reproducible than ionization response.
-2. **Spearman intensity correlation**: Afekta–Cembio show the strongest
-   rank correlation (ρ ≈ 0.76), consistent with their shared platform.
-   Other pairs are moderate (ρ ≈ 0.4–0.5).
-3. **Peak count**: More data points do not improve shape agreement across
-   labs. Broader peaks actually show slightly lower Gaussian-fit scores
-   (peakBeta1), though the fit SNR (peakBeta2) improves modestly.
-4. **Shape similarity**: Median Pearson correlations range from 0.59
-   (hmgu:icl) to 0.73 (afekta:hmgu). Only 11–20% of peaks exceed the
-   0.9 threshold, indicating room for improvement.
-5. **Pearson vs Tanimoto**: The two metrics are complementary — Pearson
-   captures shape correlation while Tanimoto is more sensitive to
-   absolute profile overlap.
+We do **not** compute inter-lab EIC profile correlation (e.g.
+apex-aligned Pearson on the full chromatographic shape) in this
+document. Earlier exploration showed that profile correlation between
+matched consensus peaks is high in absolute terms, but it is **equally
+high against random peaks** drawn from the same sample (AUROC ≈ 0.5
+against an RT-gap-controlled null). A score that does not separate
+matched from non-matched peaks cannot be used for correspondence,
+quality assessment, or any downstream filter — so the metric is
+omitted here.
 
 # Next Steps
 
-1. Peak metrics saved to `peak_metrics_detected_all4labs.csv`
-2. Filtered EICs saved to `eics_filtered_detected_all4labs.RData`
-3. Run Phase 5 in `2_global_analysis.qmd` for full integration
-4. Apply peak-level normalization and recompute ICC
-5. Expand to Afekta–Cembio overlap (50k peaks)
-6. Redo analysis on imputed data using
-   `imputePeaksData(eics, method = "gaussian")`
-
-
-
+1. Peak metrics saved to `object/peak_metrics_detected_all4labs.csv`.
+2. Filtered EICs saved to `object/eics_filtered_detected_all4labs.RData`.
+3. Downstream variance and normalisation analysis continues in
+   `4_mitigating_inter_lab_variance.qmd`.
