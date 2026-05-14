@@ -58,3 +58,7 @@ redner.sh
 *.js
 *.css
 *.woff
+/5_downstream_analysis/3_peak_feature_calculation_detected_files
+/5_downstream_analysis/4_mitigaging_inter_lab_varaince_files
+/5_downstream_analysis/6_annotation_analysis_files
+*.html

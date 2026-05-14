@@ -691,6 +691,76 @@ write.csv(
 )
 ```
 
+## Create Spectra - Consensus Signal (post-filter)
+
+Spectra filtered to the m/z × RT rectangles of the **filtered +
+boundary-trimmed** consensus peaks, per (lab, mixture, polarity)
+sample. Same pattern as `detect_signal()` in
+`rt_analysis_function.R` — `filterPeaksRanges()` keeps only mass peaks
+inside any of that sample's consensus windows.
+
+```{r build-sp-consensus}
+library(Spectra)
+
+if (!file.exists(file.path(base_path, "object/sp_consensus.RData"))) {
+  load(file.path(base_path, "object/sp_full.RData"))
+
+  # Per-(lab, mixture, polarity) consensus peak windows, boundary-trimmed
+  cd <- as.data.frame(chromData(final_eics))
+  cd <- cd[!is.na(cd$left_boundary) & !is.na(cd$right_boundary), ]
+
+  # Match spectra ↔ consensus windows on (lab, mixture, polarity)
+  sp_key <- paste(sp_full$lab, sp_full$mixture, polarity(sp_full), sep = "_")
+  cd_key <- paste(cd$lab, cd$mixture, cd$polarity, sep = "_")
+
+  # Per-sample: filter mass peaks to consensus rectangles, then apply
+  # the lazy processing queue so concatenateSpectra() will accept the
+  # result (mirrors detect_signal() at rt_analysis_function.R:104-117).
+  filtered_list <- lapply(unique(sp_key), function(key) {
+    s <- sp_full[sp_key == key]
+    w <- cd[cd_key == key, , drop = FALSE]
+    if (nrow(w) == 0) {
+      return(Spectra::applyProcessing(s[FALSE]))
+    }
+    s <- Spectra::filterPeaksRanges(
+      s,
+      mz = as.matrix(w[, c("mzMin", "mzMax")]),
+      rtime = as.matrix(w[, c("left_boundary", "right_boundary")]),
+      keep = TRUE
+    )
+    Spectra::applyProcessing(s)
+  })
+  sp_consensus <- lapply(filtered_list, applyProcessing)
+
+  sp_consensus <- concatenateSpectra(sp_consensus)
+  sp_consensus <- filterEmptySpectra(sp_consensus)
+  save(sp_consensus, file = file.path(base_path, "object/sp_consensus.RData"))
+} else {
+  load(file.path(base_path, "object/sp_consensus.RData"))
+}
+```
+
+## Create Total Ion Current (TIC) - Consensus Signal
+
+Same `Chromatograms()` pattern used for `tic_full` / `tic_detect` in
+`1_object_creation.qmd`, applied to `sp_consensus`.
+
+```{r build-tic-consensus}
+if (!file.exists(file.path(base_path, "object/tic_consensus.RData"))) {
+  tic_consensus <- Chromatograms(sp_consensus,
+                                 summarize.method = "sum",
+                                 factorize.by     = "dataOrigin",
+                                 spectraVariables = c("mixture", "lab"))
+  tic_consensus <- setBackend(tic_consensus, ChromBackendMemory())
+  save(tic_consensus,
+       file = file.path(base_path, "object/tic_consensus.RData"))
+} else {
+  load(file.path(base_path, "object/tic_consensus.RData"))
+}
+
+cat("tic_consensus:", length(tic_consensus), "chromatograms\n")
+```
+
 # Peak Quality Diagnostics
 
 ## Distributions per Lab
@@ -841,5 +911,7 @@ omitted here.
 
 1. Peak metrics saved to `object/peak_metrics_detected_all4labs.csv`.
 2. Filtered EICs saved to `object/eics_filtered_detected_all4labs.RData`.
+3. Post-filter consensus Spectra saved to `object/sp_consensus.RData`.
+4. Post-filter consensus TIC saved to `object/tic_consensus.RData`.
 3. Downstream variance and normalisation analysis continues in
    `4_mitigating_inter_lab_variance.qmd`.

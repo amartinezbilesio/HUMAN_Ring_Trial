@@ -629,6 +629,31 @@ ggplot(shift_rank,
     theme_bw()
 ```
 
+### Continuous view: rank vs RT shift, weighted by n_labs
+
+Same `rank_rt` data, but the (RT shift, rank) relationship as a scatter
+rather than bins. Point size encodes how many labs detected the
+compound — a 4-lab shift is a stronger signal than a 2-lab one
+because the cross-lab consensus is bigger to disagree with.
+
+```{r}
+#| label: shift-vs-rank-scatter
+#| fig-width: 8
+#| fig-height: 5
+ggplot(rank_rt,
+       aes(x = abs_loo_shift, y = structure_rank,
+           colour = lab, size = factor(n_labs))) +
+    geom_jitter(width = 0, height = 0.15, alpha = 0.7) +
+    scale_size_manual(values = c("2" = 1.5, "3" = 2.5, "4" = 3.5)) +
+    labs(x = "|RT - cross-lab mean RT| (s)",
+         y = "Structure rank",
+         colour = "Lab",
+         size = "n_labs detecting",
+         title = "Structure rank vs RT deviation across labs",
+         subtitle = "Point size = labs detecting the compound (2/3/4)") +
+    theme_bw()
+```
+
 ### Worst RT-shift cases — context per compound
 
 For the 10 (compound, lab) tuples with the highest LOO shift, show the
