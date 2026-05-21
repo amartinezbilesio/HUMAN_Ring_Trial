@@ -1,0 +1,394 @@
+---
+title: "SIRIUS annotation — all MS2 per lab (strategy 3)"
+format: html
+---
+
+## Goal
+
+Annotate **all MS2-bearing features** from every lab, without requiring
+cross-lab consensus. Each lab's `mse2` object (or `mse` for HMGU, which
+uses a single-injection setup) is used directly. MS1 spectra are linked to
+MS2 via `fragmentGroupIndex()` from `Spectra`. Results are then grouped by
+compound and compared to the consensus-based annotations from
+`sirius_annotation_consensus.qmd`.
+
+## Setup
+
+```{r}
+#| label: setup
+#| message: false
+library(Spectra)
+library(MsExperiment)
+library(xcms)
+library(RuSirius)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(here)
+
+source(here("1_preprocessing", "setup.R"))
+```
+
+## Config
+
+```{r}
+#| label: config
+labs        <- c("afekta", "cembio", "hmgu", "icl")
+study_group <- "HE"
+
+obj_dir    <- here("5_downstream_analysis", "object")
+output_dir <- here("3_annotation_manual", "HE", "3_Sirius_curation",
+                   "results_all_ms2")
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+## 1. Extraction helper
+
+For each lab, load the raw mzML files directly as a `Spectra` object.
+Labs with separate MS2 acquisition runs (afekta, cembio, icl) have files
+labelled with `_MS2` in their name; these DDA files contain interleaved MS1
+survey scans and MS2 fragmentation spectra. HMGU uses a single-injection DDA
+setup so the regular sample files already contain both levels.
+`fragmentGroupIndex()` then pairs MS1 with co-eluting MS2 within each file.
+
+```{r}
+#| label: helper-extract-all
+extract_all_ms2 <- function(lab_name, study_group) {
+  study_path <- here("1_preprocessing", lab_name, study_group)
+  mzml_dir   <- file.path(study_path, "mzml")
+
+  # Build filename table from seq files (polarity already a column)
+  seq_pos <- read_xlsx(file.path(study_path, "seq_pos.xlsx")) |> as.data.frame()
+  seq_neg <- read_xlsx(file.path(study_path, "seq_neg.xlsx")) |> as.data.frame()
+  seq_pos$polarity <- "pos"
+  seq_neg$polarity <- "neg"
+  seq <- rbind(seq_pos, seq_neg)
+  seq$filename <- paste0(seq$`Data File`, ".mzML")
+
+  # Keep only files present on disk
+  seq <- seq[seq$filename %in% list.files(mzml_dir), ]
+
+  # Derive mixture label: strip trailing _MS2 before extracting the last token
+  base_name    <- sub("_MS2$", "", seq$`Data File`)
+  seq$mixture  <- gsub("\\.", "_", sub(".*_", "", base_name))
+
+  # For labs with separate MS2 run files use those; otherwise (hmgu) use
+  # the regular sample files which are already DDA (MS1+MS2 in one file)
+  has_ms2_files <- any(grepl("MS2", seq$filename, fixed = TRUE))
+  if (has_ms2_files) {
+    seq <- seq[grepl("MS2", seq$filename, fixed = TRUE) & seq$mixture == "1_1", ]
+  } else {
+    seq <- seq[seq$mixture == "1_1", ]
+  }
+
+  # Load raw mzML directly — DDA files contain both MS1 and MS2 spectra
+  sp <- Spectra(file.path(mzml_dir, seq$filename), backend = MsBackendMzR())
+  sp <- setBackend(sp, MsBackendMemory())
+  sp <- applyProcessing(sp)
+
+  if (lab_name == "cembio") {
+    # Cembio uses scheduled targeted MS2: MS1 and MS2 are acquired in
+    # temporally disjoint blocks within the same file, so co-elution-based
+    # pairing is impossible. Keep MS2 only and group consecutive scans that
+    # share the same precursor m/z into one SIRIUS feature.
+    sp <- sp[sp$msLevel == 2L]
+    sp <- filterEmptySpectra(sp)
+    key <- paste0(sp$dataOrigin, "|", sprintf("%.4f", sp$precursorMz))
+    rl  <- rle(key)
+    sp$group_idx <- rep(seq_along(rl$lengths), rl$lengths)
+  } else {
+    # DDA labs: drop MSn appearing before the first MS1 per file, then
+    # pair MS1 with co-eluting MS2 via fragmentGroupIndex().
+    keep <- unlist(lapply(split(seq_along(sp), sp$dataOrigin), function(idx) {
+      lvl <- sp$msLevel[idx]
+      first_ms1 <- which(lvl == 1L)[1L]
+      if (is.na(first_ms1)) return(integer(0))
+      idx[first_ms1:length(idx)]
+    }))
+    sp <- sp[sort(keep)]
+    sp <- filterEmptySpectra(sp)
+    sp$group_idx <- fragmentGroupIndex(sp)
+    sp <- sp[duplicated(sp$group_idx) | duplicated(sp$group_idx, fromLast = TRUE)]
+  }
+
+  list(
+    spectra_pos       = sp[sp$polarity == 1L],
+    spectra_neg       = sp[sp$polarity == 0L],
+    n_ms2_pos         = sum(sp$msLevel == 2L & sp$polarity == 1L),
+    n_ms2_neg         = sum(sp$msLevel == 2L & sp$polarity == 0L),
+    n_features_pos    = length(unique(sp$group_idx[sp$polarity == 1L])),
+    n_features_neg    = length(unique(sp$group_idx[sp$polarity == 0L]))
+  )
+}
+```
+
+## 2. Run extraction
+
+```{r}
+#| label: extract
+#| message: false
+spectra_all <- list()
+extraction_summary <- list()
+
+for (lab in labs) {
+  sum_path  <- file.path(output_dir, paste0("sirius_summary_", lab, ".csv"))
+  full_path <- file.path(output_dir, paste0("sirius_full_",    lab, ".csv"))
+  if (file.exists(sum_path) && file.exists(full_path)) {
+    message("Skipping extraction for ", lab, " (SIRIUS results already exist)")
+    next
+  }
+  message("Extracting all MS2 for: ", lab)
+  res <- extract_all_ms2(
+    lab_name    = lab,
+    study_group = study_group
+  )
+  spectra_all[[lab]] <- res
+  extraction_summary[[lab]] <- tibble(
+    lab               = lab,
+    n_features_pos    = res$n_features_pos,
+    n_features_neg    = res$n_features_neg,
+    n_ms2_pos         = res$n_ms2_pos,
+    n_ms2_neg         = res$n_ms2_neg
+  )
+}
+
+bind_rows(extraction_summary)
+```
+
+```{r}
+#| label: plot-extraction
+#| fig-cap: "SIRIUS features (MS1+MS2 group; MS2 only for cembio) per lab and polarity"
+bind_rows(extraction_summary) |>
+  select(lab, pos = n_features_pos, neg = n_features_neg) |>
+  pivot_longer(c(pos, neg), names_to = "polarity", values_to = "n") |>
+  ggplot(aes(x = lab, y = n, fill = polarity)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c(pos = "#4e79a7", neg = "#f28e2b")) +
+  labs(x = NULL, y = "SIRIUS features", fill = "Polarity") +
+  theme_bw()
+```
+
+## 3. SIRIUS annotation
+
+```{r}
+#| label: sirius-login
+#| eval: false
+sirius_user <- "plouail@eurac.edu"
+sirius_pass <- Sys.getenv("SIRIUS_PASSWORD")
+```
+
+```{r}
+#| label: sirius
+summary_results <- list()
+full_results    <- list()
+
+# Import + run + collect for a single-polarity Spectra in batches of
+# `batch_size` features. Each batch clears the project (delete=TRUE) so
+# SIRIUS never holds more than one batch worth of features at a time.
+run_sirius_for_polarity <- function(srs, sp, polarity_label,
+                                    batch_size = 200) {
+  if (length(sp) == 0L)
+    return(list(summary = NULL, full = NULL))
+
+  groups  <- unique(sp$group_idx)
+  batches <- split(groups, ceiling(seq_along(groups) / batch_size))
+
+  sums  <- vector("list", length(batches))
+  fulls <- vector("list", length(batches))
+  for (i in seq_along(batches)) {
+    sp_b <- sp[sp$group_idx %in% batches[[i]]]
+    message("  ", polarity_label, " batch ", i, "/", length(batches),
+            " — ", length(batches[[i]]), " features")
+
+    srs <- import(srs,
+      spectra                = sp_b,
+      ms_column_name         = "group_idx",
+      deleteExistingFeatures = TRUE)
+
+    run(srs,
+      formulaIdParams = formulaIdParam(
+        numberOfCandidates               = 15,
+        instrument                       = "QTOF",
+        numberOfCandidatesPerIonization  = 5,
+        massAccuracyMS2ppm               = 10,
+        filterByIsotopePattern           = FALSE,
+        isotopeMs2Settings               = "SCORE",
+        performDeNovoBelowMz             = 600
+      ),
+      predictParams           = predictParam(),
+      structureDbSearchParams = structureDbSearchParam(
+        structureSearchDbs = c("BIO")
+      ),
+      recompute = TRUE,
+      wait      = TRUE
+    )
+
+    sums[[i]] <- summary(srs, result.type = "structure") |>
+      mutate(across(c(confidenceExactMatch, confidenceApproxMatch), as.numeric))
+    fulls[[i]] <- results(srs,
+      result.type  = "structureDb",
+      topFormula   = 8,
+      topStructure = 20,
+      return.type  = "data.frame")
+  }
+  list(summary = bind_rows(sums), full = bind_rows(fulls))
+}
+
+for (lab in labs) {
+  sum_path  <- file.path(output_dir, paste0("sirius_summary_", lab, ".csv"))
+  full_path <- file.path(output_dir, paste0("sirius_full_",    lab, ".csv"))
+
+  if (file.exists(sum_path) && file.exists(full_path)) {
+    message("Loading cached SIRIUS results for: ", lab)
+    summary_results[[lab]] <- read.csv(sum_path, stringsAsFactors = FALSE) |>
+      mutate(across(c(confidenceExactMatch, confidenceApproxMatch), as.numeric))
+    full_results[[lab]] <- read.csv(full_path, stringsAsFactors = FALSE)
+    next
+  }
+
+  message("=== SIRIUS: ", lab, " ===")
+  if (!exists("sirius_user")) sirius_user <- Sys.getenv("SIRIUS_USERNAME")
+  if (!exists("sirius_pass")) sirius_pass <- Sys.getenv("SIRIUS_PASSWORD")
+
+  srs <- Sirius(
+    username  = sirius_user,
+    password  = sirius_pass,
+    projectId = paste0("ring_trial_allms2_", lab),
+    path      = output_dir
+  )
+
+  res_pos <- run_sirius_for_polarity(srs, spectra_all[[lab]]$spectra_pos, "pos")
+  res_neg <- run_sirius_for_polarity(srs, spectra_all[[lab]]$spectra_neg, "neg")
+
+  summary_results[[lab]] <- bind_rows(res_pos$summary, res_neg$summary) |>
+    mutate(lab = lab)
+  full_results[[lab]]    <- bind_rows(res_pos$full,    res_neg$full)    |>
+    mutate(lab = lab)
+
+  write.csv(summary_results[[lab]], sum_path,  row.names = FALSE)
+  write.csv(full_results[[lab]],    full_path, row.names = FALSE)
+  shutdown(srs)
+}
+
+all_summaries <- bind_rows(lapply(summary_results, function(df) {
+  mutate(df, across(c(confidenceExactMatch, confidenceApproxMatch), as.numeric))
+}))
+all_full <- bind_rows(full_results)
+
+write.csv(all_summaries,
+          file.path(output_dir, "sirius_summary_all_labs.csv"), row.names = FALSE)
+write.csv(all_full,
+          file.path(output_dir, "sirius_full_all_labs.csv"),    row.names = FALSE)
+```
+
+## 4. Match to expected compounds (mixture 1.1)
+
+```{r}
+#| label: expected
+expected <- meta |>
+  filter(Mixture == "1.1") |>
+  transmute(
+    compound             = `ChEBI name`,
+    expected_formula     = formula,
+    expected_inchikey    = InChIKey,
+    expected_inchikey_2d = substr(InChIKey, 1, 14)
+  )
+
+cat("Expected compounds in mixture 1.1:", nrow(expected), "\n")
+```
+
+```{r}
+#| label: match-structure
+expected_keys_2d <- unique(expected$expected_inchikey_2d)
+
+structure_hits_all <- all_full |>
+  mutate(
+    inchikey_2d     = substr(inchiKey, 1, 14),
+    structure_match = inchikey_2d %in% expected_keys_2d,
+    polarity        = ifelse(grepl("^\\[M[-+]", adduct) &
+                               grepl("-\\]", adduct), "neg", "pos")
+  ) |>
+  filter(structure_match) |>
+  group_by(lab, inchikey_2d, polarity) |>
+  summarise(
+    best_formula_rank   = if (all(is.na(rank.x))) NA_integer_ else min(rank.x, na.rm = TRUE),
+    best_structure_rank = if (all(is.na(rank.y))) NA_integer_ else min(rank.y, na.rm = TRUE),
+    adducts             = paste(sort(unique(na.omit(adduct))), collapse = ";"),
+    molecularFormula    = first(molecularFormula),
+    .groups = "drop"
+  ) |>
+  left_join(expected, by = c("inchikey_2d" = "expected_inchikey_2d"))
+
+structure_hits_all
+```
+
+## 5. Coverage
+
+```{r}
+#| label: coverage
+covered_all <- expected |>
+  mutate(
+    structure_recovered = expected_inchikey_2d %in% structure_hits_all$inchikey_2d
+  )
+
+cat("Structure recovered:", sum(covered_all$structure_recovered),
+    "/", nrow(covered_all), "\n")
+covered_all
+```
+
+```{r}
+#| label: plot-coverage-by-lab
+#| fig-cap: "Structure hits per lab and polarity (all-MS2 strategy)"
+structure_hits_all |>
+  count(lab, polarity) |>
+  ggplot(aes(x = lab, y = n, fill = polarity)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c(pos = "#4e79a7", neg = "#f28e2b")) +
+  labs(x = NULL, y = "Structure hits", fill = "Polarity") +
+  theme_bw()
+```
+
+## 6. Comparison to consensus-based annotations
+
+Load the structure hits from `sirius_annotation_consensus.qmd` and compare
+compound recovery side by side.
+
+```{r}
+#| label: compare
+consensus_path <- here("3_annotation_manual", "HE", "3_Sirius_curation",
+                       "results_consensus_sample1_pos",
+                       "consensus_match_summary.csv")
+
+if (file.exists(consensus_path)) {
+  consensus_summary <- read.csv(consensus_path, stringsAsFactors = FALSE)
+
+  # Compounds recovered in each strategy
+  recovered_consensus <- expected$expected_inchikey_2d[
+    expected$expected_inchikey_2d %in%
+      substr(consensus_summary$inchikey_2d, 1, 14)
+  ]
+
+  recovered_allms2 <- structure_hits_all$inchikey_2d
+
+  comparison <- expected |>
+    mutate(
+      in_consensus = expected_inchikey_2d %in% recovered_consensus,
+      in_all_ms2   = expected_inchikey_2d %in% recovered_allms2
+    )
+
+  cat("Consensus strategy recovered:  ",
+      sum(comparison$in_consensus), "/", nrow(expected), "\n")
+  cat("All-MS2 strategy recovered:    ",
+      sum(comparison$in_all_ms2),   "/", nrow(expected), "\n")
+  cat("Recovered by both:             ",
+      sum(comparison$in_consensus & comparison$in_all_ms2), "\n")
+  cat("Only in consensus:             ",
+      sum(comparison$in_consensus & !comparison$in_all_ms2), "\n")
+  cat("Only in all-MS2:               ",
+      sum(!comparison$in_consensus & comparison$in_all_ms2), "\n")
+
+  comparison
+} else {
+  message("Run sirius_annotation_consensus.qmd first to generate the comparison file.")
+}
+```

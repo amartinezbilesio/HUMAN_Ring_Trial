@@ -30,6 +30,8 @@ meta <- read_xlsx(
   as.data.frame(check.names = FALSE)
 
 meta$M <- as.numeric(meta$M)
+names(meta)[is.na(names(meta)) | names(meta) == ""] <-
+  paste0("col_", which(is.na(names(meta)) | names(meta) == ""))
 
 #' #' logp standard - not running this anymore
 #' library(rcdk)

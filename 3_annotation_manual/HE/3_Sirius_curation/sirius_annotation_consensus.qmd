@@ -1,0 +1,893 @@
+---
+title: "SIRIUS annotation of consensus peaks (all mixtures)"
+format: html
+---
+
+## Goal
+
+Annotate the chromatographic peaks that were detected by **all four labs**
+(from `ct_filtered4.csv`) using SIRIUS via `RuSirius`, then check whether
+the annotations are consistent with the compounds expected in each mixture
+(`standards.xlsx`).
+
+Scope:
+
+- All 38 samples (19 pos + 19 neg) covering mixtures 1_1–3_3.
+- Only peaks present in **all four labs** (`ct_filtered4`).
+- One SIRIUS project per lab (all mixtures together); results then merged
+  on `consensus_id`.
+- Match SIRIUS results to per-mixture standards on **formula** first, then
+  on **InChIKey** (first block = 2D structure).
+
+## Setup
+
+```{r}
+#| label: setup
+#| message: false
+library(Spectra)
+library(MsExperiment)
+library(xcms)
+library(RuSirius)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(here)
+
+source(here("1_preprocessing", "setup.R"))   # automate_matching_ms2, meta
+```
+
+## Config
+
+```{r}
+#| label: config
+labs <- c("afekta", "cembio", "hmgu", "icl")
+study_group <- "HE"
+waters_labs <- c("icl")
+
+# Samples 1-19 = pos, 20-38 = neg (same 19 mixtures in each polarity)
+mixtures <- c("1_1","1_2","1_3","1_4","1_5","1_6",
+              "2_1","2_10","2_2","2_3","2_4","2_5","2_6","2_7","2_8","2_9",
+              "3_1","3_2","3_3")
+sample_map <- tibble(
+  sample   = c(1:19, 20:38),
+  polarity = c(rep("pos", 19), rep("neg", 19)),
+  mixture  = rep(mixtures, 2)
+)
+
+obj_dir    <- here("5_downstream_analysis", "object")
+ct_path    <- file.path(obj_dir, "ct_filtered4.csv")
+output_dir <- here("3_annotation_manual", "HE", "3_Sirius_curation",
+                   "results_consensus_all")
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+## 1. Load all consensus peaks (all samples, all mixtures)
+
+```{r}
+#| label: load-ct
+ct <- read.csv(ct_path, stringsAsFactors = FALSE)
+ct <- left_join(ct, sample_map, by = "sample")
+```
+
+`ct` is now one row per (consensus peak, sample) with polarity and mixture
+added from `sample_map`. From here we build a per-lab table of
+`chrom_peak_id` ↔ `consensus_id` so we can re-join SIRIUS results to the
+consensus later.
+
+```{r}
+#| label: per-lab-peak-tables
+peaks_by_lab <- lapply(labs, function(lab) {
+  data.frame(
+    consensus_id  = ct$consensus_id,
+    chrom_peak_id = ct[[paste0("idx_", lab)]],
+    polarity      = ct$polarity,
+    mixture       = ct$mixture,
+    stringsAsFactors = FALSE
+  )
+})
+names(peaks_by_lab) <- labs
+```
+
+## 2. Spectra extraction helper
+
+Adapted from `sirius_annotation.qmd::extract_spectra_for_sirius`. Difference:
+instead of expanding pipe-separated peak IDs from a curated annotation table,
+we take a plain `data.frame` of `chrom_peak_id`s (with the
+mixture/polarity columns needed by `automate_matching_ms2()`).
+
+```{r}
+#| label: helper-extract
+extract_spectra_from_peaks <- function(lab_name,
+                                       peak_df,
+                                       study_group,
+                                       is_waters = FALSE) {
+  study_path <- here("1_preprocessing", lab_name, study_group)
+
+  mse <- readMsObject(
+    XcmsExperiment(),
+    AlabasterParam(path = file.path(study_path, "mse")),
+    spectraPath = file.path(study_path, "mzml")
+  )
+  sampleData(mse)$mixture <- sub(".*_", "", sampleData(mse)$Sample.Name)
+  sampleData(mse)$mixture <- gsub("\\.", "_", sampleData(mse)$mixture)
+
+  cp <- chromPeaks(mse)
+  peak_df <- peak_df[peak_df$chrom_peak_id %in% rownames(cp), ]
+
+  # Pull mz/rt ranges from chromPeaks
+  cp_info <- as.data.frame(cp[peak_df$chrom_peak_id, , drop = FALSE])
+  peak_df$mz    <- cp_info$mz
+  peak_df$mzmin <- cp_info$mzmin
+  peak_df$mzmax <- cp_info$mzmax
+  peak_df$rt    <- cp_info$rt
+  peak_df$rtmin <- cp_info$rtmin
+  peak_df$rtmax <- cp_info$rtmax
+  rownames(peak_df) <- peak_df$chrom_peak_id
+
+  # MS1
+  ms1 <- chromPeakSpectra(
+    mse, msLevel = 1L,
+    peaks = peak_df$chrom_peak_id,
+    method = "closest_rt"
+  )
+  ms1 <- setBackend(ms1, MsBackendMemory())
+  ms1 <- applyProcessing(ms1)
+  ms1 <- filterEmptySpectra(ms1)
+
+  # MS2 (some labs have a separate mse2)
+  mse2_path <- file.path(study_path, "mse2")
+  if (dir.exists(mse2_path)) {
+    mse2 <- readMsObject(
+      XcmsExperiment(),
+      AlabasterParam(path = mse2_path),
+      spectraPath = file.path(study_path, "mzml")
+    )
+  } else {
+    mse2 <- mse
+  }
+  sn2 <- sub("_MS2$", "", sampleData(mse2)$Sample.Name)
+  sampleData(mse2)$mixture <- sub(".*_", "", sn2)
+  sampleData(mse2)$mixture <- gsub("\\.", "_", sampleData(mse2)$mixture)
+
+  ms2 <- automate_matching_ms2(
+    mse2 = mse2,
+    match_res = peak_df,
+    waters_data = is_waters
+  )
+  low_int <- function(x, ...) x > max(x, na.rm = TRUE) * 0.05
+  ms2 <- filterIntensity(ms2, intensity = low_int)
+  ms2 <- ms2[lengths(ms2) > 1]
+  ms2 <- setBackend(ms2, MsBackendMemory())
+  ms2 <- applyProcessing(ms2)
+  ms2 <- filterEmptySpectra(ms2)
+
+  pos_ids <- peak_df$chrom_peak_id[peak_df$polarity == "pos"]
+  neg_ids <- peak_df$chrom_peak_id[peak_df$polarity == "neg"]
+
+  # Count MS1 before filtering (sanity check: should be ~1 per peak)
+  n_ms1_pos_all <- sum(ms1$chrom_peak_id %in% pos_ids)
+  n_ms1_neg_all <- sum(ms1$chrom_peak_id %in% neg_ids)
+
+  # Keep only MS1 for peaks that have at least one MS2 (= features sent to SIRIUS)
+  ms1 <- ms1[ms1$chrom_peak_id %in% unique(ms2$chrom_peak_id)]
+
+  ms2_peak_ids <- unique(ms2$chrom_peak_id)
+  consensus_w_ms2 <- unique(
+    peak_df$consensus_id[peak_df$chrom_peak_id %in% ms2_peak_ids]
+  )
+
+  list(
+    spectra              = c(ms1, ms2),
+    n_ms1_pos            = n_ms1_pos_all,
+    n_ms1_neg            = n_ms1_neg_all,
+    n_ms2_pos            = sum(ms2$chrom_peak_id %in% pos_ids),
+    n_ms2_neg            = sum(ms2$chrom_peak_id %in% neg_ids),
+    n_peaks_w_ms2_pos    = length(intersect(ms2_peak_ids, pos_ids)),
+    n_peaks_w_ms2_neg    = length(intersect(ms2_peak_ids, neg_ids)),
+    n_consensus_w_ms2    = length(consensus_w_ms2),
+    n_peaks              = nrow(peak_df)
+  )
+}
+```
+
+## 3 & 4. Extraction + SIRIUS per mixture per lab
+
+For each mixture, spectra are extracted and SIRIUS is run for each lab.
+A (mixture, lab) combination is skipped entirely if both result files already
+exist. Results are saved under `results_consensus_all/<mix_slug>/`.
+
+SIRIUS 6.3+ must be running. Credentials from `.Renviron`
+(`SIRIUS_USERNAME`, `SIRIUS_PASSWORD`).
+
+```{r}
+#| label: sirius-login
+#| eval: false
+sirius_user <- "plouail@eurac.edu"
+sirius_pass <- "Terriere85!!"
+```
+
+```{r}
+#| label: extract-and-sirius
+#| message: false
+if (!exists("sirius_user")) sirius_user <- Sys.getenv("SIRIUS_USERNAME")
+if (!exists("sirius_pass")) sirius_pass <- Sys.getenv("SIRIUS_PASSWORD")
+
+summary_results    <- list()
+full_results       <- list()
+extraction_summary <- list()
+
+for (mix in mixtures) {
+  mix_slug <- mix
+  mix_dir  <- file.path(output_dir, mix_slug)
+  dir.create(mix_dir, recursive = TRUE, showWarnings = FALSE)
+
+  for (lab in labs) {
+    sum_path  <- file.path(mix_dir, paste0("sirius_summary_", lab, ".csv"))
+    full_path <- file.path(mix_dir, paste0("sirius_full_",    lab, ".csv"))
+
+    if (file.exists(sum_path) && file.exists(full_path)) {
+      message("Cached: mix ", mix, " / ", lab)
+      sum_df <- tryCatch(read.csv(sum_path, stringsAsFactors = FALSE), error = function(e) data.frame())
+      if (nrow(sum_df) == 0) next   # empty sentinel = no MS2
+      summary_results[[mix]][[lab]] <- sum_df |>
+        mutate(across(any_of(c("confidenceExactMatch", "confidenceApproxMatch")), as.numeric),
+               across(any_of("alignedFeatureId"), as.character),
+               mixture = mix, lab = lab)
+      full_results[[mix]][[lab]] <- tryCatch(read.csv(full_path, stringsAsFactors = FALSE), error = function(e) data.frame()) |>
+        mutate(across(any_of("alignedFeatureId"), as.character),
+               mixture = mix, lab = lab)
+      next
+    }
+
+    # Extract spectra for this mixture only
+    message("Extracting: mix ", mix, " / ", lab)
+    peak_df_mix <- peaks_by_lab[[lab]][peaks_by_lab[[lab]]$mixture == mix, ]
+    res <- extract_spectra_from_peaks(
+      lab_name    = lab,
+      peak_df     = peak_df_mix,
+      study_group = study_group,
+      is_waters   = lab %in% waters_labs
+    )
+    extraction_summary[[mix]][[lab]] <- tibble(
+      mixture           = mix,
+      lab               = lab,
+      n_peaks           = res$n_peaks,
+      n_ms1_pos         = res$n_ms1_pos,
+      n_ms1_neg         = res$n_ms1_neg,
+      n_ms2_pos         = res$n_ms2_pos,
+      n_ms2_neg         = res$n_ms2_neg,
+      n_peaks_w_ms2_pos = res$n_peaks_w_ms2_pos,
+      n_peaks_w_ms2_neg = res$n_peaks_w_ms2_neg,
+      n_consensus_w_ms2 = res$n_consensus_w_ms2
+    )
+
+    sp          <- res$spectra
+    ms2_ids_pos <- unique(sp[sp$msLevel == 2L & sp$polarity == 1L]$chrom_peak_id)
+    ms2_ids_neg <- unique(sp[sp$msLevel == 2L & sp$polarity == 0L]$chrom_peak_id)
+
+    if (length(ms2_ids_pos) == 0 && length(ms2_ids_neg) == 0) {
+      message("No MS2 for mix ", mix, " / ", lab, " — skipping SIRIUS")
+      writeLines(character(0), sum_path)
+      writeLines(character(0), full_path)
+      next
+    }
+
+    message("SIRIUS: mix ", mix, " / ", lab)
+    srs <- Sirius(
+      username  = sirius_user,
+      password  = sirius_pass,
+      projectId = paste0("ring_trial_", mix_slug, "_", lab),
+      path      = mix_dir
+    )
+
+    # Import pos and neg separately (RuSirius needs this for correct polarity)
+    if (length(ms2_ids_pos) > 0)
+      srs <- import(srs,
+        spectra                = sp[sp$chrom_peak_id %in% ms2_ids_pos],
+        ms_column_name         = "chrom_peak_id",
+        deleteExistingFeatures = TRUE)
+    if (length(ms2_ids_neg) > 0)
+      srs <- import(srs,
+        spectra                = sp[sp$chrom_peak_id %in% ms2_ids_neg],
+        ms_column_name         = "chrom_peak_id",
+        deleteExistingFeatures = length(ms2_ids_pos) == 0)
+
+    run(
+      srs,
+      formulaIdParams = formulaIdParam(
+        numberOfCandidates              = 15,
+        instrument                      = "QTOF",
+        numberOfCandidatesPerIonization = 5,
+        massAccuracyMS2ppm              = 10,
+        filterByIsotopePattern          = FALSE,
+        isotopeMs2Settings              = "SCORE",
+        performDeNovoBelowMz            = 600
+      ),
+      predictParams           = predictParam(),
+      structureDbSearchParams = structureDbSearchParam(
+        structureSearchDbs = c("BIO")
+      ),
+      recompute = TRUE,
+      wait      = TRUE
+    )
+
+    summary_results[[mix]][[lab]] <- summary(srs, result.type = "structure") |>
+      mutate(across(any_of(c("confidenceExactMatch", "confidenceApproxMatch")), as.numeric),
+             across(any_of("alignedFeatureId"), as.character),
+             mixture = mix, lab = lab)
+
+    full_results[[mix]][[lab]] <- results(
+      srs,
+      result.type  = "structureDb",
+      topFormula   = 8,
+      topStructure = 20,
+      return.type  = "data.frame"
+    ) |>
+      mutate(across(any_of("alignedFeatureId"), as.character),
+             mixture = mix, lab = lab)
+
+    write.csv(summary_results[[mix]][[lab]], sum_path,  row.names = FALSE)
+    write.csv(full_results[[mix]][[lab]],    full_path, row.names = FALSE)
+
+    shutdown(srs)
+  }
+}
+
+all_summaries <- bind_rows(lapply(summary_results, bind_rows))
+all_full      <- bind_rows(lapply(full_results,    bind_rows))
+
+write.csv(all_summaries,
+          file.path(output_dir, "sirius_summary_all.csv"), row.names = FALSE)
+write.csv(all_full,
+          file.path(output_dir, "sirius_full_all.csv"),    row.names = FALSE)
+```
+
+```{r}
+#| label: plot-extraction-summary
+#| fig-cap: "Peaks with MS2 per lab and polarity (all mixtures combined)"
+library(ggplot2)
+
+extr_df <- bind_rows(lapply(extraction_summary, bind_rows))
+if (nrow(extr_df) == 0) {
+  message("extraction_summary empty (all results cached) — skipping plot")
+} else {
+  extr_df |>
+    group_by(lab) |>
+    summarise(pos = sum(n_peaks_w_ms2_pos), neg = sum(n_peaks_w_ms2_neg),
+              .groups = "drop") |>
+    tidyr::pivot_longer(c(pos, neg), names_to = "polarity", values_to = "n") |>
+    ggplot(aes(x = lab, y = n, fill = polarity)) +
+    geom_col(position = "dodge") +
+    scale_fill_manual(values = c(pos = "#4e79a7", neg = "#f28e2b")) +
+    labs(x = NULL, y = "Features with MS2", fill = "Polarity") +
+    theme_bw()
+}
+```
+
+## 5. Re-attach `consensus_id` to SIRIUS output
+
+SIRIUS keys results on `externalFeatureId` (= `chrom_peak_id`) in
+`summary()` and on `xcms_fts` in `results()`. Both are per-lab; we need
+`consensus_id` to compare the four labs row-by-row. `mixture` is already
+present from the extraction loop.
+
+```{r}
+#| label: attach-consensus
+peaks_long <- bind_rows(lapply(labs, function(lab) {
+  peaks_by_lab[[lab]] |>
+    mutate(lab = lab) |>
+    select(lab, chrom_peak_id, consensus_id, polarity, mixture)
+}))
+
+all_summaries <- all_summaries |>
+  left_join(peaks_long,
+            by = c("lab", "mixture", "externalFeatureId" = "chrom_peak_id"))
+
+all_full <- all_full |>
+  left_join(peaks_long,
+            by = c("lab", "mixture", "xcms_fts" = "chrom_peak_id"))
+```
+
+## 5b. RT per chrom_peak_id
+
+SIRIUS output doesn't carry retention time, so we look it up from
+`chromPeaks(mse)` per lab. Cached per lab so it only runs once.
+
+```{r}
+#| label: peak-rt
+#| message: false
+peak_rt_per_lab <- list()
+
+for (lab in labs) {
+  rt_path <- file.path(output_dir, paste0("peak_rt_", lab, ".csv"))
+
+  if (file.exists(rt_path)) {
+    peak_rt_per_lab[[lab]] <- read.csv(rt_path, stringsAsFactors = FALSE)
+    next
+  }
+
+  message("Loading chromPeaks for: ", lab)
+  study_path <- here("1_preprocessing", lab, study_group)
+  mse <- readMsObject(
+    XcmsExperiment(),
+    AlabasterParam(path = file.path(study_path, "mse")),
+    spectraPath = file.path(study_path, "mzml")
+  )
+  cp <- chromPeaks(mse)
+
+  pl <- peaks_by_lab[[lab]]
+  pl <- pl[pl$chrom_peak_id %in% rownames(cp), ]
+  pl$rt <- cp[pl$chrom_peak_id, "rt"]
+
+  df <- data.frame(
+    lab           = lab,
+    consensus_id  = pl$consensus_id,
+    chrom_peak_id = pl$chrom_peak_id,
+    polarity      = pl$polarity,
+    mixture       = pl$mixture,
+    rt            = pl$rt,
+    stringsAsFactors = FALSE
+  )
+  write.csv(df, rt_path, row.names = FALSE)
+  peak_rt_per_lab[[lab]] <- df
+}
+
+peak_rt_long <- bind_rows(peak_rt_per_lab)
+```
+
+## 6. Expected compounds per mixture
+
+`meta` was loaded by `setup.R`. Columns of interest:
+`Name`, `ChEBI name`, `Mixture`, `M`, `formula`, `InChIKey`, `SMILES`.
+
+```{r}
+#| label: expected
+expected_all <- meta |>
+  filter(gsub("\\.", "_", Mixture) %in% mixtures) |>
+  transmute(
+    mixture              = gsub("\\.", "_", Mixture),
+    compound             = `ChEBI name`,
+    expected_formula     = formula,
+    expected_inchikey    = InChIKey,
+    expected_inchikey_2d = substr(InChIKey, 1, 14)
+  )
+
+cat("Expected compounds across all mixtures:", nrow(expected_all), "\n")
+expected_all |> count(mixture)
+```
+
+## 7. Match formulas
+
+For every SIRIUS candidate (across all ranks), flag whether its
+`molecularFormula` matches an expected formula **for that mixture**, and
+record the SIRIUS rank at which the match occurred.
+
+```{r}
+#| label: match-formula
+# rank.x = formula rank (1 = top), rank.y = structure rank
+formula_hits <- all_full |>
+  left_join(
+    select(expected_all, mixture, compound, expected_formula, expected_inchikey_2d),
+    by = c("mixture", "molecularFormula" = "expected_formula")
+  ) |>
+  filter(!is.na(compound)) |>
+  group_by(lab, consensus_id, mixture, molecularFormula, polarity) |>
+  summarise(
+    best_formula_rank = if (all(is.na(rank.x))) NA_integer_ else min(rank.x, na.rm = TRUE),
+    adducts           = paste(sort(unique(na.omit(adduct))), collapse = ";"),
+    .groups = "drop"
+  )
+
+formula_hits
+```
+
+## 8. Match InChIKey (2D structure)
+
+The first 14 chars of an InChIKey encode the 2D skeleton. Matching is done
+per mixture so that a compound only counts as a hit in the mixture where it
+is expected.
+
+```{r}
+#| label: match-inchikey
+structure_hits <- all_full |>
+  mutate(inchikey_2d = substr(inchiKey, 1, 14)) |>
+  left_join(
+    select(expected_all, mixture, compound, expected_formula, expected_inchikey_2d),
+    by = c("mixture", "inchikey_2d" = "expected_inchikey_2d")
+  ) |>
+  filter(!is.na(compound)) |>
+  group_by(lab, consensus_id, mixture, inchikey_2d, polarity) |>
+  summarise(
+    best_formula_rank   = if (all(is.na(rank.x))) NA_integer_ else min(rank.x, na.rm = TRUE),
+    best_structure_rank = if (all(is.na(rank.y))) NA_integer_ else min(rank.y, na.rm = TRUE),
+    adducts             = paste(sort(unique(na.omit(adduct))), collapse = ";"),
+    structureName       = first(structureName),
+    molecularFormula    = first(molecularFormula),
+    compound            = first(compound),
+    .groups = "drop"
+  )
+
+structure_hits
+```
+
+```{r}
+#| label: plot-annotation-coverage
+#| fig-cap: "Structure hits per lab and polarity (all mixtures)"
+structure_hits |>
+  count(lab, polarity) |>
+  ggplot(aes(x = lab, y = n, fill = polarity)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c(pos = "#4e79a7", neg = "#f28e2b")) +
+  labs(x = NULL, y = "Structure hits", fill = "Polarity") +
+  theme_bw()
+```
+
+```{r}
+#| label: plot-annotation-coverage-per-mixture
+#| fig-cap: "Structure hits per mixture and polarity"
+structure_hits |>
+  count(mixture, polarity) |>
+  ggplot(aes(x = mixture, y = n, fill = polarity)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c(pos = "#4e79a7", neg = "#f28e2b")) +
+  labs(x = NULL, y = "Structure hits", fill = "Polarity") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+#| label: plot-adduct-distribution
+#| fig-cap: "Adduct distribution across structure hits"
+structure_hits |>
+  tidyr::separate_rows(adducts, sep = ";") |>
+  filter(!is.na(adducts), adducts != "") |>
+  count(polarity, adducts) |>
+  ggplot(aes(x = reorder(adducts, n), y = n, fill = polarity)) +
+  geom_col() +
+  scale_fill_manual(values = c(pos = "#4e79a7", neg = "#f28e2b")) +
+  coord_flip() +
+  labs(x = NULL, y = "Count", fill = "Polarity") +
+  theme_bw()
+```
+
+## 9. Per-compound summary across labs and polarities
+
+One row per (mixture, compound): how many labs detected it in each polarity,
+which adducts were seen, best ranks, and — when detected in both pos and neg
+— the RT difference (in seconds) between the two polarity peaks.
+
+```{r}
+#| label: per-consensus-summary
+by_polarity <- structure_hits |>
+  left_join(peak_rt_long,
+            by = c("lab", "consensus_id", "polarity", "mixture")) |>
+  group_by(mixture, compound, molecularFormula, inchikey_2d, polarity) |>
+  summarise(
+    n_labs              = n_distinct(lab),
+    adducts             = paste(sort(unique(adducts)), collapse = ";"),
+    rt_s                = mean(rt, na.rm = TRUE),
+    best_formula_rank   = if (all(is.na(best_formula_rank)))   NA_integer_ else min(best_formula_rank,   na.rm = TRUE),
+    best_structure_rank = if (all(is.na(best_structure_rank))) NA_integer_ else min(best_structure_rank, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+summary_table <- by_polarity |>
+  mutate(polarity = factor(polarity, levels = c("pos", "neg"))) |>
+  pivot_wider(
+    names_from   = polarity,
+    values_from  = c(n_labs, adducts, rt_s, best_formula_rank, best_structure_rank),
+    names_sep    = "_",
+    names_expand = TRUE
+  ) |>
+  mutate(rt_diff_s = abs(rt_s_pos - rt_s_neg)) |>
+  arrange(mixture, compound)
+
+summary_table
+
+write.csv(summary_table,
+          file.path(output_dir, "consensus_match_summary.csv"),
+          row.names = FALSE)
+```
+
+## 10. Coverage check
+
+How many of the expected compounds per mixture were recovered (at any rank,
+any lab)?
+
+```{r}
+#| label: coverage
+covered <- expected_all |>
+  mutate(
+    formula_recovered   = paste(mixture, expected_formula)     %in%
+                          paste(formula_hits$mixture,   formula_hits$molecularFormula),
+    structure_recovered = paste(mixture, expected_inchikey_2d) %in%
+                          paste(structure_hits$mixture, structure_hits$inchikey_2d)
+  ) |>
+  arrange(mixture, compound)
+
+covered
+
+cat("\nFormula recovered:   ", sum(covered$formula_recovered),
+    "/", nrow(covered), "\n")
+cat("Structure recovered: ", sum(covered$structure_recovered),
+    "/", nrow(covered), "\n")
+
+covered |>
+  group_by(mixture) |>
+  summarise(
+    n_expected          = n(),
+    n_formula_recovered = sum(formula_recovered),
+    n_struct_recovered  = sum(structure_recovered),
+    .groups = "drop"
+  )
+```
+
+```{r}
+#| label: plot-coverage-per-mixture
+#| fig-cap: "Compounds found vs expected per mixture"
+covered |>
+  group_by(mixture) |>
+  summarise(
+    Expected  = n(),
+    Formula   = sum(formula_recovered),
+    Structure = sum(structure_recovered),
+    .groups = "drop"
+  ) |>
+  tidyr::pivot_longer(c(Expected, Formula, Structure),
+                      names_to = "type", values_to = "n") |>
+  mutate(type = factor(type, levels = c("Expected", "Formula", "Structure"))) |>
+  ggplot(aes(x = mixture, y = n, fill = type)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c(Expected = "#aec7e8", Formula = "#1f77b4", Structure = "#d62728")) +
+  labs(x = "Mixture", y = "Number of compounds", fill = NULL) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## 11. GNPS library lookup for unannotated compounds
+
+For compounds that SIRIUS did not annotate (no structure hit in any lab),
+check whether the GNPS reference library contains a spectrum with the same
+2D InChIKey. A compound *present* in GNPS but missing from our annotation
+is a SIRIUS / MS2 failure; a compound *absent* from GNPS could never have
+been annotated by MS2 library matching.
+
+```{r}
+#| label: gnps-unannotated
+#| message: false
+library(DBI)
+library(RSQLite)
+library(MsBackendSql)
+
+unannotated <- expected_all |>
+  filter(!paste(mixture, expected_inchikey_2d) %in%
+           paste(structure_hits$mixture, structure_hits$inchikey_2d))
+
+cat("Unannotated compounds (all mixtures): ",
+    nrow(unannotated), "/", nrow(expected_all), "\n", sep = "")
+
+dbfile <- here("2_annotation_auto",
+               "MsBackendSql.GNPS.matchms.cleaned.v1.sqlite")
+con <- dbConnect(SQLite(), dbfile)
+ms2_ref <- Spectra(con, source = MsBackendSql())
+gnps_keys_2d <- unique(sub("-.*", "", ms2_ref$inchikey))
+gnps_keys_2d <- gnps_keys_2d[!is.na(gnps_keys_2d) & nzchar(gnps_keys_2d)]
+dbDisconnect(con)
+
+unannotated <- unannotated |>
+  mutate(in_gnps = expected_inchikey_2d %in% gnps_keys_2d) |>
+  arrange(mixture, desc(in_gnps), compound)
+
+cat("Present in GNPS (SIRIUS gap, not library gap): ",
+    sum(unannotated$in_gnps), "/", nrow(unannotated), "\n", sep = "")
+cat("Absent from GNPS (library gap):                ",
+    sum(!unannotated$in_gnps), "/", nrow(unannotated), "\n", sep = "")
+
+unannotated |>
+  select(mixture, compound, expected_formula, expected_inchikey_2d, in_gnps)
+
+write.csv(unannotated,
+          file.path(output_dir, "unannotated_vs_gnps.csv"),
+          row.names = FALSE)
+```
+
+## 12. Total compounds found
+
+### 12a. Comparison with per-lab curated annotations
+
+```{r}
+#| label: total-compounds-found
+#| message: false
+total_expected  <- nrow(expected_all)
+total_formula   <- sum(covered$formula_recovered)
+total_structure <- sum(covered$structure_recovered)
+
+RT_THRESHOLD <- 15   # seconds — same tolerance as consensus peak grouping
+
+# --- Per-lab counts from curated XLSXs (same source as 6_annotation_analysis.qmd) ---
+curated_dir <- here("3_annotation_manual", "HE", "3_Sirius_curation")
+perlab_files <- file.path(curated_dir,
+  paste0(labs, "_lab_annotations_sirius_curated.xlsx"))
+
+if (all(file.exists(perlab_files))) {
+  ct4 <- read.csv(ct_path, stringsAsFactors = FALSE)
+  peaks_in_ct4 <- lapply(labs, function(lab) {
+    as.character(na.omit(ct4[[paste0("idx_", lab)]]))
+  })
+  names(peaks_in_ct4) <- labs
+
+  # Mean RT per consensus_id across all labs (reference RT)
+  consensus_rt <- peak_rt_long |>
+    group_by(consensus_id) |>
+    summarise(rt_consensus = mean(rt, na.rm = TRUE), .groups = "drop")
+
+  rank_lab_all <- bind_rows(lapply(labs, function(lab) {
+    x <- as.data.frame(readxl::read_xlsx(perlab_files[labs == lab]),
+                       check.names = FALSE)
+    peak_ids <- strsplit(as.character(x$chrom_peak_id), "|", fixed = TRUE)
+    # First ct4 peak_id per row (for RT join)
+    first_ct4 <- vapply(peak_ids, function(ids) {
+      m <- trimws(ids)[trimws(ids) %in% peaks_in_ct4[[lab]]]
+      if (length(m)) m[1L] else NA_character_
+    }, character(1))
+    in_ct4 <- !is.na(first_ct4)
+    data.frame(
+      lab            = lab,
+      compound       = trimws(x$target_ChEBI.name),
+      structure_rank = suppressWarnings(as.numeric(x$best_structurePerIdRank)),
+      rtmed          = suppressWarnings(as.numeric(x$rtmed)),
+      chrom_peak_id  = first_ct4,
+      in_ct4         = in_ct4,
+      stringsAsFactors = FALSE
+    )
+  })) |>
+    filter(!is.na(compound), compound != "") |>
+    # join → consensus_id → consensus mean RT
+    left_join(peaks_long |> select(lab, chrom_peak_id, consensus_id),
+              by = c("lab", "chrom_peak_id")) |>
+    left_join(consensus_rt, by = "consensus_id") |>
+    mutate(rt_diff = abs(rtmed - rt_consensus))
+
+  # Restrict: peak in ct_filtered4 AND rtmed within RT_THRESHOLD of consensus RT
+  rank_ct4 <- rank_lab_all |>
+    filter(in_ct4, is.na(rt_diff) | rt_diff <= RT_THRESHOLD)
+
+  found_compounds_ct4 <- rank_ct4 |>
+    filter(!is.na(structure_rank)) |>
+    pull(compound) |> unique()
+  n_found_ct4 <- sum(expected_all$compound %in% found_compounds_ct4)
+
+  perlab_row <- tibble(
+    approach    = "Per-lab curated (ct_filtered4 peaks, RT ≤ 15 s from consensus)",
+    n_expected  = total_expected,
+    n_structure = n_found_ct4,
+    pct         = round(n_found_ct4 / total_expected * 100, 1)
+  )
+} else {
+  message("Curated lab XLSXs not found — skipping per-lab comparison")
+  perlab_row <- NULL
+}
+
+comparison_tbl <- bind_rows(
+  perlab_row,
+  tibble(approach    = "Consensus peaks (this document)",
+         n_expected  = total_expected,
+         n_structure = total_structure,
+         pct         = round(total_structure / total_expected * 100, 1))
+)
+print(comparison_tbl)
+
+covered |>
+  filter(structure_recovered) |>
+  select(mixture, compound, expected_formula, expected_inchikey_2d) |>
+  arrange(mixture, compound)
+```
+
+### 12b. Per-lab annotation results (consensus peaks)
+
+```{r}
+#| label: perlab-annotation-table
+perlab_ann <- structure_hits |>
+  group_by(lab, polarity) |>
+  summarise(n_compounds = n_distinct(compound), .groups = "drop")
+
+perlab_ann_mix <- structure_hits |>
+  group_by(lab, polarity, mixture) |>
+  summarise(n_compounds = n_distinct(compound), .groups = "drop")
+
+cat("Overall structure hits per lab and polarity:\n")
+print(perlab_ann)
+```
+
+```{r}
+#| label: plot-perlab-overall
+#| fig-cap: "Structure hits per lab and polarity (all mixtures)"
+ggplot(perlab_ann, aes(x = lab, y = n_compounds, fill = polarity)) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = n_compounds),
+            position = position_dodge(0.9), vjust = -0.3, size = 3) +
+  scale_fill_manual(values = c(pos = "#4e79a7", neg = "#f28e2b")) +
+  labs(x = NULL, y = "Unique compounds", fill = "Polarity") +
+  theme_bw()
+```
+
+```{r}
+#| label: plot-perlab-per-mixture
+#| fig-cap: "Structure hits per lab, polarity and mixture"
+#| fig-height: 7
+perlab_ann_mix |>
+  mutate(mixture = factor(mixture, levels = mixtures)) |>
+  ggplot(aes(x = lab, y = n_compounds, fill = polarity)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c(pos = "#4e79a7", neg = "#f28e2b")) +
+  facet_wrap(~ mixture, ncol = 4) +
+  labs(x = NULL, y = "Unique compounds", fill = "Polarity") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.text  = element_text(size = 7))
+```
+
+## 13. Consensus-peak funnel summary
+
+How many consensus peaks we started with, how many had MS2 in 1/2/3/4 labs,
+and how many were annotated (structure hit) in the end.
+
+```{r}
+#| label: consensus-funnel
+n_start <- n_distinct(ct$consensus_id)
+
+# MS2 per (consensus, lab): a consensus_id appears in all_full for a given lab
+# iff that lab had MS2 for one of its chrom_peak_ids and SIRIUS produced results.
+ms2_by_consensus <- all_full |>
+  filter(!is.na(consensus_id)) |>
+  distinct(consensus_id, lab) |>
+  count(consensus_id, name = "n_labs_ms2")
+
+ms2_dist <- ms2_by_consensus |>
+  count(n_labs_ms2, name = "n_consensus") |>
+  arrange(n_labs_ms2)
+
+n_any_ms2 <- nrow(ms2_by_consensus)
+n_no_ms2  <- n_start - n_any_ms2
+
+n_annotated_peaks     <- n_distinct(structure_hits$consensus_id)
+n_annotated_compounds <- sum(covered$structure_recovered)
+
+cat("Starting consensus peaks:                  ", n_start, "\n", sep = "")
+cat("With MS2 in >= 1 lab:                      ", n_any_ms2,
+    " (", round(100 * n_any_ms2 / n_start, 1), "%)\n", sep = "")
+cat("With NO MS2 in any lab:                    ", n_no_ms2,
+    " (", round(100 * n_no_ms2 / n_start, 1), "%)\n", sep = "")
+cat("Annotated consensus peaks (any lab):       ", n_annotated_peaks,
+    " (", round(100 * n_annotated_peaks / n_start, 1), "%)\n", sep = "")
+cat("  → distinct expected compounds recovered: ", n_annotated_compounds,
+    " / ", nrow(expected_all), "\n\n", sep = "")
+
+cat("MS2 coverage breakdown:\n")
+print(ms2_dist)
+```
+
+```{r}
+#| label: plot-consensus-funnel
+#| fig-cap: "Consensus peaks by number of labs with MS2 (annotated portion in dark)"
+annotated_ids <- unique(structure_hits$consensus_id)
+
+ms2_by_consensus |>
+  mutate(annotated = consensus_id %in% annotated_ids) |>
+  count(n_labs_ms2, annotated) |>
+  ggplot(aes(x = factor(n_labs_ms2), y = n, fill = annotated)) +
+  geom_col() +
+  scale_fill_manual(values = c(`FALSE` = "#cccccc", `TRUE` = "#1f77b4"),
+                    labels  = c(`FALSE` = "Not annotated", `TRUE` = "Annotated")) +
+  labs(x = "Number of labs with MS2", y = "Consensus peaks", fill = NULL) +
+  theme_bw()
+```
+
+## Notes
+
+- Pipeline mirrors `sirius_annotation.qmd` but is driven by
+  `ct_filtered4.csv` instead of the manually curated annotation table.
+- One SIRIUS project per (mixture, lab) stored under
+  `results_consensus_all/<mix_slug>/`.
+- Formula and structure matching is scoped per mixture: a SIRIUS hit only
+  counts if the compound is expected in the sample's mixture.

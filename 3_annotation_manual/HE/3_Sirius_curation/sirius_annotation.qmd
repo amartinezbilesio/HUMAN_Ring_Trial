@@ -232,7 +232,7 @@ bind_rows(extraction_summary)
 ## Part 2: SIRIUS Annotation
 
 **NOTE:** SIRIUS must be running before executing this section.
-Start SIRIUS 6.3+ and ensure you are logged in.
+Credentials are loaded from `.Renviron` (`SIRIUS_USERNAME`, `SIRIUS_PASSWORD`).
 
 Each lab gets its own SIRIUS project. Annotation includes:
 
@@ -240,6 +240,13 @@ Each lab gets its own SIRIUS project. Annotation includes:
 - Molecular fingerprint prediction (CSI:FingerID)
 - Structure database search (BIO database)
 - Compound class prediction (CANOPUS)
+
+```{r}
+#| label: sirius-login
+#| eval: false
+sirius_user <- Sys.getenv("SIRIUS_USERNAME")
+sirius_pass <- Sys.getenv("SIRIUS_PASSWORD")
+```
 
 ```{r}
 #| label: sirius-annotate
@@ -252,6 +259,8 @@ for (lab_name in labs) {
 
   # --- Create / open SIRIUS project ---
   srs <- Sirius(
+    username  = sirius_user,
+    password  = sirius_pass,
     projectId = paste0("ring_trial_", lab_name),
     path = output_dir
   )
