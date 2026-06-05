@@ -201,7 +201,7 @@ plot_residuals <- function(model, title = "Residual Plot", data = NULL) {
     plot_df$mixture <- as.factor(data$mixture)
     p <- ggplot(plot_df, aes(x = Fitted, y = Residuals, color = mixture, shape = lab)) +
       geom_point(alpha = 0.7, size = 2.5) +
-      scale_color_viridis_d(option = "turbo") +
+      scale_color_hue() +
       scale_shape_manual(values = c(16, 17, 15, 18)) +
       labs(color = "Mixture", shape = "Laboratory")
   } else {
@@ -211,7 +211,7 @@ plot_residuals <- function(model, title = "Residual Plot", data = NULL) {
 
   p + geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
     labs(title = title, x = "Fitted Values", y = "Residuals") +
-    theme_minimal() +
+    theme_bw() +
     theme(legend.position = "bottom")
 }
 
@@ -227,7 +227,7 @@ plot_residuals_new <- function(model, title = "Residual Plot", data = NULL) {
     p <- ggplot(plot_df, aes(x = Fitted, y = Residuals,
                              color = mixture, shape = lab)) +
       geom_point(alpha = 0.7, size = 2.5) +
-      scale_color_viridis_d(option = "turbo") +
+      scale_color_hue() +
       scale_shape_manual(values = c(16, 17, 15, 18)) +
       labs(color = "Mixture", shape = "Laboratory")
   } else {
@@ -237,7 +237,7 @@ plot_residuals_new <- function(model, title = "Residual Plot", data = NULL) {
   p +
     geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
     labs(title = title, x = "Fitted Values", y = "Residuals") +
-    theme_minimal() +
+    theme_bw() +
     theme(legend.position = "bottom")
 }
 
@@ -255,9 +255,9 @@ plot_violin <- function(data, metric) {
   ggplot(data, aes(x = lab, y = .data[[metric]], fill = polarity)) +
     geom_violin(trim = FALSE, alpha = 0.6) +
     geom_jitter(aes(color = as.factor(mixture)), width = 0.2, size = 1.5, alpha = 0.7) +
-    scale_color_viridis_d(option = "turbo") +
+    scale_color_hue() +
     facet_wrap(~ data_level) +
-    theme_minimal() +
+    theme_bw() +
     labs(title = title, x = "Laboratory", y = ylab, color = "Mixture")
 }
 
@@ -269,7 +269,7 @@ plot_correlation_heatmap <- function(cor_data, title) {
     scale_fill_gradient2(low = "blue", mid = "white", high = "red",
                          midpoint = 0.5, limits = c(0, 1)) +
     facet_wrap(~polarity, ncol = 2) +
-    theme_minimal() +
+    theme_bw() +
     theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
     labs(title = title, x = "Lab Pair", y = "Mixture", fill = "Pearson r")
 }
@@ -282,7 +282,7 @@ plot_correlation_distribution <- function(cor_data, title) {
     stat_summary(fun = median, geom = "crossbar", width = 0.5,
                  color = "black", show.legend = FALSE) +
     facet_wrap(~polarity, ncol = 2) +
-    theme_minimal() +
+    theme_bw() +
     theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
     labs(title = title, subtitle = "Each point represents one mixture",
          x = "Lab Pair", y = "Pearson Correlation")
@@ -316,7 +316,7 @@ plot_quartile_variance <- function(data, metric_type = "TIC") {
     scale_fill_manual(values = c("gray85", "#E7B800", "#00AFBB")) +
     labs(title = paste(metric_type, "Variance Distribution Across RT Quartiles"),
          y = "Variance Contribution (%)", x = NULL) +
-    theme_minimal(base_size = 14) +
+    theme_bw(base_size = 14) +
     theme(axis.text.x = element_text(angle = 45, hjust = 1),
           legend.position = "top", panel.grid.major.x = element_blank())
 }

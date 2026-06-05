@@ -1,0 +1,237 @@
+---
+title: "Confidence tiering — populate `annotation_identity.csv` (Phase 5)"
+format:
+    html:
+        toc: true
+        toc-location: right
+        code-fold: true
+---
+
+# Goal
+
+Populate the `confidence_tier` column in `annotation_identity.csv`,
+overwriting the P1 `"unfiltered"` placeholder with A / B / C / D tiers
+based on:
+
+1. **COSMIC score** (within-lab confidence): the producer's
+   `confidenceExactMatch` from SIRIUS. Each lab assigns a score per
+   annotated compound; we use the **max across labs** per
+   `(mixture, compound, polarity)` so a compound flagged confidently
+   by *any* lab gets credit.
+
+2. **MS1-RT concordance** (between-lab confidence): SD of P2-aligned
+   `apex_rt` across labs that have a measurable peak (either `own` =
+   SIRIUS-annotated, or `consensus` = MS1-rescued from cross-lab
+   median). Small SD → labs agree on chromatographic position →
+   high cross-lab confidence in the identification.
+
+The CANONICAL_SCHEMAS.md contract says this column is overwritten in
+place. Downstream consumers (`9_per_compound_diagnostics.qmd`,
+`7_icc_reproducibility.qmd`) can then filter by `confidence_tier %in% c("A",
+"B")` to restrict to confident identifications.
+
+## Tier definition
+
+- **A**: COSMIC ≥ 0.5 **and** aligned-RT SD ≤ 3 s. Both axes strong.
+- **B**: COSMIC ≥ 0.5 **and** aligned-RT SD ≤ 10 s, or COSMIC ≥ 0.1
+  **and** aligned-RT SD ≤ 3 s. One axis strong, one marginal.
+- **C**: anything else with both axes computable (some weight on
+  both). Treat as low confidence.
+- **D**: missing one axis (NA COSMIC or undetermined RT SD because <2
+  labs detect / aligned). Treat as not-defensible.
+
+Thresholds are at the top of the setup chunk; the producer report
+shows tier counts, so they can be tuned by editing and re-running.
+
+## Setup
+
+```{r setup}
+#| message: false
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(here)
+
+producer_dir <- here("3_annotation_manual", "HE", "3_Sirius_curation",
+                     "results_all_ms2")
+object_dir   <- here("5_downstream_analysis", "object")
+
+# Tier thresholds. Adjust here and re-run to retune.
+cosmic_strong  <- 0.5
+cosmic_marginal <- 0.1
+rt_sd_strong   <- 3   # seconds (aligned)
+rt_sd_marginal <- 10  # seconds (aligned)
+
+# Minimum number of labs whose aligned_rt is used to compute the SD.
+# Setting <2 makes RT SD undefined.
+min_labs_for_rt_sd <- 2L
+```
+
+## 1. Load inputs
+
+```{r load-inputs}
+# Identity table (one row per (mixture, lab, compound, polarity), with COSMIC).
+# Read mixture as character — the canonical "2.10" trap.
+identity_df <- read.csv(
+  file.path(producer_dir, "annotation_identity.csv"),
+  stringsAsFactors = FALSE,
+  colClasses = c(mixture = "character"))
+
+cat("identity_df rows:", nrow(identity_df), "\n")
+
+# Aligned chrom metrics from the P3 producer. Has aligned_rt.
+chrom_norm <- read.csv(
+  file.path(object_dir, "annotation_chrom_metrics_normalized.csv"),
+  stringsAsFactors = FALSE,
+  colClasses = c(mixture = "character"))
+
+cat("chrom_norm rows:", nrow(chrom_norm),
+    " | with aligned_rt:", sum(!is.na(chrom_norm$aligned_rt)), "\n")
+```
+
+## 2. COSMIC axis: max score per `(mixture, compound, polarity)`
+
+```{r cosmic-axis}
+cosmic_max <- identity_df |>
+  group_by(mixture, compound, polarity) |>
+  summarise(cosmic_max = suppressWarnings(
+              max(confidenceExactMatch, na.rm = TRUE)),
+            cosmic_n_labs = sum(!is.na(confidenceExactMatch)),
+            .groups = "drop") |>
+  mutate(cosmic_max = ifelse(is.infinite(cosmic_max), NA_real_, cosmic_max))
+
+cat("Tuples with a COSMIC score: ",
+    sum(!is.na(cosmic_max$cosmic_max)), " / ", nrow(cosmic_max), "\n",
+    sep = "")
+```
+
+## 3. RT-concordance axis: SD of aligned_rt across labs
+
+```{r rt-axis}
+# Per (mixture, compound, polarity), collapse to one apex_rt per lab
+# (max-maxIntensity peak across adducts/sources), then SD across labs.
+rt_concordance <- chrom_norm |>
+  filter(!is.na(aligned_rt), !is.na(maxIntensity), maxIntensity > 0) |>
+  group_by(mixture, compound, polarity, lab) |>
+  slice_max(maxIntensity, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  group_by(mixture, compound, polarity) |>
+  summarise(rt_n_labs = n_distinct(lab),
+            rt_sd_aligned = if (n_distinct(lab) >= min_labs_for_rt_sd)
+                               sd(aligned_rt, na.rm = TRUE)
+                            else NA_real_,
+            .groups = "drop")
+
+cat("Tuples with computable RT SD (>=", min_labs_for_rt_sd, "labs aligned): ",
+    sum(!is.na(rt_concordance$rt_sd_aligned)), " / ", nrow(rt_concordance),
+    "\n", sep = "")
+```
+
+## 4. Assemble + apply tier logic
+
+```{r tier-assign}
+combined_axes <- cosmic_max |>
+  full_join(rt_concordance,
+            by = c("mixture", "compound", "polarity")) |>
+  mutate(tier = case_when(
+    is.na(cosmic_max) | is.na(rt_sd_aligned)                             ~ "D",
+    cosmic_max >= cosmic_strong   & rt_sd_aligned <= rt_sd_strong        ~ "A",
+    cosmic_max >= cosmic_strong   & rt_sd_aligned <= rt_sd_marginal      ~ "B",
+    cosmic_max >= cosmic_marginal & rt_sd_aligned <= rt_sd_strong        ~ "B",
+    TRUE                                                                  ~ "C"))
+
+cat("Tier counts (per mixture × compound × polarity):\n")
+combined_axes |>
+  count(polarity, tier) |>
+  pivot_wider(names_from = tier, values_from = n, values_fill = 0L,
+              names_sort = TRUE) |>
+  knitr::kable(caption = "Tier counts per polarity. A = both axes strong; B = one strong + one marginal; C = both marginal-to-weak but defined; D = at least one axis undefined.")
+```
+
+```{r tier-vs-axes}
+#| fig-cap: "Tier assignment in COSMIC × aligned-RT-SD space. Vertical dashed lines = COSMIC thresholds; horizontal = RT SD thresholds. Coloured by tier."
+#| fig-height: 5
+ggplot(combined_axes |> filter(!is.na(cosmic_max), !is.na(rt_sd_aligned)),
+       aes(x = cosmic_max, y = rt_sd_aligned, colour = tier)) +
+  geom_point(size = 1.5, alpha = 0.6) +
+  geom_vline(xintercept = c(cosmic_marginal, cosmic_strong),
+             linetype = "dashed", colour = "grey50") +
+  geom_hline(yintercept = c(rt_sd_strong, rt_sd_marginal),
+             linetype = "dashed", colour = "grey50") +
+  facet_wrap(~ polarity) +
+  scale_y_log10() +
+  scale_colour_manual(values = c(A = "#1F77B4", B = "#2CA02C",
+                                  C = "#FF7F0E", D = "#888888")) +
+  labs(x = "max COSMIC score across labs",
+       y = "aligned-RT SD across labs (s, log)",
+       colour = "Tier",
+       title = "Confidence tier vs the two axes",
+       subtitle = sprintf("Thresholds: COSMIC %.1f / %.1f; RT SD %d / %d s",
+                          cosmic_strong, cosmic_marginal,
+                          rt_sd_strong, rt_sd_marginal)) +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+## 5. Overwrite `confidence_tier` in `annotation_identity.csv`
+
+Per the CANONICAL_SCHEMAS.md contract, `confidence_tier` is updated in
+place. The same `(mixture, compound, polarity)` tuple gets the same
+tier across all lab rows.
+
+```{r overwrite-confidence}
+identity_df_tiered <- identity_df |>
+  select(-confidence_tier) |>
+  left_join(combined_axes |>
+              select(mixture, compound, polarity, tier),
+            by = c("mixture", "compound", "polarity")) |>
+  rename(confidence_tier = tier) |>
+  # Defensive: any join misses default back to D so the column has no NAs.
+  mutate(confidence_tier = coalesce(confidence_tier, "D"))
+
+stopifnot(all(c("confidence_tier") %in% names(identity_df_tiered)))
+stopifnot(nrow(identity_df_tiered) == nrow(identity_df))
+
+# Re-order columns to match the original schema (CANONICAL_SCHEMAS.md).
+identity_df_tiered <- identity_df_tiered |>
+  select(mixture, lab, compound, inchikey_2d, polarity,
+         best_formula_rank, best_structure_rank, adducts,
+         molecularFormula, expected_formula, expected_inchikey,
+         mz_observed, confidenceExactMatch, confidenceApproxMatch,
+         confidence_tier)
+
+write.csv(identity_df_tiered,
+          file.path(producer_dir, "annotation_identity.csv"),
+          row.names = FALSE)
+
+cat("Overwrote: ",
+    file.path(producer_dir, "annotation_identity.csv"),
+    "\n  rows: ", nrow(identity_df_tiered), "\n", sep = "")
+```
+
+## 6. Report — per-lab tier coverage
+
+```{r tier-by-lab}
+identity_df_tiered |>
+  count(lab, polarity, confidence_tier) |>
+  pivot_wider(names_from = confidence_tier, values_from = n,
+              values_fill = 0L, names_sort = TRUE) |>
+  knitr::kable(caption = "Tier counts per (lab, polarity) on the identity table itself. Same tier value is replicated across all lab rows for the same (mixture, compound, polarity) tuple.")
+```
+
+# Notes
+
+- Re-running this file is **idempotent** — it always recomputes tiers
+  from the same axes and overwrites the column.
+- If thresholds change (top of setup), the producer's tier counts in
+  this report show whether you're in a sensible regime. Tier A should
+  not be empty; if it is, thresholds are too strict.
+- `confidence_tier = "D"` rows are compounds where one of the two axes
+  could not be computed (e.g. < 2 labs detect → no RT SD; COSMIC is
+  NA). These are not "low confidence" so much as "not-defensible";
+  downstream code should treat them as "not-yet-graded" rather than
+  filtering them out as bad.
+- Consumers that previously read `annotation_identity.csv` with
+  `filter(confidence_tier == "unfiltered")` will now see no rows
+  (placeholder gone) — switch them to `filter(confidence_tier %in%
+  c("A", "B"))` for confident-only, or remove the filter to keep all.

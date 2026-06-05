@@ -52,6 +52,17 @@
 .RData
 .Renviron
 
+# ---- Oversized RData / RDS (>100 MB, exceed GitHub's per-file limit) ------
+# These must be distributed out-of-band (Zenodo / lab cloud / Git LFS).
+# Listed individually so smaller RData files in object/ are still tracked.
+5_downstream_analysis/object/sp_full.RData
+5_downstream_analysis/object/sp_full_detect.RData
+5_downstream_analysis/object/sp_icl.RData
+# Regeneratable matching caches — moderate size, costly only on the first
+# render of 2_consensus_peaks.qmd. Excluded to keep the repo lighter.
+5_downstream_analysis/object/correspondence_grouped.rds
+5_downstream_analysis/object/correspondence_grouped_aligned.rds
+
 # ---- Editor / OS / temp ---------------------------------------------------
 *.DS_Store
 Thumbs.db

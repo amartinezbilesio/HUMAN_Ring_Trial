@@ -1,0 +1,1229 @@
+---
+title: "Per-compound diagnostics: identity, retention, abundance"
+format:
+    html:
+        toc: true
+        toc-location: right
+        code-fold: true
+---
+
+**Per-compound deep dive** on the annotated spike-in panel. Three axes:
+identity (MS2), retention (RT), abundance (MS1). All analyses are at
+the **compound level** — one number per `(mixture, compound, lab,
+polarity)` — to surface where individual compounds disagree across
+labs.
+
+For the **cross-lab reproducibility numbers** (ICC, pairwise ICC,
+3-lab subset) see `7_icc_reproducibility.qmd`. For the **data-level
+progression** (Full → Detected → Annotated → Consensus) see
+`8_data_level_progression.qmd`. For the **RT alignment splines** see
+`4_rt_alignment.qmd`.
+
+Inputs (canonical CSVs from the SIRIUS producer
+`3_annotation_manual/HE/3_Sirius_curation/sirius_annotation_all_ms2.qmd`):
+
+- `annotation_identity.csv` — MS2 identity per `(mixture, lab, compound, polarity)`
+- `annotation_chrom_metrics.csv` — MS1 peak metrics per `(mixture, lab, polarity, compound, adduct, source)`
+
+See [`CANONICAL_SCHEMAS.md`](CANONICAL_SCHEMAS.md) for column contracts.
+
+Identity-driven analyses keep rows where `confidence_tier ∈ tier_keep`.
+The default `tier_keep` includes the legacy `"unfiltered"` placeholder
+plus tiers A and B; tighten to `c("A", "B")` for a confident-only
+sensitivity re-run.
+
+## Setup
+
+```{r setup}
+#| message: false
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(here)
+
+labs <- c("afekta", "cembio", "hmgu", "icl")
+producer_dir <- here("3_annotation_manual", "HE", "3_Sirius_curation",
+                     "results_all_ms2")
+
+tier_keep <- c("unfiltered", "A", "B")
+
+## mixture forced to character — read.csv would otherwise coerce quoted
+## "2.10" → 2.1 (numeric), silently colliding with mixture "2.1".
+identity_df <- read.csv(file.path(producer_dir, "annotation_identity.csv"),
+                        stringsAsFactors = FALSE,
+                        colClasses = c(mixture = "character")) |>
+  filter(confidence_tier %in% tier_keep)
+
+chrom_df <- read.csv(file.path(producer_dir, "annotation_chrom_metrics.csv"),
+                     stringsAsFactors = FALSE,
+                     colClasses = c(mixture = "character"))
+
+cat("identity_df rows (tier-kept):", nrow(identity_df),
+    " | chrom_df rows:", nrow(chrom_df), "\n")
+```
+
+`chrom_one_per_compound` collapses `chrom_df` to one row per
+`(mixture, lab, compound)` by picking the polarity / adduct / source
+giving the highest `maxIntensity`. Used by per-compound abundance and
+RT analyses.
+
+```{r chrom-collapse}
+chrom_one_per_compound <- chrom_df |>
+  group_by(mixture, lab, compound) |>
+  slice_max(maxIntensity, n = 1, with_ties = FALSE) |>
+  ungroup()
+```
+
+`expected_grid` is the full `(mixture, compound) × lab` grid — used as
+a `right_join` target so plots show absences as white tiles.
+
+```{r expected-grid}
+expected_grid <- identity_df |>
+  distinct(mixture, compound) |>
+  tidyr::expand_grid(lab = labs)
+```
+
+# Identity (MS2)
+
+## Per-compound coverage across labs
+
+For each `(mixture, compound, lab)`: did SIRIUS annotate the expected
+compound (via 2D-InChIKey match) at any rank?
+
+```{r compound-presence-heatmap}
+#| fig-height: 60
+#| fig-cap: "MS2 identification of expected compounds per lab. Blue = annotated; grey = not annotated. Mixture stripes on the left."
+compound_presence <- expected_grid |>
+  left_join(identity_df |>
+              distinct(mixture, lab, compound) |>
+              mutate(found = TRUE),
+            by = c("mixture", "lab", "compound")) |>
+  mutate(found = coalesce(found, FALSE))
+
+ggplot(compound_presence, aes(x = lab, y = compound, fill = found)) +
+  geom_tile(colour = "white", linewidth = 0.4) +
+  facet_grid(mixture ~ ., scales = "free_y", space = "free_y") +
+  scale_fill_manual(values = c(`TRUE` = "#1f77b4", `FALSE` = "#eeeeee"),
+                    labels = c(`TRUE` = "Annotated", `FALSE` = "Not annotated")) +
+  labs(x = NULL, y = NULL, fill = NULL,
+       title = "MS2 identification per (mixture, compound, lab)") +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = 9),
+        axis.text.x = element_text(face = "bold", size = 11),
+        strip.text.y = element_text(angle = 0, face = "bold"),
+        legend.position = "bottom")
+```
+
+```{r labs-n-found}
+#| fig-height: 60
+#| fig-cap: "Number of labs that annotated each expected compound."
+compound_presence |>
+  group_by(mixture, compound) |>
+  summarise(n_labs = sum(found), .groups = "drop") |>
+  ggplot(aes(x = n_labs, y = compound, fill = factor(n_labs))) +
+  geom_col() +
+  facet_grid(mixture ~ ., scales = "free_y", space = "free_y") +
+  scale_fill_brewer(palette = "Blues", direction = 1) +
+  scale_x_continuous(breaks = 0:length(labs)) +
+  labs(x = "Number of labs", y = NULL, fill = "# labs",
+       title = "How many labs annotated each compound?") +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = 9),
+        strip.text.y = element_text(angle = 0, face = "bold"))
+```
+
+## Best structure rank per (mixture, compound, lab)
+
+Lower is better; 1 = top hit. Polarity collapsed to the smaller of the
+two ranks when both are present.
+
+```{r rank-heatmap}
+#| fig-height: 60
+#| fig-cap: "SIRIUS best structure rank per (mixture, compound, lab). White = not annotated."
+best_rank_per_lab <- identity_df |>
+  group_by(mixture, lab, compound) |>
+  summarise(best_rank = suppressWarnings(min(best_structure_rank, na.rm = TRUE)),
+            .groups = "drop") |>
+  mutate(best_rank = ifelse(is.infinite(best_rank), NA_real_, best_rank))
+
+best_rank_per_lab |>
+  right_join(expected_grid, by = c("mixture", "lab", "compound")) |>
+  ggplot(aes(x = lab, y = compound, fill = best_rank)) +
+  geom_tile(colour = "white", linewidth = 0.4) +
+  facet_grid(mixture ~ ., scales = "free_y", space = "free_y") +
+  scale_fill_viridis_c(option = "C", direction = -1, na.value = "#eeeeee",
+                       name = "Best rank\n(1 = top)") +
+  labs(x = NULL, y = NULL, title = "Best SIRIUS structure rank") +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = 9),
+        axis.text.x = element_text(face = "bold", size = 11),
+        strip.text.y = element_text(angle = 0, face = "bold"))
+```
+
+```{r rank-summary}
+best_rank_per_lab |>
+  filter(!is.na(best_rank)) |>
+  group_by(lab) |>
+  summarise(n           = n(),
+            median_rank = median(best_rank),
+            pct_rank1   = round(100 * mean(best_rank == 1), 1),
+            pct_top3    = round(100 * mean(best_rank <= 3), 1),
+            pct_top10   = round(100 * mean(best_rank <= 10), 1),
+            .groups = "drop") |>
+  knitr::kable(caption = "Structure rank summary per lab")
+```
+
+```{r rank-binned-histogram}
+#| fig-height: 4
+#| fig-cap: "Structure rank distribution per lab (binned)."
+best_rank_per_lab |>
+  filter(!is.na(best_rank)) |>
+  mutate(bin = cut(best_rank, breaks = c(0, 1, 3, 10, 50, Inf),
+                   labels = c("1", "2-3", "4-10", "11-50", ">50"))) |>
+  ggplot(aes(x = bin, fill = lab)) +
+  geom_bar() +
+  facet_wrap(~ lab, scales = "free_y") +
+  labs(x = "Structure rank bin", y = "Compounds",
+       title = "Per-lab structure rank distribution") +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+
+## Adducts observed
+
+Adducts that supported each lab's annotation, broken down per mixture
+(stacked) and per (lab, compound) (boxplot of distinct adducts).
+
+```{r adduct-usage}
+#| fig-height: 8
+#| fig-cap: "Adducts observed for expected-compound hits per lab × mixture."
+identity_df |>
+  tidyr::separate_rows(adducts, sep = ";") |>
+  filter(!is.na(adducts), nzchar(adducts)) |>
+  count(mixture, lab, adducts) |>
+  ggplot(aes(x = lab, y = n, fill = adducts)) +
+  geom_col(position = "stack") +
+  facet_wrap(~ mixture) +
+  labs(x = NULL, y = "Count", fill = "Adduct",
+       title = "Adducts for expected-compound hits") +
+  theme_bw() +
+  theme(legend.key.size = unit(0.4, "cm"),
+        legend.text     = element_text(size = 7))
+```
+
+```{r adduct-breadth}
+#| fig-height: 4
+#| fig-cap: "Per-compound adduct breadth, by lab."
+identity_df |>
+  tidyr::separate_rows(adducts, sep = ";") |>
+  filter(!is.na(adducts), nzchar(adducts)) |>
+  distinct(lab, mixture, compound, adducts) |>
+  count(lab, mixture, compound, name = "n_adducts") |>
+  ggplot(aes(x = lab, y = n_adducts)) +
+  geom_boxplot(outlier.shape = NA, fill = "grey90") +
+  geom_jitter(width = 0.15, alpha = 0.4, size = 1) +
+  labs(x = NULL, y = "Adducts per compound",
+       title = "Per-compound adduct breadth, by lab") +
+  theme_bw()
+```
+
+## m/z deviation across labs
+
+For each `(mixture, compound, polarity)` we compute the per-lab ppm
+deviation of `mz_observed` from the cross-lab mean, restricted to
+compound–polarity pairs seen in ≥ 2 labs. Per (mixture, compound, lab)
+we then aggregate across polarity by median for the heatmap. Same
+calculation as the producer's original §6 — coarser granularity (one
+ionMass per polarity instead of per adduct) because identity collapses
+candidates to one row per polarity at producer time.
+
+```{r mz-dev-build}
+mz_dev_df <- identity_df |>
+  filter(!is.na(mz_observed)) |>
+  group_by(mixture, compound, polarity) |>
+  mutate(n_labs    = n_distinct(lab),
+         mean_mass = mean(mz_observed, na.rm = TRUE),
+         ppm_dev   = (mz_observed - mean_mass) / mean_mass * 1e6) |>
+  ungroup() |>
+  filter(n_labs >= 2)
+
+cat("(mixture, compound, polarity) pairs with >= 2 labs:",
+    n_distinct(paste(mz_dev_df$mixture, mz_dev_df$compound,
+                     mz_dev_df$polarity)), "\n")
+```
+
+```{r mz-dev-heatmap}
+#| fig-height: 60
+#| fig-cap: "Median Δ m/z (ppm) from cross-lab mean per (mixture, compound, lab). White = compound not annotated by this lab."
+mz_dev_df |>
+  group_by(mixture, compound, lab) |>
+  summarise(ppm_dev = median(ppm_dev, na.rm = TRUE), .groups = "drop") |>
+  right_join(expected_grid, by = c("mixture", "lab", "compound")) |>
+  ggplot(aes(x = lab, y = compound, fill = ppm_dev)) +
+  geom_tile(colour = "white", linewidth = 0.4) +
+  facet_grid(mixture ~ ., scales = "free_y", space = "free_y") +
+  scale_fill_gradient2(low = "#3b4cc0", mid = "white", high = "#b40426",
+                       midpoint = 0, na.value = "#eeeeee",
+                       name = "ppm dev\nvs mean") +
+  labs(x = NULL, y = NULL,
+       title = "Inter-lab m/z shift per (mixture, compound, lab)") +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = 9),
+        axis.text.x = element_text(face = "bold", size = 11),
+        strip.text.y = element_text(angle = 0, face = "bold"))
+```
+
+# Retention (RT)
+
+## Per-lab apex RT
+
+`apex_rt` per `(mixture, compound, lab)`, taking the dominant-signal
+adduct/source via `chrom_one_per_compound`.
+
+```{r apex-rt-heatmap}
+#| fig-height: 60
+#| fig-cap: "MS1 apex RT (s) per (mixture, compound, lab). White = no peak detected."
+chrom_one_per_compound |>
+  right_join(expected_grid, by = c("mixture", "lab", "compound")) |>
+  ggplot(aes(x = lab, y = compound, fill = apex_rt)) +
+  geom_tile(colour = "white", linewidth = 0.4) +
+  facet_grid(mixture ~ ., scales = "free_y", space = "free_y") +
+  scale_fill_viridis_c(option = "C", na.value = "#eeeeee", name = "Apex RT (s)") +
+  labs(x = NULL, y = NULL,
+       title = "MS1 apex RT per (mixture, compound, lab)") +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = 9),
+        axis.text.x = element_text(face = "bold", size = 11),
+        strip.text.y = element_text(angle = 0, face = "bold"))
+```
+
+## Cross-lab RT spread
+
+Per `(mixture, compound, polarity)`, summarise apex RT across labs
+that detected the peak. **Polarity must be in the grouping** — a
+compound can have very different RT in pos vs neg because the
+extraction is on different m/z windows; `chrom_one_per_compound`'s
+collapse-across-polarity rule would otherwise mix them and inflate
+the apparent "cross-lab RT range" (e.g. 2-oxobutanoic acid in mix
+2.2 has neg-only range 7.7 s and pos-only range 14.9 s, but mixing
+polarities gives the misleading 228 s reported in earlier renders).
+
+```{r rt-spread-build}
+# Best peak per (mixture, lab, compound, polarity) — polarity-aware,
+# unlike chrom_one_per_compound. Restrict to detected rows.
+chrom_dom_pol <- chrom_df |>
+  filter(detection == "detected" | (!is.na(apex_rt) & !is.na(maxIntensity))) |>
+  filter(!is.na(apex_rt), !is.na(maxIntensity), maxIntensity > 0) |>
+  group_by(mixture, lab, compound, polarity) |>
+  slice_max(maxIntensity, n = 1, with_ties = FALSE) |>
+  ungroup()
+
+rt_per_compound <- chrom_dom_pol |>
+  group_by(mixture, compound, polarity) |>
+  summarise(n_labs   = n(),
+            rt_mean  = mean(apex_rt),
+            rt_sd    = sd(apex_rt),
+            rt_range = max(apex_rt) - min(apex_rt),
+            .groups  = "drop") |>
+  filter(n_labs >= 2L)
+
+rt_per_compound |>
+  arrange(desc(rt_range)) |>
+  head(20) |>
+  mutate(across(c(rt_mean, rt_sd, rt_range), \(x) round(x, 1))) |>
+  knitr::kable(caption = "Top 20 (mixture, compound, polarity) by cross-lab apex RT range")
+```
+
+```{r rt-spread-plot}
+#| fig-height: 4
+#| fig-cap: "Apex RT SD per compound, faceted by number of detecting labs."
+ggplot(rt_per_compound, aes(x = factor(n_labs), y = rt_sd)) +
+  geom_boxplot(outlier.shape = NA, fill = "grey90") +
+  geom_jitter(width = 0.15, alpha = 0.5) +
+  labs(x = "Number of labs detecting", y = "Apex RT sd (s)",
+       title = "Between-lab apex RT variability per compound") +
+  theme_bw()
+```
+
+```{r rt-range-scatter}
+#| fig-height: 25
+#| fig-cap: "Cross-lab apex RT range per (mixture, compound) for compounds detected in ≥ 2 labs."
+rt_per_compound |>
+  arrange(desc(rt_range)) |>
+  mutate(label = reorder(paste0(mixture, " - ", compound), rt_range)) |>
+  ggplot(aes(x = rt_range, y = label, colour = factor(n_labs))) +
+  geom_point(size = 3) +
+  scale_colour_viridis_d(option = "C", end = 0.85) +
+  labs(x = "Apex RT range across labs (s)", y = NULL, colour = "# labs",
+       title = "Cross-lab RT spread per compound (≥ 2 labs)") +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = 6))
+```
+
+## Cross-polarity RT agreement (MS2-hit sanity)
+
+The MS2 `apex_rt` recorded for the same compound in pos vs neg must agree
+— adducts of the same molecule elute at the same RT. A large
+`|rt_pos − rt_neg|` means **DDA triggered MS2 on different
+chromatographic peaks in the two polarities** and SIRIUS still matched
+both spectra to the compound (typically because the fragments fit the
+same chemical formula / structure rule). The "wrong" polarity's
+`own` row then carries the wrong `apex_rt`, which propagates into the
+cross-lab consensus used by labs that did not annotate this compound.
+
+This is **a producer-side issue at the MS2-hit step** — it does not
+arise from the SNR picker or chromExtract. The diagnostic below
+classifies each compound (detected in both polarities by ≥ 2 labs each)
+into four states:
+
+- **agree (≤ 5 s)** — pos and neg MS2 triggered on the same peak. ✓
+- **moderate disagreement (5–30 s)** — same peak with chromatographic
+  drift, or a borderline adjacent peak.
+- **reproducible-wrong (> 30 s, labs agree *within* each polarity)** —
+  multiple labs *independently* triggered MS2 on the same wrong pos peak
+  and the same neg peak. Almost certainly a real chromatographic
+  isomer / degradation product / contaminant sharing the SIRIUS
+  fragmentation pattern.
+- **non-reproducible-wrong (> 30 s, labs differ within polarity)** —
+  each lab grabbed a different random peak. Random extraction noise.
+
+```{r cross-polarity-build}
+# Best detected MS2-hit peak per (mixture, compound, polarity, lab).
+dom_per_pol <- chrom_df |>
+  filter(detection == "detected",
+         !is.na(apex_rt), !is.na(maxIntensity), maxIntensity > 0) |>
+  group_by(mixture, compound, polarity, lab) |>
+  slice_max(maxIntensity, n = 1, with_ties = FALSE) |>
+  ungroup()
+
+# Per (mixture, compound, polarity), cross-lab consensus apex_rt + spread.
+per_pol_consensus <- dom_per_pol |>
+  group_by(mixture, compound, polarity) |>
+  summarise(n_labs   = n(),
+            rt_med   = median(apex_rt),
+            rt_range = max(apex_rt) - min(apex_rt),
+            .groups  = "drop")
+
+# Best COSMIC per (mixture, compound, polarity) — exact score.
+cosmic_per_pol <- identity_df |>
+  group_by(mixture, compound, polarity) |>
+  summarise(cosmic = suppressWarnings(max(confidenceExactMatch, na.rm = TRUE)),
+            .groups = "drop") |>
+  mutate(cosmic = ifelse(is.infinite(cosmic), NA_real_, cosmic))
+
+# Both-polarity wide table.
+both_pol <- per_pol_consensus |>
+  tidyr::pivot_wider(id_cols = c(mixture, compound),
+                      names_from = polarity,
+                      values_from = c(n_labs, rt_med, rt_range)) |>
+  filter(!is.na(rt_med_pos), !is.na(rt_med_neg),
+         n_labs_pos >= 2, n_labs_neg >= 2) |>
+  mutate(abs_delta = abs(rt_med_pos - rt_med_neg)) |>
+  left_join(cosmic_per_pol |> filter(polarity == "pos") |>
+              select(mixture, compound, cosmic_pos = cosmic),
+            by = c("mixture", "compound")) |>
+  left_join(cosmic_per_pol |> filter(polarity == "neg") |>
+              select(mixture, compound, cosmic_neg = cosmic),
+            by = c("mixture", "compound")) |>
+  mutate(class = case_when(
+    abs_delta <= 5                                          ~ "agree (≤5s)",
+    abs_delta > 5  & abs_delta <= 30                        ~ "moderate disagreement (5–30s)",
+    abs_delta > 30 & rt_range_pos <= 20 & rt_range_neg <= 20 ~ "reproducible-wrong (>30s, labs agree per polarity)",
+    abs_delta > 30                                          ~ "non-reproducible-wrong (labs differ within polarity)",
+    TRUE                                                    ~ "other"
+  ),
+  class = factor(class, levels = c(
+    "agree (≤5s)",
+    "moderate disagreement (5–30s)",
+    "reproducible-wrong (>30s, labs agree per polarity)",
+    "non-reproducible-wrong (labs differ within polarity)")))
+
+cat("Compounds detected in both polarities (≥2 labs each):", nrow(both_pol), "\n")
+both_pol |> count(class) |>
+  mutate(pct = round(100 * n / sum(n), 1)) |>
+  knitr::kable(caption = "Cross-polarity agreement classes for MS2 hits.")
+```
+
+```{r cross-polarity-scatter}
+#| fig-cap: "Cross-polarity RT agreement per (mixture, compound). Dashed line = pos = neg. Red = reproducible-wrong (labs agree on a wrong RT within each polarity). Grey = noise."
+#| fig-height: 6
+ggplot(both_pol, aes(x = rt_med_neg, y = rt_med_pos, colour = class,
+                      size = pmin(n_labs_pos, n_labs_neg))) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_point(alpha = 0.8) +
+  scale_colour_manual(values = c(
+    "agree (≤5s)"                                          = "#2CA02C",
+    "moderate disagreement (5–30s)"                        = "#FFB347",
+    "reproducible-wrong (>30s, labs agree per polarity)"   = "#D62728",
+    "non-reproducible-wrong (labs differ within polarity)" = "#888888"),
+    drop = FALSE) +
+  scale_size_continuous(range = c(1.5, 4), breaks = c(2, 3, 4),
+                          name = "min(n_labs)") +
+  labs(x = "Cross-lab median apex_rt — neg (s)",
+       y = "Cross-lab median apex_rt — pos (s)",
+       colour = NULL,
+       title = "Cross-polarity RT agreement per compound") +
+  theme_bw() + theme(legend.position = "right")
+```
+
+```{r cross-polarity-table}
+both_pol |>
+  filter(class == "reproducible-wrong (>30s, labs agree per polarity)") |>
+  arrange(desc(abs_delta)) |>
+  mutate(across(c(rt_med_pos, rt_med_neg, rt_range_pos, rt_range_neg,
+                  abs_delta), \(x) round(x, 1)),
+         across(c(cosmic_pos, cosmic_neg), \(x) round(x, 2))) |>
+  select(mixture, compound,
+         n_labs_pos, rt_med_pos, rt_range_pos, cosmic_pos,
+         n_labs_neg, rt_med_neg, rt_range_neg, cosmic_neg,
+         abs_delta) |>
+  knitr::kable(caption = "Reproducible-wrong cross-polarity disagreements. High COSMIC in both polarities = real chromatographic isomer with shared MS2 fragments (or co-eluting contaminant), not random noise.")
+```
+
+## LOO-RT-shift annotation confidence
+
+For each `(mixture, compound, lab)` the leave-one-out shift:
+
+```
+loo_shift(compound, lab) = apex_rt(compound, lab)
+                         - median(apex_rt of other labs)
+```
+
+If large `|loo_shift|` coincides with bad SIRIUS rank → likely
+wrong-peak annotation. If large shift coincides with rank 1 → labs
+agree on the compound on chromatographically shifted peaks.
+
+```{r loo-shift-build}
+# LOO shift must be polarity-aware for the same reason as rt-spread
+# above — comparing a lab's pos apex_rt to others' neg apex_rt is
+# meaningless.
+rt_lab <- chrom_dom_pol |>
+  select(mixture, lab, compound, polarity, apex_rt)
+
+rt_shift <- rt_lab |>
+  group_by(mixture, compound, polarity) |>
+  mutate(n_labs    = n(),
+         loo_shift = apex_rt - vapply(seq_len(n()),
+                                      \(i) median(apex_rt[-i], na.rm = TRUE),
+                                      numeric(1))) |>
+  ungroup() |>
+  mutate(abs_loo_shift = abs(loo_shift)) |>
+  filter(n_labs >= 2)
+
+rank_rt <- inner_join(rt_shift,
+                      best_rank_per_lab |> filter(!is.na(best_rank)),
+                      by = c("mixture", "lab", "compound"))
+```
+
+```{r loo-shift-binned}
+#| fig-cap: "(mixture, lab, compound) cases per |LOO RT shift| bin × number of labs detecting."
+rank_rt |>
+  mutate(shift_bin = cut(abs_loo_shift,
+                         breaks = c(-Inf, 2, 5, 10, Inf),
+                         labels = c("<=2s", "2-5s", "5-10s", ">10s"))) |>
+  count(n_labs, shift_bin) |>
+  ggplot(aes(x = shift_bin, y = n, fill = factor(n_labs))) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = n), position = position_dodge(width = 0.9),
+            vjust = -0.3, size = 3) +
+  labs(x = "|LOO RT shift|", y = "(compound, lab) cases",
+       fill = "n_labs detecting",
+       title = "LOO RT shifts broken down by number of detecting labs") +
+  theme_bw()
+```
+
+```{r shift-vs-rank}
+#| fig-cap: "Rank tier composition by LOO RT shift bin (proportions within each bin)."
+rank_rt |>
+  mutate(shift_bin = cut(abs_loo_shift,
+                         breaks = c(-Inf, 2, 5, 10, Inf),
+                         labels = c("<=2s", "2-5s", "5-10s", ">10s")),
+         rank_tier = factor(case_when(
+                              best_rank == 1   ~ "1 (top)",
+                              best_rank <= 10  ~ "2-10",
+                              TRUE             ~ ">10"),
+                            levels = c("1 (top)", "2-10", ">10"))) |>
+  count(shift_bin, rank_tier) |>
+  group_by(shift_bin) |>
+  mutate(pct = 100 * n / sum(n)) |>
+  ungroup() |>
+  ggplot(aes(x = shift_bin, y = pct, fill = rank_tier)) +
+  geom_col() +
+  geom_text(aes(label = ifelse(pct >= 5, sprintf("%.0f%%", pct), "")),
+            position = position_stack(vjust = 0.5), size = 3) +
+  labs(x = "|LOO RT shift|", y = "% of (compound, lab) cases",
+       fill = "Structure rank",
+       title = "Annotation quality vs RT shift magnitude") +
+  theme_bw()
+```
+
+```{r shift-vs-rank-scatter}
+#| fig-height: 5
+#| fig-cap: "Rank vs |LOO RT shift|. Point size = number of labs detecting the compound."
+ggplot(rank_rt, aes(x = abs_loo_shift, y = best_rank,
+                    colour = lab, size = factor(n_labs))) +
+  geom_jitter(width = 0, height = 0.15, alpha = 0.7) +
+  scale_size_manual(values = c("2" = 1.5, "3" = 2.5, "4" = 3.5)) +
+  labs(x = "|LOO RT shift| (s)", y = "Structure rank",
+       colour = "Lab", size = "n_labs detecting",
+       title = "Structure rank vs LOO RT shift") +
+  theme_bw()
+```
+
+```{r worst-shift-context}
+#| fig-height: 5
+#| fig-cap: "Top 10 LOO-shift cases. Triangle = focal lab; round = other labs."
+top_shift <- rank_rt |>
+  arrange(desc(abs_loo_shift)) |>
+  head(10) |>
+  mutate(label = sprintf("%s | focal=%s | n=%d | rank=%d | shift=%.1fs",
+                         compound, lab, n_labs, best_rank, loo_shift))
+
+panel <- top_shift |>
+  select(mixture, compound, lab_focal = lab, label) |>
+  inner_join(rt_lab, by = c("mixture", "compound"),
+             relationship = "many-to-many") |>
+  mutate(is_focal = lab == lab_focal,
+         label    = factor(label, levels = rev(top_shift$label)))
+
+ggplot(panel, aes(x = apex_rt, y = label,
+                  colour = lab, shape = is_focal, size = is_focal)) +
+  geom_point() +
+  scale_shape_manual(values = c(`TRUE` = 17, `FALSE` = 16), guide = "none") +
+  scale_size_manual(values = c(`TRUE` = 3.5, `FALSE` = 2.5), guide = "none") +
+  labs(x = "apex RT (s)", y = NULL, colour = "lab",
+       title = "Worst LOO-RT-shift cases — per-lab apex RT context") +
+  theme_bw()
+```
+
+Read this plot as: triangle far from the round-point cluster + rank 1
+→ labs are calling the same compound on chromatographically shifted
+peaks (annotation probably OK, RT is the issue). Triangle far + bad
+rank → suspicious annotation (likely wrong peak picked).
+
+### Rank per lab on the largest-RT-shift compounds
+
+For compounds in the top tertile of `rt_range` within their mixture,
+show the SIRIUS structure rank per lab. Same diagnostic as the
+producer's original §7: low ranks across labs despite large RT spread
+→ labs converge on the right compound but their chromatography differs;
+mixed ranks → at least one lab probably picked the wrong peak.
+
+```{r rank-vs-large-rt-shift}
+#| fig-height: 12
+#| fig-cap: "Structure rank per lab for compounds in the top tertile of cross-lab RT range (within each mixture)."
+large_shift <- rt_per_compound |>
+  group_by(mixture) |>
+  filter(rt_range >= quantile(rt_range, 2/3, na.rm = TRUE)) |>
+  ungroup() |>
+  select(mixture, compound)
+
+best_rank_per_lab |>
+  inner_join(large_shift, by = c("mixture", "compound")) |>
+  mutate(facet_lab = paste0(mixture, " - ", compound)) |>
+  ggplot(aes(x = lab, y = best_rank, colour = lab)) +
+  geom_point(size = 2.5, na.rm = TRUE) +
+  facet_wrap(~ facet_lab, ncol = 4) +
+  scale_y_reverse() +
+  labs(x = NULL, y = "Best structure rank (1 = top)", colour = NULL,
+       title = "Annotation rank for compounds with large RT shifts") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.text.x     = element_text(angle = 45, hjust = 1),
+        strip.text      = element_text(size = 6))
+```
+
+# Abundance (MS1)
+
+## Lab-median-centred log10 abundance
+
+`log_max_int_lab_norm = log10(maxIntensity) - median(log10(maxIntensity))`
+within each `(lab, mixture)`. Removes cross-lab sensitivity offsets so
+colour shows which compounds respond unusually well or poorly **within
+each lab**, free of platform-scale differences.
+
+`maxIntensity` is the primary abundance metric (scan-rate-robust);
+`areaUnderTic` is sensitive to scan count and boundary choice across
+the ~15× scan-rate gap between cembio (1.5 s) and icl (0.1 s).
+
+```{r abundance-build}
+cross_lab_df <- chrom_one_per_compound |>
+  filter(!is.na(maxIntensity), maxIntensity > 0) |>
+  group_by(mixture, compound) |>
+  filter(n_distinct(lab) >= 2L) |>
+  ungroup() |>
+  mutate(log_max_int = log10(maxIntensity)) |>
+  group_by(lab, mixture) |>
+  mutate(log_max_int_lab_norm = log_max_int - median(log_max_int, na.rm = TRUE)) |>
+  ungroup()
+
+cat("(mixture, compound) pairs with >= 2 labs:",
+    n_distinct(paste(cross_lab_df$mixture, cross_lab_df$compound)),
+    " | rows:", nrow(cross_lab_df), "\n")
+```
+
+```{r abundance-heatmap}
+#| fig-height: 14
+#| fig-cap: "log10 maxIntensity centred on each (lab, mixture)'s median compound response."
+cross_lab_df |>
+  distinct(mixture, compound) |>
+  tidyr::expand_grid(lab = labs) |>
+  left_join(cross_lab_df |>
+              select(mixture, lab, compound, log_max_int_lab_norm),
+            by = c("mixture", "lab", "compound")) |>
+  ggplot(aes(x = lab, y = compound, fill = log_max_int_lab_norm)) +
+  geom_tile(colour = "white", linewidth = 0.4) +
+  facet_grid(mixture ~ ., scales = "free_y", space = "free_y") +
+  scale_fill_gradient2(low = "#3b4cc0", mid = "white", high = "#b40426",
+                       midpoint = 0, na.value = "#eeeeee",
+                       name = "log10 FC\nvs lab median") +
+  labs(x = NULL, y = NULL,
+       title = "Lab-median-centred log10 maxIntensity") +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = 9),
+        axis.text.x = element_text(face = "bold", size = 11),
+        strip.text.y = element_text(angle = 0, face = "bold"))
+```
+
+## Peak shape (FWHM)
+
+```{r fwhm-heatmap}
+#| fig-height: 60
+#| fig-cap: "Raw FWHM (s) per (mixture, compound, lab). White = no peak."
+chrom_one_per_compound |>
+  right_join(expected_grid, by = c("mixture", "lab", "compound")) |>
+  ggplot(aes(x = lab, y = compound, fill = xicFwhm)) +
+  geom_tile(colour = "white", linewidth = 0.4) +
+  facet_grid(mixture ~ ., scales = "free_y", space = "free_y") +
+  scale_fill_viridis_c(option = "C", na.value = "#eeeeee", name = "FWHM (s)") +
+  labs(x = NULL, y = NULL, title = "FWHM (s) per (mixture, compound, lab)") +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = 9),
+        axis.text.x = element_text(face = "bold", size = 11),
+        strip.text.y = element_text(angle = 0, face = "bold"))
+```
+
+### Peak-shape reproducibility vs peak-intensity reproducibility
+
+**Hypothesis**: chromatography is harmonized across labs (same column,
+gradient, mobile phases, flow rate), so peak shape (FWHM) should be
+*more* reproducible than peak intensity (maxIntensity), which is set
+by MS sensitivity and ionization efficiency — neither of which is
+harmonized. A direct comparison on the same compound set.
+
+Three small tests:
+
+1. **Cross-lab CV distribution** for FWHM vs maxIntensity, per
+   `(mixture, compound)` detected in ≥ 3 labs. Lower CV → more
+   reproducible.
+2. **Cross-lab ICC** for each metric using the same `lmer(~ 1 |
+   compound)` formulation that drives §9. Higher ICC → more
+   between-compound signal vs lab noise.
+3. **Random-shuffle control**: permute the `(lab, compound)` pairing
+   inside each polarity, recompute CV. Real CV ≪ shuffled CV means
+   the metric carries compound-specific information (i.e. the metric
+   recognises *this* compound vs a random other). If real ≈ shuffled,
+   the metric isn't compound-discriminative.
+
+```{r shape-vs-intensity-cv-build}
+shape_int_cv <- chrom_one_per_compound |>
+  filter(!is.na(xicFwhm),     xicFwhm     > 0,
+         !is.na(maxIntensity), maxIntensity > 0) |>
+  group_by(mixture, compound, polarity) |>
+  summarise(n_labs    = n(),
+            cv_fwhm   = sd(xicFwhm)      / mean(xicFwhm),
+            cv_maxInt = sd(maxIntensity) / mean(maxIntensity),
+            .groups   = "drop") |>
+  filter(n_labs >= 3L)
+
+cat("Compounds in CV analysis (≥3 labs):\n",
+    " pos: ", sum(shape_int_cv$polarity == "pos"), "\n",
+    " neg: ", sum(shape_int_cv$polarity == "neg"), "\n", sep = "")
+```
+
+```{r shape-vs-intensity-cv-plot}
+#| fig-cap: "Cross-lab CV per (mixture, compound) for FWHM vs maxIntensity. Lower = more reproducible. Compounds detected in ≥ 3 labs."
+#| fig-height: 4
+cv_long <- shape_int_cv |>
+  tidyr::pivot_longer(c(cv_fwhm, cv_maxInt),
+                       names_to = "metric", values_to = "cv") |>
+  mutate(metric = ifelse(metric == "cv_fwhm",
+                          "FWHM (peak shape)",
+                          "maxIntensity (peak intensity)"))
+
+ggplot(cv_long, aes(x = metric, y = cv, fill = metric)) +
+  geom_violin(scale = "width", trim = FALSE, alpha = 0.6) +
+  geom_boxplot(width = 0.12, outlier.size = 0.5, alpha = 0.8) +
+  scale_y_log10() +
+  scale_fill_manual(values = c("FWHM (peak shape)" = "#1F77B4",
+                                "maxIntensity (peak intensity)" = "#FF7F0E")) +
+  facet_wrap(~ polarity) +
+  labs(x = NULL, y = "Cross-lab CV (log10)",
+       title = "Peak shape vs peak intensity reproducibility",
+       subtitle = "Lower CV = more reproducible across labs.") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 15, hjust = 1))
+```
+
+```{r shape-vs-intensity-icc}
+suppressPackageStartupMessages(library(lme4))
+compute_icc_local <- function(d, val_col) {
+  d <- d[!is.na(d[[val_col]]) & d[[val_col]] > 0, , drop = FALSE]
+  if (nrow(d) < 6L || dplyr::n_distinct(d$compound) < 2L) return(NA_real_)
+  d$log_val <- log10(d[[val_col]] + 1)
+  fit <- tryCatch(lmer(log_val ~ 1 + (1 | compound), data = d),
+                  error = function(e) NULL)
+  if (is.null(fit)) return(NA_real_)
+  vc <- as.data.frame(VarCorr(fit))
+  vb <- vc$vcov[vc$grp == "compound"]
+  vw <- vc$vcov[vc$grp == "Residual"]
+  vb / (vb + vw)
+}
+
+icc_input <- chrom_one_per_compound |>
+  dplyr::semi_join(
+    shape_int_cv |> dplyr::select(mixture, compound, polarity),
+    by = c("mixture", "compound", "polarity"))
+
+icc_tbl <- bind_rows(lapply(c("pos","neg"), function(pol) {
+  d <- icc_input |> filter(polarity == pol)
+  tibble(polarity = pol,
+         metric   = c("FWHM (shape)", "maxIntensity"),
+         ICC      = c(compute_icc_local(d, "xicFwhm"),
+                      compute_icc_local(d, "maxIntensity")))
+})) |>
+  mutate(ICC = round(ICC, 3))
+
+knitr::kable(icc_tbl,
+             caption = "Cross-lab ICC: peak shape (FWHM) vs peak intensity (maxIntensity), same compound set. Higher = more between-compound signal vs lab noise.")
+```
+
+```{r shape-shuffled-control}
+#| fig-cap: "Real (same-compound) CV vs random shuffled-pairing CV. If real ≪ shuffled, the metric is compound-discriminative."
+#| fig-height: 4
+set.seed(42L)
+
+# Shuffle compound labels within each lab × polarity, then recompute CV
+# on the resulting (pseudo-)compounds with ≥3 labs.
+shuffled_cv <- bind_rows(lapply(c("pos","neg"), function(pol) {
+  d <- chrom_one_per_compound |>
+    filter(polarity == pol,
+           !is.na(xicFwhm),      xicFwhm      > 0,
+           !is.na(maxIntensity), maxIntensity > 0)
+  if (!nrow(d)) return(NULL)
+  d_sh <- d |>
+    group_by(lab) |>
+    mutate(compound = sample(compound)) |>
+    ungroup()
+  d_sh |>
+    group_by(mixture, compound, polarity) |>
+    summarise(n_labs    = n(),
+              cv_fwhm   = sd(xicFwhm)      / mean(xicFwhm),
+              cv_maxInt = sd(maxIntensity) / mean(maxIntensity),
+              .groups   = "drop") |>
+    filter(n_labs >= 3L)
+}))
+
+cv_real_sh <- bind_rows(
+  shape_int_cv |> select(polarity, cv_fwhm, cv_maxInt) |>
+    mutate(pairing = "real (same compound)"),
+  shuffled_cv  |> select(polarity, cv_fwhm, cv_maxInt) |>
+    mutate(pairing = "shuffled (random compound)")
+) |>
+  tidyr::pivot_longer(c(cv_fwhm, cv_maxInt),
+                       names_to = "metric", values_to = "cv") |>
+  mutate(metric = ifelse(metric == "cv_fwhm", "FWHM", "maxIntensity"))
+
+ggplot(cv_real_sh, aes(x = metric, y = cv, fill = pairing)) +
+  geom_violin(scale = "width", trim = FALSE, alpha = 0.6,
+              position = position_dodge(0.8)) +
+  geom_boxplot(width = 0.10, outlier.size = 0.3, alpha = 0.8,
+               position = position_dodge(0.8)) +
+  scale_y_log10() +
+  scale_fill_manual(values = c("real (same compound)"        = "#2CA02C",
+                                "shuffled (random compound)" = "#888888")) +
+  facet_wrap(~ polarity) +
+  labs(x = NULL, y = "Cross-lab CV (log10)",
+       fill = NULL,
+       title = "Compound-discrimination control",
+       subtitle = "Real ≪ shuffled means the metric distinguishes between compounds.") +
+  theme_bw() +
+  theme(legend.position = "top",
+        axis.text.x = element_text(angle = 0))
+```
+
+```{r shape-shuffled-summary}
+medians <- cv_real_sh |>
+  group_by(polarity, metric, pairing) |>
+  summarise(median_cv = round(median(cv, na.rm = TRUE), 3),
+            .groups = "drop") |>
+  tidyr::pivot_wider(names_from = pairing, values_from = median_cv)
+
+# Defensive: if the shuffle didn't produce any (mixture, random_compound,
+# polarity) tuple with >=3 labs (can happen on the smaller post-cluster
+# datasets), the "shuffled (random compound)" column simply doesn't
+# exist. Add NAs so the table still renders and the ratio is NA rather
+# than an error.
+real_col <- "real (same compound)"
+shuf_col <- "shuffled (random compound)"
+if (!(real_col %in% names(medians))) medians[[real_col]] <- NA_real_
+if (!(shuf_col %in% names(medians))) medians[[shuf_col]] <- NA_real_
+
+medians$real_over_shuffled <- round(medians[[real_col]] /
+                                     medians[[shuf_col]], 2)
+
+knitr::kable(medians,
+             caption = "Median CV: real same-compound pairing vs random shuffled pairing. Ratio < 1 means the metric is compound-discriminative. NAs in shuffled column mean no random-compound pseudo-tuple had ≥3 labs in this polarity.")
+```
+
+# cembio block-MS2: why MS2 timing alone can't locate the peak apex
+
+Cembio is the one lab in this study that acquires MS2 with a **targeted
+inclusion list** in a temporally-disjoint block from MS1: the MS1 scan
+and the MS2 scan live in **separate mzML files** (`D_1_pos_021_*.mzML`
+vs `D_1_pos_MS2_021_*.mzML`). The MS2 inclusion list cycles through a
+fixed set of precursor m/z and fires MS2 on a schedule, not in
+response to MS1 intensity. Without a co-acquired MS1 spectrum at the
+moment each MS2 fires, **we cannot tell which (if any) MS2 fired at
+the chromatographic apex of the compound**. Every MS2 is just a
+"feature" the producer must reason about.
+
+The DDA labs (afekta, hmgu, icl) have the opposite arrangement: MS1 +
+MS2 in the same file, MS2 triggered by an MS1-abundance threshold. By
+design, each DDA MS2 fires near a real MS1 peak.
+
+Ritalinic acid `[M+H]+` (m/z 220.1335) in mix 2.9 makes the
+difference visible. The MS1 chromatogram for the precursor m/z has
+**one chromatographic peak at ~ 198 s** (cembio's MS1 reaches 1.7 × 10⁷
+counts there). Cembio's MS2 inclusion list fired **63 MS2 spectra** at
+that precursor between RT 142 s and 258 s — spaced ~ 4–5 s apart on
+schedule, **with most of them firing on empty chromatogram**. Hmgu's
+DDA, by contrast, fired only 2 MS2 triggers at the precursor in that
+same RT range, both near actual MS1 peaks.
+
+```{r cembio-block-ms2-figure}
+#| fig-cap: "Ritalinic acid [M+H]+ in mix 2.9. **cembio (top)**: blue MS1 chromatogram from `D_1_pos_021_*.mzML` shows the peak at ~198 s; red triangles are MS2 trigger times from `D_1_pos_MS2_021_*.mzML`, fanning out 142-258 s on the fixed inclusion-list schedule. Most MS2 fire on empty chromatogram. **hmgu (bottom)**: DDA fires MS2 only at MS1 peaks — note the ~10⁵× lower y-axis scale (hmgu's per-compound MS1 sensitivity for this analyte is much lower than cembio's, but DDA targeting is precise)."
+#| fig-height: 6
+suppressPackageStartupMessages(library(mzR))
+
+target_mz <- 220.1335   # ritalinic acid [M+H]+
+ppm_tol   <- 20
+mz_lo     <- target_mz * (1 - ppm_tol / 1e6)
+mz_hi     <- target_mz * (1 + ppm_tol / 1e6)
+mz_lo_ms2 <- target_mz * (1 - 100 / 1e6)
+mz_hi_ms2 <- target_mz * (1 + 100 / 1e6)
+zoom_rt   <- c(150, 290)
+
+# Helper: MS1 EIC summed over a tight m/z window
+extract_ms1_eic <- function(path) {
+  m <- openMSfile(path, backend = "pwiz"); on.exit(close(m))
+  h <- header(m)
+  idx <- which(h$msLevel == 1L)
+  if (!length(idx)) return(NULL)
+  data.frame(
+    rt        = h$retentionTime[idx],
+    intensity = vapply(idx, function(j) {
+      sp <- peaks(m, j)
+      if (!nrow(sp)) return(0)
+      keep <- sp[, 1L] >= mz_lo & sp[, 1L] <= mz_hi
+      if (any(keep)) sum(sp[keep, 2L]) else 0
+    }, numeric(1)))
+}
+
+# Helper: MS2 trigger times for one precursor m/z
+extract_ms2_triggers <- function(path) {
+  m <- openMSfile(path, backend = "pwiz"); on.exit(close(m))
+  h <- header(m)
+  ms2_idx <- which(h$msLevel == 2L)
+  if (!length(ms2_idx)) return(data.frame(rt = numeric(0)))
+  hit <- ms2_idx[h$precursorMZ[ms2_idx] >= mz_lo_ms2 &
+                  h$precursorMZ[ms2_idx] <= mz_hi_ms2]
+  data.frame(rt = h$retentionTime[hit])
+}
+
+# Lab × file mapping
+mzml <- here::here("1_preprocessing")
+files <- list(
+  cembio = list(
+    panel = "cembio (block-MS2: MS1 in file A, MS2 in file B)",
+    ms1   = file.path(mzml, "cembio/HE/mzml/D_1_pos_021_Human_Endosome_2.9.mzML"),
+    ms2   = file.path(mzml, "cembio/HE/mzml/D_1_pos_MS2_021_Human_Endosome_2.9.mzML")),
+  hmgu = list(
+    panel = "hmgu (DDA: MS1 + MS2 in one file)",
+    ms1   = local({
+      hits <- list.files(file.path(mzml, "hmgu/HE/mzml"),
+                          pattern = "pos.*2[.]9", full.names = TRUE)
+      hits[1]
+    })))
+files$hmgu$ms2 <- files$hmgu$ms1   # same file holds both for DDA
+
+ms1_all <- bind_rows(lapply(names(files), function(lab) {
+  d <- extract_ms1_eic(files[[lab]]$ms1)
+  if (is.null(d) || !nrow(d)) return(NULL)
+  d$panel <- files[[lab]]$panel; d
+}))
+ms2_all <- bind_rows(lapply(names(files), function(lab) {
+  d <- extract_ms2_triggers(files[[lab]]$ms2)
+  if (!nrow(d)) return(NULL)
+  d$panel <- files[[lab]]$panel; d
+}))
+
+ms1_all <- ms1_all |> filter(rt >= zoom_rt[1], rt <= zoom_rt[2])
+ms2_all <- ms2_all |> filter(rt >= zoom_rt[1], rt <= zoom_rt[2])
+
+ggplot() +
+  geom_line(data = ms1_all,
+            aes(x = rt, y = intensity),
+            colour = "#1F77B4", linewidth = 0.6) +
+  geom_vline(data = ms2_all,
+             aes(xintercept = rt),
+             colour = "#D62728", linewidth = 0.4, alpha = 0.7) +
+  geom_point(data = ms2_all,
+             aes(x = rt, y = 0),
+             colour = "#D62728", shape = 17, size = 2.5) +
+  facet_wrap(~ panel, ncol = 1, scales = "free_y") +
+  labs(x = "Retention time (s)",
+       y = sprintf("MS1 intensity at m/z %.4f ± 20 ppm", target_mz),
+       title = sprintf("Ritalinic acid [M+H]+ (m/z %.4f) in mix 2.9",
+                       target_mz)) +
+  theme_bw() +
+  theme(strip.text = element_text(face = "bold"))
+```
+
+**Consequence at the producer level**: when the producer's legacy
+`extract_all_ms2()` ran `rle(precursorMz)` on cembio's MS2 file, every
+time another inclusion-list precursor fired between two ritalinic MS2
+the run was broken and a new feature was started. The 63 MS2 of
+ritalinic in mix 2.9 became 11 separate "features" — one chromatographic
+peak shattered into many. SIRIUS then scored each tiny feature
+independently rather than getting all 63 spectra as one merged feature
+with much better S/N.
+
+**Cluster-based consensus RT in the producer §7.1** (the fix in P10 of
+the schema changelog) handles this without re-running SIRIUS:
+
+1. All 63 MS2 spectra share precursor m/z 220.1335 and elute within a
+   single 1-D cluster window (gap ≤ 30 s), so they group into **one
+   cluster** with median RT ~225 s and a recorded `rt_spread` of
+   ~115 s.
+2. The picker's `apex_pad` is set to `max(8, rt_spread / 2 + 5)` =
+   `max(8, 60)` ≈ 35 s, so the apex search window becomes
+   ~[190, 260] s — wide enough to catch the **real apex at 198 s**
+   regardless of how scattered the MS2 triggers are.
+3. The SNR picker still rejects noise spikes within this wider
+   window, so widening doesn't degrade detection elsewhere.
+
+The proper structural fix (replacing `rle()` with RT-proximity
+grouping in `extract_all_ms2()`) is in the code but only triggers if
+the cembio SIRIUS caches are deleted and SIRIUS re-runs from scratch.
+With the existing caches in place, the cluster algorithm + widened
+apex_pad fully compensate for the shattering downstream.
+
+# hmgu DDA: why "more MS2 spectra" doesn't mean more spike-ins covered
+
+`hmgu` is the only lab in this study that uses **co-acquired DDA**
+(MS1 + data-dependent MS2 in the same file), with a wide-open precursor
+m/z range and a single fixed collision energy. The other three labs run
+**scheduled or inclusion-list MS2 in a separate file** with stepped CE.
+The acquisition profiles diverge sharply.
+
+For mix 2.3 (one of the heaviest hmgu `no_data` mixtures, with 11 neg
+and 10 pos `no_data` tuples), here are the MS2 statistics pulled
+directly from the mzML headers:
+
+| Lab    | n_MS2 (pos) | unique precursor m/z | CE levels    | RT range covered |
+|--------|------------:|---------------------:|:------------:|:----------------:|
+| afekta |       4 298 |                  202 | 10 / 20 / 40 | 2.6 - 899.6 s    |
+| cembio |         783 |               **23** | 10 / 20 / 40 | 3.2 - 295.7 s    |
+| hmgu   |   **8 147** |            **5 238** |       **35** | 4.0 - 725.6 s    |
+| icl    |         472 |                  176 | 4 (low CE)   | 1.6 - 726.0 s    |
+
+`hmgu` fires the **most MS2 spectra** (8 147 — almost 2× any other
+lab) but across **5 238 distinct precursor m/z** — DDA across the
+whole m/z range. The duty cycle gets spread thin. Of those 8 147 MS2
+spectra, **only 67 (0.8 %)** fire within ±50 ppm of an expected
+spike-in compound m/z (the spike-in m/z list comes from the other
+labs' SIRIUS-confirmed annotations for mix 2.3). The remaining
+**99.2 %** target matrix / background ions.
+
+In contrast, cembio's 23-precursor inclusion list spends 100 % of its
+MS2 duty cycle on known targets; afekta covers 202 distinct precursors
+with stepped collision energy, generating richer fragment spectra per
+target.
+
+Two consequences for `hmgu`'s spike-in coverage:
+
+1. **MS2 starvation on weak precursors.** When a spike-in compound's
+   MS1 intensity is below the matrix peaks competing for the same DDA
+   cycle, no MS2 ever triggers on it → no SIRIUS candidate → `no_data`
+   downstream. This is the dominant cause of the 167 hmgu `no_data`
+   tuples (74 neg + 116 pos, before adduct de-duplication; 162 of
+   those have a consensus RT from other labs, confirming the compound
+   is *there* in the chromatographic run — just too dim to win MS2).
+2. **Single CE = sparser fragmentation.** Stepped CE (10/20/40)
+   generates 3 complementary spectra per precursor, helping SIRIUS
+   score formula candidates. Single CE = 35 eV gives one spectrum,
+   typically lower-quality.
+
+```{r hmgu-dda-ms2-stats}
+#| label: hmgu-dda-ms2-stats
+#| fig-cap: "MS2 acquisition profile per lab for mix 2.3 (pos). Each panel plots one (lab) file's MS2 trigger times along the chromatographic run. Each red triangle = one MS2 trigger; y-jitter is precursor m/z rank so bands are visible. hmgu's panel is a wall of triggers across the entire m/z range; cembio's is 23 horizontal bands (inclusion list). The relevant question for spike-in coverage is not 'how many MS2 fired' but 'how many fired on a spike-in precursor m/z'."
+#| fig-height: 7
+#| warning: false
+suppressPackageStartupMessages(library(mzR))
+
+# Find each lab's MS2-bearing file for mix 2.3 pos.
+find_ms2_file <- function(lab, polarity = "pos", mix = "2.3") {
+  d  <- here::here("1_preprocessing", lab, "HE", "mzml")
+  fs <- list.files(d, pattern = "2[._]3", full.names = TRUE,
+                   ignore.case = TRUE)
+  fs <- fs[!grepl("NAPS|blank", fs, ignore.case = TRUE)]
+  pol_re <- if (polarity == "pos") "_pos" else "_neg"
+  fs <- fs[grepl(pol_re, fs, ignore.case = TRUE)]
+  if (!length(fs)) return(NA_character_)
+  ms2_file <- fs[grepl("MS2", fs, ignore.case = FALSE)]
+  if (length(ms2_file)) ms2_file[1] else fs[1]
+}
+
+# Spike-in m/z list (pos, mix 2.3) — pulled from identity table.
+expected_pos_23 <- identity_df |>
+  filter(mixture == "2.3", polarity == "pos",
+         lab != "hmgu", !is.na(mz_observed)) |>
+  distinct(compound, mz_observed) |>
+  pull(mz_observed)
+
+ms2_per_lab <- bind_rows(lapply(c("afekta", "cembio", "hmgu", "icl"),
+                                function(lab) {
+  f <- find_ms2_file(lab)
+  if (is.na(f)) return(NULL)
+  m <- openMSfile(f, backend = "pwiz"); on.exit(close(m))
+  h <- header(m)
+  ms2 <- which(h$msLevel == 2L)
+  if (!length(ms2)) return(NULL)
+  is_spike <- vapply(h$precursorMZ[ms2],
+                     \(q) any(abs(q - expected_pos_23) /
+                              expected_pos_23 * 1e6 <= 50),
+                     logical(1))
+  tibble(lab = lab,
+         rt          = h$retentionTime[ms2],
+         precursorMZ = h$precursorMZ[ms2],
+         on_spike    = is_spike)
+}))
+
+ggplot(ms2_per_lab,
+       aes(x = rt, y = precursorMZ, colour = on_spike)) +
+  geom_point(size = 0.3, alpha = 0.5) +
+  facet_wrap(~ lab, ncol = 2, scales = "free_y") +
+  scale_colour_manual(values = c(`FALSE` = "grey70",
+                                  `TRUE`  = "#D62728"),
+                      labels = c(`FALSE` = "matrix / background",
+                                  `TRUE`  = "spike-in target (±50 ppm)"),
+                      name = NULL) +
+  labs(x = "Retention time (s)",
+       y = "Precursor m/z",
+       title = "MS2 precursor selection per lab — mix 2.3 pos",
+       subtitle = "Each point = one MS2 trigger. Red = fires on a known spike-in m/z.") +
+  theme_bw() +
+  theme(legend.position = "top",
+        strip.text = element_text(face = "bold"))
+```
+
+**Implication for the manuscript.** The hmgu vs other-3 pairwise ICC
+gap (0.12 - 0.36 areaUnderTic vs ≥ 0.79 within the
+afekta + cembio + icl trio) reflects acquisition policy as much as
+instrument sensitivity. Open-bore DDA at a single CE on a complex
+mixture is the wrong tool for **targeted spike-in panel comparison**;
+it would likely outperform inclusion-list approaches for untargeted
+biomarker discovery on unknown matrices. The "lower hmgu sensitivity"
+finding should be framed as *acquisition-strategy-dependent*, not as
+an inherent property of the Sciex Zeno-TOF.
+
+# MS2 + MS1: presence / absence and rescue
+
+Four mutually exclusive states per `(mixture, lab, compound)`:
+
+| Status          | Meaning                                                                |
+|-----------------|------------------------------------------------------------------------|
+| `ms2_confirmed` | identity row in this lab **and** a `source = "own"` peak               |
+| `ms2_no_peak`   | identity row in this lab but no `own` peak                             |
+| `ms1_only`      | no identity row but a `source = "consensus"` peak (MS1-rescued)        |
+| `absent`        | neither                                                                |
+
+```{r presence-build}
+own_peaks <- chrom_df |>
+  filter(source == "own") |>
+  distinct(mixture, lab, compound) |>
+  mutate(has_own_peak = TRUE)
+
+consensus_peaks <- chrom_df |>
+  filter(source == "consensus") |>
+  distinct(mixture, lab, compound) |>
+  mutate(has_consensus_peak = TRUE)
+
+identity_keys <- identity_df |>
+  distinct(mixture, lab, compound) |>
+  mutate(has_identity = TRUE)
+
+presence_df <- expected_grid |>
+  left_join(identity_keys,    by = c("mixture", "lab", "compound")) |>
+  left_join(own_peaks,        by = c("mixture", "lab", "compound")) |>
+  left_join(consensus_peaks,  by = c("mixture", "lab", "compound")) |>
+  mutate(across(c(has_identity, has_own_peak, has_consensus_peak),
+                \(x) coalesce(x, FALSE)),
+         status = case_when(
+           has_identity &  has_own_peak       ~ "ms2_confirmed",
+           has_identity & !has_own_peak       ~ "ms2_no_peak",
+          !has_identity &  has_consensus_peak ~ "ms1_only",
+           TRUE                                ~ "absent"))
+
+presence_df |>
+  count(mixture, lab, status) |>
+  tidyr::pivot_wider(names_from = status, values_from = n, values_fill = 0L) |>
+  knitr::kable(caption = "Detection status counts per (mixture, lab)")
+```
+
+```{r presence-heatmap}
+#| fig-height: 60
+#| fig-cap: "Detection status per (mixture, lab, compound)."
+status_pal <- c(ms2_confirmed = "#1f77b4", ms1_only   = "#2ca02c",
+                ms2_no_peak   = "#ff7f0e", absent     = "#dddddd")
+status_lab <- c(ms2_confirmed = "MS2 annotated + peak",
+                ms1_only      = "MS1 only (rescued)",
+                ms2_no_peak   = "MS2 annotated, no peak",
+                absent        = "Absent")
+
+presence_df |>
+  mutate(status = factor(status, levels = names(status_pal))) |>
+  ggplot(aes(x = lab, y = compound, fill = status)) +
+  geom_tile(colour = "white", linewidth = 0.4) +
+  facet_grid(mixture ~ ., scales = "free_y", space = "free_y") +
+  scale_fill_manual(values = status_pal, labels = status_lab) +
+  labs(x = NULL, y = NULL, fill = NULL,
+       title = "Compound detection: MS2 annotation vs MS1 signal") +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = 9),
+        axis.text.x = element_text(face = "bold", size = 11),
+        strip.text.y = element_text(angle = 0, face = "bold"),
+        legend.position = "bottom")
+```
+
+```{r rescued-vs-confirmed}
+#| fig-height: 60
+#| fig-cap: "Labs confirming each compound via MS2 vs rescued via MS1 only."
+presence_df |>
+  filter(status %in% c("ms2_confirmed", "ms1_only")) |>
+  count(mixture, compound, status) |>
+  ggplot(aes(x = n, y = compound, fill = status)) +
+  geom_col(position = "stack") +
+  facet_grid(mixture ~ ., scales = "free_y", space = "free_y") +
+  scale_fill_manual(values = status_pal[c("ms2_confirmed", "ms1_only")],
+                    labels = status_lab[c("ms2_confirmed", "ms1_only")]) +
+  scale_x_continuous(breaks = 0:length(labs)) +
+  labs(x = "Number of labs", y = NULL, fill = NULL,
+       title = "Confirmed (MS2) vs rescued (MS1 only) per compound") +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = 9),
+        strip.text.y = element_text(angle = 0, face = "bold"),
+        legend.position = "bottom")
+```

@@ -1,0 +1,1305 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.5.57">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+
+<title>NAPS chromExtract — re-extraction producer for 4_rt_alignment</title>
+<style>
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+/* CSS for syntax highlighting */
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { display: inline-block; text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+  }
+pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+</style>
+
+
+<script src="3_naps_extraction_files/libs/clipboard/clipboard.min.js"></script>
+<script src="3_naps_extraction_files/libs/quarto-html/quarto.js"></script>
+<script src="3_naps_extraction_files/libs/quarto-html/popper.min.js"></script>
+<script src="3_naps_extraction_files/libs/quarto-html/tippy.umd.min.js"></script>
+<script src="3_naps_extraction_files/libs/quarto-html/anchor.min.js"></script>
+<link href="3_naps_extraction_files/libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="3_naps_extraction_files/libs/quarto-html/quarto-syntax-highlighting.css" rel="stylesheet" id="quarto-text-highlighting-styles">
+<script src="3_naps_extraction_files/libs/bootstrap/bootstrap.min.js"></script>
+<link href="3_naps_extraction_files/libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="3_naps_extraction_files/libs/bootstrap/bootstrap.min.css" rel="stylesheet" id="quarto-bootstrap" data-mode="light">
+
+
+</head>
+
+<body>
+
+<div id="quarto-content" class="page-columns page-rows-contents page-layout-article">
+<div id="quarto-margin-sidebar" class="sidebar margin-sidebar">
+  <nav id="TOC" role="doc-toc" class="toc-active">
+    <h2 id="toc-title">Table of contents</h2>
+   
+  <ul>
+  <li><a href="#goal" id="toc-goal" class="nav-link active" data-scroll-target="#goal">Goal</a>
+  <ul class="collapse">
+  <li><a href="#setup" id="toc-setup" class="nav-link" data-scroll-target="#setup">Setup</a></li>
+  <li><a href="#load-anchor-metadata-theoretical-mz-rti-ladder" id="toc-load-anchor-metadata-theoretical-mz-rti-ladder" class="nav-link" data-scroll-target="#load-anchor-metadata-theoretical-mz-rti-ladder">1. Load anchor metadata (theoretical m/z, RTI ladder)</a></li>
+  <li><a href="#identify-naps-mzml-files-per-lab-polarity-replicate" id="toc-identify-naps-mzml-files-per-lab-polarity-replicate" class="nav-link" data-scroll-target="#identify-naps-mzml-files-per-lab-polarity-replicate">2. Identify NAPS mzml files per <code>(lab, polarity, replicate)</code></a></li>
+  <li><a href="#build-seed-rt_center-per-lab-polarity-anchor-replicate" id="toc-build-seed-rt_center-per-lab-polarity-anchor-replicate" class="nav-link" data-scroll-target="#build-seed-rt_center-per-lab-polarity-anchor-replicate">3. Build seed <code>rt_center</code> per <code>(lab, polarity, anchor, replicate)</code></a></li>
+  <li><a href="#build-flat-peak-table" id="toc-build-flat-peak-table" class="nav-link" data-scroll-target="#build-flat-peak-table">4. Build flat peak table</a></li>
+  <li><a href="#chromextract-single-wide-pass-60-s" id="toc-chromextract-single-wide-pass-60-s" class="nav-link" data-scroll-target="#chromextract-single-wide-pass-60-s">5. chromExtract — single wide pass (±60 s)</a></li>
+  <li><a href="#snr-aware-peak-picking" id="toc-snr-aware-peak-picking" class="nav-link" data-scroll-target="#snr-aware-peak-picking">6. SNR-aware peak picking</a></li>
+  <li><a href="#apply-the-picker" id="toc-apply-the-picker" class="nav-link" data-scroll-target="#apply-the-picker">7. Apply the picker</a></li>
+  <li><a href="#detection-summary" id="toc-detection-summary" class="nav-link" data-scroll-target="#detection-summary">8. Detection summary</a></li>
+  <li><a href="#assemble-final-naps-chrom_metrics" id="toc-assemble-final-naps-chrom_metrics" class="nav-link" data-scroll-target="#assemble-final-naps-chrom_metrics">9. Assemble final NAPS chrom_metrics</a></li>
+  <li><a href="#diagnostic-sample-below_detection-eics" id="toc-diagnostic-sample-below_detection-eics" class="nav-link" data-scroll-target="#diagnostic-sample-below_detection-eics">10. Diagnostic — sample below_detection EICs</a></li>
+  <li><a href="#qc-chromextract-vs-original-naps.csv" id="toc-qc-chromextract-vs-original-naps.csv" class="nav-link" data-scroll-target="#qc-chromextract-vs-original-naps.csv">11. QC — chromExtract vs original <code>naps.csv</code></a></li>
+  </ul></li>
+  <li><a href="#notes" id="toc-notes" class="nav-link" data-scroll-target="#notes">Notes</a></li>
+  </ul>
+</nav>
+</div>
+<main class="content" id="quarto-document-content">
+
+<header id="title-block-header" class="quarto-title-block default">
+<div class="quarto-title">
+<h1 class="title">NAPS chromExtract — re-extraction producer for 4_rt_alignment</h1>
+</div>
+
+
+
+<div class="quarto-title-meta">
+
+    
+  
+    
+  </div>
+  
+
+
+</header>
+
+
+<section id="goal" class="level1">
+<h1>Goal</h1>
+<p>Re-extract NAPS anchor apex RTs by <code>chromExtract</code> at the <strong>theoretical m/z</strong> (from compound formula) plus an RT-seeded window, with cross-lab <strong>propagation</strong> for gaps. This replaces the xcms-based per-lab <code>naps.csv</code> as the alignment input.</p>
+<p>Why: the xcms-derived NAPS RTs in <code>1_preprocessing/{lab}/HE/naps.csv</code> have systematic problems — <code>icl</code> is missing <code>C1</code>–<code>C3</code> entirely (xcms didn’t pick them) and <code>cembio-pos</code> has a few replicates with catastrophic outliers (wrong-peak picks). chromExtract at theoretical m/z lets us recover those because we’re not relying on xcms to find a feature first — we ask: “is there a peak at this m/z near this RT?”.</p>
+<p>Output: <code>5_downstream_analysis/object/naps_chrom_metrics.csv</code> keyed on <code>(lab, polarity, anchor_n, replicate, source)</code> with columns <code>apex_rt, xicFwhm, maxIntensity, areaUnderTic</code>.</p>
+<p>Source semantics:</p>
+<ul>
+<li><code>source = "own"</code> — <code>rt_center</code> came from the lab’s own <code>naps.csv</code> for that (anchor, replicate).</li>
+<li><code>source = "consensus"</code> — <code>rt_center</code> came from cross-lab median (this replicate’s slot was NA in the lab’s CSV; propagated).</li>
+</ul>
+<section id="setup" class="level2">
+<h2 class="anchored" data-anchor-id="setup">Setup</h2>
+<div class="cell">
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb1"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(Spectra)</span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(MsExperiment)</span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(Chromatograms)</span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(MsQuality)</span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(dplyr)</span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(tidyr)</span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(ggplot2)</span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(here)</span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(readxl)</span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a>labs           <span class="ot">&lt;-</span> <span class="fu">c</span>(<span class="st">"afekta"</span>, <span class="st">"cembio"</span>, <span class="st">"hmgu"</span>, <span class="st">"icl"</span>)</span>
+<span id="cb1-12"><a href="#cb1-12" aria-hidden="true" tabindex="-1"></a>out_dir        <span class="ot">&lt;-</span> <span class="fu">here</span>(<span class="st">"5_downstream_analysis"</span>, <span class="st">"object"</span>)</span>
+<span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a><span class="fu">dir.create</span>(out_dir, <span class="at">recursive =</span> <span class="cn">TRUE</span>, <span class="at">showWarnings =</span> <span class="cn">FALSE</span>)</span>
+<span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a><span class="co"># Extraction windows</span></span>
+<span id="cb1-16"><a href="#cb1-16" aria-hidden="true" tabindex="-1"></a>ppm_tol      <span class="ot">&lt;-</span> <span class="dv">20</span>          <span class="co"># m/z tolerance</span></span>
+<span id="cb1-17"><a href="#cb1-17" aria-hidden="true" tabindex="-1"></a>pad_wide     <span class="ot">&lt;-</span> <span class="dv">60</span>          <span class="co"># symmetric ±60 s — gives real tail context for</span></span>
+<span id="cb1-18"><a href="#cb1-18" aria-hidden="true" tabindex="-1"></a>                            <span class="co"># noise estimation AND tolerates cross-lab</span></span>
+<span id="cb1-19"><a href="#cb1-19" aria-hidden="true" tabindex="-1"></a>                            <span class="co"># chromatographic drift (e.g. icl C10 pos is</span></span>
+<span id="cb1-20"><a href="#cb1-20" aria-hidden="true" tabindex="-1"></a>                            <span class="co"># 11 s before consensus; the legacy ±10 s</span></span>
+<span id="cb1-21"><a href="#cb1-21" aria-hidden="true" tabindex="-1"></a>                            <span class="co"># window missed it and the legacy two-pass</span></span>
+<span id="cb1-22"><a href="#cb1-22" aria-hidden="true" tabindex="-1"></a>                            <span class="co"># retry skipped because peakBoundary returned</span></span>
+<span id="cb1-23"><a href="#cb1-23" aria-hidden="true" tabindex="-1"></a>                            <span class="co"># a noise spike inside the tight window).</span></span>
+<span id="cb1-24"><a href="#cb1-24" aria-hidden="true" tabindex="-1"></a>apex_search_pad <span class="ot">&lt;-</span> <span class="dv">20</span>       <span class="co"># how far from rt_center the picker looks</span></span>
+<span id="cb1-25"><a href="#cb1-25" aria-hidden="true" tabindex="-1"></a>                            <span class="co"># for the apex. NAPS RTs can drift up to</span></span>
+<span id="cb1-26"><a href="#cb1-26" aria-hidden="true" tabindex="-1"></a>                            <span class="co"># ~15-20 s lab-to-lab; ±20 s catches that</span></span>
+<span id="cb1-27"><a href="#cb1-27" aria-hidden="true" tabindex="-1"></a>                            <span class="co"># safely without crossing into neighbouring</span></span>
+<span id="cb1-28"><a href="#cb1-28" aria-hidden="true" tabindex="-1"></a>                            <span class="co"># anchor regions.</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+</div>
+</section>
+<section id="load-anchor-metadata-theoretical-mz-rti-ladder" class="level2">
+<h2 class="anchored" data-anchor-id="load-anchor-metadata-theoretical-mz-rti-ladder">1. Load anchor metadata (theoretical m/z, RTI ladder)</h2>
+<p>Any lab’s <code>naps.csv</code> works — <code>Name</code>, <code>mz_pos</code>, <code>mz_neg</code>, <code>RTI</code> are shared (only the recorded per-replicate RT columns differ).</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb2"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Helper: drop CSV row-name column (first column has an empty header "" in</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="co"># every lab's naps.csv) — otherwise dplyr's mutate refuses the data frame.</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>.drop_empty_cols <span class="ot">&lt;-</span> <span class="cf">function</span>(df) df[, <span class="fu">nzchar</span>(<span class="fu">names</span>(df)), drop <span class="ot">=</span> <span class="cn">FALSE</span>]</span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>anchor_meta <span class="ot">&lt;-</span> <span class="fu">read.csv</span>(<span class="fu">here</span>(<span class="st">"1_preprocessing"</span>, <span class="st">"afekta"</span>, <span class="st">"HE"</span>, <span class="st">"naps.csv"</span>),</span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a>                        <span class="at">stringsAsFactors =</span> <span class="cn">FALSE</span>,</span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a>                        <span class="at">check.names =</span> <span class="cn">FALSE</span>) <span class="sc">|&gt;</span></span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a>  <span class="fu">.drop_empty_cols</span>() <span class="sc">|&gt;</span></span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a>  <span class="fu">mutate</span>(<span class="at">anchor_n =</span> <span class="fu">suppressWarnings</span>(<span class="fu">as.integer</span>(</span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a>           <span class="fu">gsub</span>(<span class="st">"^C(</span><span class="sc">\\</span><span class="st">d+).*"</span>, <span class="st">"</span><span class="sc">\\</span><span class="st">1"</span>, Name)))) <span class="sc">|&gt;</span></span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(<span class="sc">!</span><span class="fu">is.na</span>(anchor_n)) <span class="sc">|&gt;</span></span>
+<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a>  <span class="fu">select</span>(anchor_n, RTI, mz_pos, mz_neg) <span class="sc">|&gt;</span></span>
+<span id="cb2-13"><a href="#cb2-13" aria-hidden="true" tabindex="-1"></a>  <span class="fu">arrange</span>(anchor_n)</span>
+<span id="cb2-14"><a href="#cb2-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-15"><a href="#cb2-15" aria-hidden="true" tabindex="-1"></a><span class="fu">cat</span>(<span class="st">"anchor_meta rows:"</span>, <span class="fu">nrow</span>(anchor_meta), <span class="st">" (expected 20)</span><span class="sc">\n</span><span class="st">"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output cell-output-stdout">
+<pre><code>anchor_meta rows: 20  (expected 20)</code></pre>
+</div>
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb4"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="fu">head</span>(anchor_meta)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output cell-output-stdout">
+<pre><code>  anchor_n RTI   mz_pos   mz_neg
+1        1 100 174.0219 218.0129
+2        2 200 188.0376 232.0285
+3        3 300 202.0532 246.0442
+4        4 400 216.0689 260.0598
+5        5 500 230.0845 274.0755
+6        6 600 244.1002 288.0911</code></pre>
+</div>
+</div>
+</section>
+<section id="identify-naps-mzml-files-per-lab-polarity-replicate" class="level2">
+<h2 class="anchored" data-anchor-id="identify-naps-mzml-files-per-lab-polarity-replicate">2. Identify NAPS mzml files per <code>(lab, polarity, replicate)</code></h2>
+<p><code>seq_*.xlsx</code> is the canonical injection order. Filter to filenames containing <code>NAPS</code>, sort by row order, assign <code>replicate = 1..N</code>.</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb6"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a>naps_files <span class="ot">&lt;-</span> <span class="fu">bind_rows</span>(<span class="fu">lapply</span>(labs, <span class="cf">function</span>(lab) {</span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>  study_path <span class="ot">&lt;-</span> <span class="fu">here</span>(<span class="st">"1_preprocessing"</span>, lab, <span class="st">"HE"</span>)</span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a>  mzml_dir   <span class="ot">&lt;-</span> <span class="fu">file.path</span>(study_path, <span class="st">"mzml"</span>)</span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a>  <span class="fu">bind_rows</span>(<span class="fu">lapply</span>(<span class="fu">c</span>(<span class="st">"pos"</span>, <span class="st">"neg"</span>), <span class="cf">function</span>(pol) {</span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a>    seq <span class="ot">&lt;-</span> <span class="fu">read_xlsx</span>(<span class="fu">file.path</span>(study_path, <span class="fu">sprintf</span>(<span class="st">"seq_%s.xlsx"</span>, pol))) <span class="sc">|&gt;</span></span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a>      <span class="fu">as.data.frame</span>()</span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true" tabindex="-1"></a>    seq<span class="sc">$</span>filename <span class="ot">&lt;-</span> <span class="fu">paste0</span>(seq<span class="sc">$</span><span class="st">`</span><span class="at">Data File</span><span class="st">`</span>, <span class="st">".mzML"</span>)</span>
+<span id="cb6-8"><a href="#cb6-8" aria-hidden="true" tabindex="-1"></a>    seq <span class="ot">&lt;-</span> seq[<span class="fu">grepl</span>(<span class="st">"NAPS"</span>, seq<span class="sc">$</span>filename, <span class="at">fixed =</span> <span class="cn">TRUE</span>) <span class="sc">&amp;</span></span>
+<span id="cb6-9"><a href="#cb6-9" aria-hidden="true" tabindex="-1"></a>               seq<span class="sc">$</span>filename <span class="sc">%in%</span> <span class="fu">list.files</span>(mzml_dir), ]</span>
+<span id="cb6-10"><a href="#cb6-10" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (<span class="fu">nrow</span>(seq) <span class="sc">==</span> <span class="dv">0</span>) <span class="fu">return</span>(<span class="cn">NULL</span>)</span>
+<span id="cb6-11"><a href="#cb6-11" aria-hidden="true" tabindex="-1"></a>    <span class="fu">data.frame</span>(<span class="at">lab       =</span> lab,</span>
+<span id="cb6-12"><a href="#cb6-12" aria-hidden="true" tabindex="-1"></a>               <span class="at">polarity  =</span> pol,</span>
+<span id="cb6-13"><a href="#cb6-13" aria-hidden="true" tabindex="-1"></a>               <span class="at">replicate =</span> <span class="fu">seq_len</span>(<span class="fu">nrow</span>(seq)),</span>
+<span id="cb6-14"><a href="#cb6-14" aria-hidden="true" tabindex="-1"></a>               <span class="at">filename  =</span> seq<span class="sc">$</span>filename,</span>
+<span id="cb6-15"><a href="#cb6-15" aria-hidden="true" tabindex="-1"></a>               <span class="at">path      =</span> <span class="fu">file.path</span>(mzml_dir, seq<span class="sc">$</span>filename),</span>
+<span id="cb6-16"><a href="#cb6-16" aria-hidden="true" tabindex="-1"></a>               <span class="at">stringsAsFactors =</span> <span class="cn">FALSE</span>)</span>
+<span id="cb6-17"><a href="#cb6-17" aria-hidden="true" tabindex="-1"></a>  }))</span>
+<span id="cb6-18"><a href="#cb6-18" aria-hidden="true" tabindex="-1"></a>}))</span>
+<span id="cb6-19"><a href="#cb6-19" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-20"><a href="#cb6-20" aria-hidden="true" tabindex="-1"></a><span class="fu">cat</span>(<span class="st">"NAPS files per (lab, polarity):</span><span class="sc">\n</span><span class="st">"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output cell-output-stdout">
+<pre><code>NAPS files per (lab, polarity):</code></pre>
+</div>
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb8"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a>naps_files <span class="sc">|&gt;</span> <span class="fu">count</span>(lab, polarity) <span class="sc">|&gt;</span></span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">pivot_wider</span>(<span class="at">names_from =</span> polarity, <span class="at">values_from =</span> n) <span class="sc">|&gt;</span></span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a>  knitr<span class="sc">::</span><span class="fu">kable</span>()</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<thead>
+<tr class="header">
+<th style="text-align: left;">lab</th>
+<th style="text-align: right;">neg</th>
+<th style="text-align: right;">pos</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">afekta</td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">6</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">cembio</td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">6</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">hmgu</td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">6</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">icl</td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">6</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</section>
+<section id="build-seed-rt_center-per-lab-polarity-anchor-replicate" class="level2">
+<h2 class="anchored" data-anchor-id="build-seed-rt_center-per-lab-polarity-anchor-replicate">3. Build seed <code>rt_center</code> per <code>(lab, polarity, anchor, replicate)</code></h2>
+<p>Read each lab’s existing <code>naps.csv</code> to pull the per-replicate RT column. Then compute cross-lab consensus per <code>(polarity, anchor)</code> (median across labs of per-lab median RT) for the propagation fallback.</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb9"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a>read_naps_long <span class="ot">&lt;-</span> <span class="cf">function</span>(lab) {</span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a>  df <span class="ot">&lt;-</span> <span class="fu">read.csv</span>(<span class="fu">here</span>(<span class="st">"1_preprocessing"</span>, lab, <span class="st">"HE"</span>, <span class="st">"naps.csv"</span>),</span>
+<span id="cb9-3"><a href="#cb9-3" aria-hidden="true" tabindex="-1"></a>                 <span class="at">stringsAsFactors =</span> <span class="cn">FALSE</span>, <span class="at">check.names =</span> <span class="cn">FALSE</span>) <span class="sc">|&gt;</span></span>
+<span id="cb9-4"><a href="#cb9-4" aria-hidden="true" tabindex="-1"></a>    <span class="fu">.drop_empty_cols</span>()</span>
+<span id="cb9-5"><a href="#cb9-5" aria-hidden="true" tabindex="-1"></a>  df<span class="sc">$</span>anchor_n <span class="ot">&lt;-</span> <span class="fu">suppressWarnings</span>(<span class="fu">as.integer</span>(</span>
+<span id="cb9-6"><a href="#cb9-6" aria-hidden="true" tabindex="-1"></a>    <span class="fu">gsub</span>(<span class="st">"^C(</span><span class="sc">\\</span><span class="st">d+).*"</span>, <span class="st">"</span><span class="sc">\\</span><span class="st">1"</span>, df<span class="sc">$</span>Name)))</span>
+<span id="cb9-7"><a href="#cb9-7" aria-hidden="true" tabindex="-1"></a>  pos_cols <span class="ot">&lt;-</span> <span class="fu">grep</span>(<span class="st">"^NAPS_POS_"</span>, <span class="fu">names</span>(df), <span class="at">value =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb9-8"><a href="#cb9-8" aria-hidden="true" tabindex="-1"></a>  neg_cols <span class="ot">&lt;-</span> <span class="fu">grep</span>(<span class="st">"^NAPS_NEG_"</span>, <span class="fu">names</span>(df), <span class="at">value =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb9-9"><a href="#cb9-9" aria-hidden="true" tabindex="-1"></a>  <span class="fu">bind_rows</span>(</span>
+<span id="cb9-10"><a href="#cb9-10" aria-hidden="true" tabindex="-1"></a>    df <span class="sc">|&gt;</span> <span class="fu">select</span>(anchor_n, <span class="fu">all_of</span>(pos_cols)) <span class="sc">|&gt;</span></span>
+<span id="cb9-11"><a href="#cb9-11" aria-hidden="true" tabindex="-1"></a>      <span class="fu">pivot_longer</span>(<span class="fu">all_of</span>(pos_cols), <span class="at">names_to =</span> <span class="st">"rep_col"</span>,</span>
+<span id="cb9-12"><a href="#cb9-12" aria-hidden="true" tabindex="-1"></a>                   <span class="at">values_to =</span> <span class="st">"rt_csv"</span>) <span class="sc">|&gt;</span></span>
+<span id="cb9-13"><a href="#cb9-13" aria-hidden="true" tabindex="-1"></a>      <span class="fu">mutate</span>(<span class="at">polarity =</span> <span class="st">"pos"</span>,</span>
+<span id="cb9-14"><a href="#cb9-14" aria-hidden="true" tabindex="-1"></a>             <span class="at">replicate =</span> <span class="fu">as.integer</span>(<span class="fu">gsub</span>(<span class="st">"^NAPS_POS_"</span>, <span class="st">""</span>, rep_col))),</span>
+<span id="cb9-15"><a href="#cb9-15" aria-hidden="true" tabindex="-1"></a>    df <span class="sc">|&gt;</span> <span class="fu">select</span>(anchor_n, <span class="fu">all_of</span>(neg_cols)) <span class="sc">|&gt;</span></span>
+<span id="cb9-16"><a href="#cb9-16" aria-hidden="true" tabindex="-1"></a>      <span class="fu">pivot_longer</span>(<span class="fu">all_of</span>(neg_cols), <span class="at">names_to =</span> <span class="st">"rep_col"</span>,</span>
+<span id="cb9-17"><a href="#cb9-17" aria-hidden="true" tabindex="-1"></a>                   <span class="at">values_to =</span> <span class="st">"rt_csv"</span>) <span class="sc">|&gt;</span></span>
+<span id="cb9-18"><a href="#cb9-18" aria-hidden="true" tabindex="-1"></a>      <span class="fu">mutate</span>(<span class="at">polarity =</span> <span class="st">"neg"</span>,</span>
+<span id="cb9-19"><a href="#cb9-19" aria-hidden="true" tabindex="-1"></a>             <span class="at">replicate =</span> <span class="fu">as.integer</span>(<span class="fu">gsub</span>(<span class="st">"^NAPS_NEG_"</span>, <span class="st">""</span>, rep_col)))</span>
+<span id="cb9-20"><a href="#cb9-20" aria-hidden="true" tabindex="-1"></a>  ) <span class="sc">|&gt;</span></span>
+<span id="cb9-21"><a href="#cb9-21" aria-hidden="true" tabindex="-1"></a>    <span class="fu">transmute</span>(<span class="at">lab =</span> lab, polarity, anchor_n, replicate, rt_csv)</span>
+<span id="cb9-22"><a href="#cb9-22" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb9-23"><a href="#cb9-23" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-24"><a href="#cb9-24" aria-hidden="true" tabindex="-1"></a>naps_csv_long <span class="ot">&lt;-</span> <span class="fu">bind_rows</span>(<span class="fu">lapply</span>(labs, read_naps_long)) <span class="sc">|&gt;</span></span>
+<span id="cb9-25"><a href="#cb9-25" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(<span class="sc">!</span><span class="fu">is.na</span>(anchor_n))</span>
+<span id="cb9-26"><a href="#cb9-26" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-27"><a href="#cb9-27" aria-hidden="true" tabindex="-1"></a><span class="co"># Cross-lab consensus per (polarity, anchor) = median of per-lab medians</span></span>
+<span id="cb9-28"><a href="#cb9-28" aria-hidden="true" tabindex="-1"></a>consensus_rt <span class="ot">&lt;-</span> naps_csv_long <span class="sc">|&gt;</span></span>
+<span id="cb9-29"><a href="#cb9-29" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(<span class="sc">!</span><span class="fu">is.na</span>(rt_csv)) <span class="sc">|&gt;</span></span>
+<span id="cb9-30"><a href="#cb9-30" aria-hidden="true" tabindex="-1"></a>  <span class="fu">group_by</span>(lab, polarity, anchor_n) <span class="sc">|&gt;</span></span>
+<span id="cb9-31"><a href="#cb9-31" aria-hidden="true" tabindex="-1"></a>  <span class="fu">summarise</span>(<span class="at">rt_lab_med =</span> <span class="fu">median</span>(rt_csv), <span class="at">.groups =</span> <span class="st">"drop"</span>) <span class="sc">|&gt;</span></span>
+<span id="cb9-32"><a href="#cb9-32" aria-hidden="true" tabindex="-1"></a>  <span class="fu">group_by</span>(polarity, anchor_n) <span class="sc">|&gt;</span></span>
+<span id="cb9-33"><a href="#cb9-33" aria-hidden="true" tabindex="-1"></a>  <span class="fu">summarise</span>(<span class="at">consensus_rt =</span> <span class="fu">median</span>(rt_lab_med),</span>
+<span id="cb9-34"><a href="#cb9-34" aria-hidden="true" tabindex="-1"></a>            <span class="at">n_labs       =</span> <span class="fu">n</span>(),</span>
+<span id="cb9-35"><a href="#cb9-35" aria-hidden="true" tabindex="-1"></a>            <span class="at">.groups =</span> <span class="st">"drop"</span>)</span>
+<span id="cb9-36"><a href="#cb9-36" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-37"><a href="#cb9-37" aria-hidden="true" tabindex="-1"></a><span class="co"># Seed table: own rt_csv if present, else consensus_rt</span></span>
+<span id="cb9-38"><a href="#cb9-38" aria-hidden="true" tabindex="-1"></a>seed_table <span class="ot">&lt;-</span> naps_csv_long <span class="sc">|&gt;</span></span>
+<span id="cb9-39"><a href="#cb9-39" aria-hidden="true" tabindex="-1"></a>  <span class="fu">left_join</span>(consensus_rt, <span class="at">by =</span> <span class="fu">c</span>(<span class="st">"polarity"</span>, <span class="st">"anchor_n"</span>)) <span class="sc">|&gt;</span></span>
+<span id="cb9-40"><a href="#cb9-40" aria-hidden="true" tabindex="-1"></a>  <span class="fu">mutate</span>(<span class="at">rt_center =</span> <span class="fu">coalesce</span>(rt_csv, consensus_rt),</span>
+<span id="cb9-41"><a href="#cb9-41" aria-hidden="true" tabindex="-1"></a>         <span class="at">source    =</span> <span class="fu">ifelse</span>(<span class="fu">is.na</span>(rt_csv), <span class="st">"consensus"</span>, <span class="st">"own"</span>)) <span class="sc">|&gt;</span></span>
+<span id="cb9-42"><a href="#cb9-42" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(<span class="sc">!</span><span class="fu">is.na</span>(rt_center))  <span class="co"># drop rows with no consensus either</span></span>
+<span id="cb9-43"><a href="#cb9-43" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-44"><a href="#cb9-44" aria-hidden="true" tabindex="-1"></a><span class="fu">cat</span>(<span class="st">"Seed table: own ="</span>, <span class="fu">sum</span>(seed_table<span class="sc">$</span>source <span class="sc">==</span> <span class="st">"own"</span>),</span>
+<span id="cb9-45"><a href="#cb9-45" aria-hidden="true" tabindex="-1"></a>    <span class="st">" | consensus (propagated) ="</span>, <span class="fu">sum</span>(seed_table<span class="sc">$</span>source <span class="sc">==</span> <span class="st">"consensus"</span>), <span class="st">"</span><span class="sc">\n</span><span class="st">"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output cell-output-stdout">
+<pre><code>Seed table: own = 841  | consensus (propagated) = 119 </code></pre>
+</div>
+</div>
+</section>
+<section id="build-flat-peak-table" class="level2">
+<h2 class="anchored" data-anchor-id="build-flat-peak-table">4. Build flat peak table</h2>
+<p>One row per <code>(lab, polarity, anchor_n, replicate)</code>. Join with <code>naps_files</code> to get <code>dataOrigin</code> and with <code>anchor_meta</code> to get theoretical m/z.</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb11"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a>sps_all <span class="ot">&lt;-</span> <span class="fu">Spectra</span>(naps_files<span class="sc">$</span>path, <span class="at">backend =</span> <span class="fu">MsBackendMzR</span>())</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output cell-output-stderr">
+<pre><code>Warning in fun(libname, pkgname): mzR has been built against a different Rcpp version (1.1.1.9)
+than is installed on your system (1.1.1.1.1). This might lead to errors
+when loading mzR. If you encounter such issues, please send a report,
+including the output of sessionInfo() to the Bioc support forum at 
+https://support.bioconductor.org/. For details see also
+https://github.com/sneumann/mzR/wiki/mzR-Rcpp-compiler-linker-issue.</code></pre>
+</div>
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb13"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a>sps_all <span class="ot">&lt;-</span> sps_all[<span class="fu">msLevel</span>(sps_all) <span class="sc">==</span> <span class="dv">1</span>L]</span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a>canon   <span class="ot">&lt;-</span> <span class="fu">unique</span>(<span class="fu">dataOrigin</span>(sps_all))</span>
+<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a>naps_files<span class="sc">$</span>dataOrigin <span class="ot">&lt;-</span> canon[<span class="fu">match</span>(<span class="fu">basename</span>(naps_files<span class="sc">$</span>path),</span>
+<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a>                                     <span class="fu">basename</span>(canon))]</span>
+<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a><span class="fu">stopifnot</span>(<span class="fu">all</span>(<span class="sc">!</span><span class="fu">is.na</span>(naps_files<span class="sc">$</span>dataOrigin)))</span>
+<span id="cb13-6"><a href="#cb13-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb13-7"><a href="#cb13-7" aria-hidden="true" tabindex="-1"></a>peak_table <span class="ot">&lt;-</span> seed_table <span class="sc">|&gt;</span></span>
+<span id="cb13-8"><a href="#cb13-8" aria-hidden="true" tabindex="-1"></a>  <span class="fu">inner_join</span>(naps_files <span class="sc">|&gt;</span> <span class="fu">select</span>(lab, polarity, replicate, dataOrigin),</span>
+<span id="cb13-9"><a href="#cb13-9" aria-hidden="true" tabindex="-1"></a>             <span class="at">by =</span> <span class="fu">c</span>(<span class="st">"lab"</span>, <span class="st">"polarity"</span>, <span class="st">"replicate"</span>)) <span class="sc">|&gt;</span></span>
+<span id="cb13-10"><a href="#cb13-10" aria-hidden="true" tabindex="-1"></a>  <span class="fu">inner_join</span>(anchor_meta <span class="sc">|&gt;</span> <span class="fu">select</span>(anchor_n, mz_pos, mz_neg),</span>
+<span id="cb13-11"><a href="#cb13-11" aria-hidden="true" tabindex="-1"></a>             <span class="at">by =</span> <span class="st">"anchor_n"</span>) <span class="sc">|&gt;</span></span>
+<span id="cb13-12"><a href="#cb13-12" aria-hidden="true" tabindex="-1"></a>  <span class="fu">mutate</span>(<span class="at">mz_center =</span> <span class="fu">ifelse</span>(polarity <span class="sc">==</span> <span class="st">"pos"</span>, mz_pos, mz_neg)) <span class="sc">|&gt;</span></span>
+<span id="cb13-13"><a href="#cb13-13" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(<span class="sc">!</span><span class="fu">is.na</span>(mz_center)) <span class="sc">|&gt;</span></span>
+<span id="cb13-14"><a href="#cb13-14" aria-hidden="true" tabindex="-1"></a>  <span class="fu">transmute</span>(</span>
+<span id="cb13-15"><a href="#cb13-15" aria-hidden="true" tabindex="-1"></a>    <span class="at">mzMin     =</span> mz_center <span class="sc">*</span> (<span class="dv">1</span> <span class="sc">-</span> ppm_tol <span class="sc">/</span> <span class="fl">1e6</span>),</span>
+<span id="cb13-16"><a href="#cb13-16" aria-hidden="true" tabindex="-1"></a>    <span class="at">mzMax     =</span> mz_center <span class="sc">*</span> (<span class="dv">1</span> <span class="sc">+</span> ppm_tol <span class="sc">/</span> <span class="fl">1e6</span>),</span>
+<span id="cb13-17"><a href="#cb13-17" aria-hidden="true" tabindex="-1"></a>    <span class="at">rtMin     =</span> <span class="fu">pmax</span>(<span class="dv">0</span>, rt_center <span class="sc">-</span> pad_wide),</span>
+<span id="cb13-18"><a href="#cb13-18" aria-hidden="true" tabindex="-1"></a>    <span class="at">rtMax     =</span> rt_center <span class="sc">+</span> pad_wide,</span>
+<span id="cb13-19"><a href="#cb13-19" aria-hidden="true" tabindex="-1"></a>    <span class="at">msLevel   =</span> <span class="dv">1</span>L,</span>
+<span id="cb13-20"><a href="#cb13-20" aria-hidden="true" tabindex="-1"></a>    dataOrigin, lab, polarity, anchor_n, replicate, source,</span>
+<span id="cb13-21"><a href="#cb13-21" aria-hidden="true" tabindex="-1"></a>    mz_center, rt_center</span>
+<span id="cb13-22"><a href="#cb13-22" aria-hidden="true" tabindex="-1"></a>  )</span>
+<span id="cb13-23"><a href="#cb13-23" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb13-24"><a href="#cb13-24" aria-hidden="true" tabindex="-1"></a><span class="fu">cat</span>(<span class="st">"peak_table rows:"</span>, <span class="fu">nrow</span>(peak_table),</span>
+<span id="cb13-25"><a href="#cb13-25" aria-hidden="true" tabindex="-1"></a>    <span class="st">" (max possible 4 × 2 × 20 × 6 = 960)</span><span class="sc">\n</span><span class="st">"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output cell-output-stdout">
+<pre><code>peak_table rows: 960  (max possible 4 × 2 × 20 × 6 = 960)</code></pre>
+</div>
+</div>
+</section>
+<section id="chromextract-single-wide-pass-60-s" class="level2">
+<h2 class="anchored" data-anchor-id="chromextract-single-wide-pass-60-s">5. chromExtract — single wide pass (±60 s)</h2>
+<p>The legacy two-pass design (tight ±10 s pass 1, fallback ±60/+20 s pass 2) was replaced after audit showed it systematically missed real peaks for icl pos NAPS C10: a 5 × 10⁵-count peak sits 11 s before the consensus RT; the pass-1 ±10 s window excluded it and the pass-2 retry never fired because <code>peakBoundary()</code> returned a 386-count noise spike inside the tight window. A single wide extraction + SNR-aware picker (§6) avoids that failure mode.</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb15"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a>chr_base <span class="ot">&lt;-</span> <span class="fu">Chromatograms</span>(sps_all)</span>
+<span id="cb15-2"><a href="#cb15-2" aria-hidden="true" tabindex="-1"></a>chr_all  <span class="ot">&lt;-</span> <span class="fu">chromExtract</span>(chr_base, <span class="at">peak.table =</span> peak_table,</span>
+<span id="cb15-3"><a href="#cb15-3" aria-hidden="true" tabindex="-1"></a>                         <span class="at">by =</span> <span class="fu">c</span>(<span class="st">"msLevel"</span>, <span class="st">"dataOrigin"</span>))</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output cell-output-stderr">
+<pre><code>Warning in .check_overl_columns(peak.table = peak.table, object = object, : The
+following columns in `peak.table` already exist in `chromData` and will be
+replaced in the output: polarity</code></pre>
+</div>
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb17"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a><span class="fu">cat</span>(<span class="st">"chromatograms:"</span>, <span class="fu">length</span>(chr_all),</span>
+<span id="cb17-2"><a href="#cb17-2" aria-hidden="true" tabindex="-1"></a>    <span class="st">" | non-empty:"</span>, <span class="fu">length</span>(<span class="fu">filterEmptyChromatograms</span>(chr_all)), <span class="st">"</span><span class="sc">\n</span><span class="st">"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output cell-output-stdout">
+<pre><code>chromatograms: 960  | non-empty: 960 </code></pre>
+</div>
+</div>
+</section>
+<section id="snr-aware-peak-picking" class="level2">
+<h2 class="anchored" data-anchor-id="snr-aware-peak-picking">6. SNR-aware peak picking</h2>
+<p>We use the same picker as <code>sirius_annotation_all_ms2.qmd</code> §7.6 (with the bottom-half-tail noise estimate). For NAPS the SNR/shape/absolute- floor guards almost never trigger — NAPS standards are concentrated and easily above detection — but having them present means the few genuine NAPS extraction failures (e.g.&nbsp;an injection where the column didn’t elute the standard at all) get cleanly flagged rather than fabricated.</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb19"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a>extract_one <span class="ot">&lt;-</span> <span class="cf">function</span>(rt, intensity, rt_prior,</span>
+<span id="cb19-2"><a href="#cb19-2" aria-hidden="true" tabindex="-1"></a>                        <span class="at">apex_search_pad =</span> <span class="dv">20</span>,</span>
+<span id="cb19-3"><a href="#cb19-3" aria-hidden="true" tabindex="-1"></a>                        <span class="at">tail_pad        =</span> <span class="dv">25</span>,</span>
+<span id="cb19-4"><a href="#cb19-4" aria-hidden="true" tabindex="-1"></a>                        <span class="at">snr_threshold   =</span> <span class="dv">5</span>,</span>
+<span id="cb19-5"><a href="#cb19-5" aria-hidden="true" tabindex="-1"></a>                        <span class="at">abs_min_counts  =</span> <span class="dv">30</span>) {</span>
+<span id="cb19-6"><a href="#cb19-6" aria-hidden="true" tabindex="-1"></a>  ok <span class="ot">&lt;-</span> <span class="sc">!</span><span class="fu">is.na</span>(intensity); rt <span class="ot">&lt;-</span> rt[ok]; intensity <span class="ot">&lt;-</span> intensity[ok]</span>
+<span id="cb19-7"><a href="#cb19-7" aria-hidden="true" tabindex="-1"></a>  <span class="cf">if</span> (<span class="fu">length</span>(rt) <span class="sc">&lt;</span> <span class="dv">5</span>L)</span>
+<span id="cb19-8"><a href="#cb19-8" aria-hidden="true" tabindex="-1"></a>    <span class="fu">return</span>(<span class="fu">list</span>(<span class="at">detection =</span> <span class="st">"no_data"</span>,</span>
+<span id="cb19-9"><a href="#cb19-9" aria-hidden="true" tabindex="-1"></a>                <span class="at">apex_rt =</span> <span class="cn">NA_real_</span>, <span class="at">maxIntensity =</span> <span class="cn">NA_real_</span>,</span>
+<span id="cb19-10"><a href="#cb19-10" aria-hidden="true" tabindex="-1"></a>                <span class="at">areaUnderTic =</span> <span class="cn">NA_real_</span>, <span class="at">xicFwhm =</span> <span class="cn">NA_real_</span>,</span>
+<span id="cb19-11"><a href="#cb19-11" aria-hidden="true" tabindex="-1"></a>                <span class="at">snr =</span> <span class="cn">NA_real_</span>, <span class="at">baseline =</span> <span class="cn">NA_real_</span>, <span class="at">noise =</span> <span class="cn">NA_real_</span>,</span>
+<span id="cb19-12"><a href="#cb19-12" aria-hidden="true" tabindex="-1"></a>                <span class="at">n_scans_in_shape =</span> <span class="dv">0</span>L))</span>
+<span id="cb19-13"><a href="#cb19-13" aria-hidden="true" tabindex="-1"></a>  sm <span class="ot">&lt;-</span> <span class="fu">as.numeric</span>(stats<span class="sc">::</span><span class="fu">filter</span>(intensity, <span class="fu">rep</span>(<span class="dv">1</span>, <span class="dv">3</span>) <span class="sc">/</span> <span class="dv">3</span>, <span class="at">sides =</span> <span class="dv">2</span>))</span>
+<span id="cb19-14"><a href="#cb19-14" aria-hidden="true" tabindex="-1"></a>  sm[<span class="fu">is.na</span>(sm)] <span class="ot">&lt;-</span> intensity[<span class="fu">is.na</span>(sm)]</span>
+<span id="cb19-15"><a href="#cb19-15" aria-hidden="true" tabindex="-1"></a>  search_idx <span class="ot">&lt;-</span> <span class="fu">which</span>(rt <span class="sc">&gt;=</span> rt_prior <span class="sc">-</span> apex_search_pad <span class="sc">&amp;</span></span>
+<span id="cb19-16"><a href="#cb19-16" aria-hidden="true" tabindex="-1"></a>                      rt <span class="sc">&lt;=</span> rt_prior <span class="sc">+</span> apex_search_pad)</span>
+<span id="cb19-17"><a href="#cb19-17" aria-hidden="true" tabindex="-1"></a>  <span class="cf">if</span> (<span class="sc">!</span><span class="fu">length</span>(search_idx))</span>
+<span id="cb19-18"><a href="#cb19-18" aria-hidden="true" tabindex="-1"></a>    <span class="fu">return</span>(<span class="fu">list</span>(<span class="at">detection =</span> <span class="st">"no_data"</span>,</span>
+<span id="cb19-19"><a href="#cb19-19" aria-hidden="true" tabindex="-1"></a>                <span class="at">apex_rt =</span> <span class="cn">NA_real_</span>, <span class="at">maxIntensity =</span> <span class="cn">NA_real_</span>,</span>
+<span id="cb19-20"><a href="#cb19-20" aria-hidden="true" tabindex="-1"></a>                <span class="at">areaUnderTic =</span> <span class="cn">NA_real_</span>, <span class="at">xicFwhm =</span> <span class="cn">NA_real_</span>,</span>
+<span id="cb19-21"><a href="#cb19-21" aria-hidden="true" tabindex="-1"></a>                <span class="at">snr =</span> <span class="cn">NA_real_</span>, <span class="at">baseline =</span> <span class="cn">NA_real_</span>, <span class="at">noise =</span> <span class="cn">NA_real_</span>,</span>
+<span id="cb19-22"><a href="#cb19-22" aria-hidden="true" tabindex="-1"></a>                <span class="at">n_scans_in_shape =</span> <span class="dv">0</span>L))</span>
+<span id="cb19-23"><a href="#cb19-23" aria-hidden="true" tabindex="-1"></a>  apex_local <span class="ot">&lt;-</span> search_idx[<span class="fu">which.max</span>(intensity[search_idx])]</span>
+<span id="cb19-24"><a href="#cb19-24" aria-hidden="true" tabindex="-1"></a>  apex_rt    <span class="ot">&lt;-</span> rt[apex_local]; apex_int <span class="ot">&lt;-</span> intensity[apex_local]</span>
+<span id="cb19-25"><a href="#cb19-25" aria-hidden="true" tabindex="-1"></a>  tail_idx <span class="ot">&lt;-</span> <span class="fu">which</span>(<span class="fu">abs</span>(rt <span class="sc">-</span> apex_rt) <span class="sc">&gt;</span> tail_pad)</span>
+<span id="cb19-26"><a href="#cb19-26" aria-hidden="true" tabindex="-1"></a>  <span class="cf">if</span> (<span class="fu">length</span>(tail_idx) <span class="sc">&lt;</span> <span class="dv">10</span>L) {</span>
+<span id="cb19-27"><a href="#cb19-27" aria-hidden="true" tabindex="-1"></a>    n <span class="ot">&lt;-</span> <span class="fu">length</span>(rt); tail_idx <span class="ot">&lt;-</span> <span class="fu">c</span>(<span class="fu">seq_len</span>(<span class="fu">round</span>(<span class="fl">0.25</span> <span class="sc">*</span> n)),</span>
+<span id="cb19-28"><a href="#cb19-28" aria-hidden="true" tabindex="-1"></a>                                    (n <span class="sc">-</span> <span class="fu">round</span>(<span class="fl">0.25</span> <span class="sc">*</span> n) <span class="sc">+</span> <span class="dv">1</span>L)<span class="sc">:</span>n)</span>
+<span id="cb19-29"><a href="#cb19-29" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="cb19-30"><a href="#cb19-30" aria-hidden="true" tabindex="-1"></a>  tail_int <span class="ot">&lt;-</span> intensity[tail_idx]</span>
+<span id="cb19-31"><a href="#cb19-31" aria-hidden="true" tabindex="-1"></a>  tail_low <span class="ot">&lt;-</span> tail_int[tail_int <span class="sc">&lt;=</span> <span class="fu">quantile</span>(tail_int, <span class="fl">0.5</span>, <span class="at">na.rm =</span> <span class="cn">TRUE</span>)]</span>
+<span id="cb19-32"><a href="#cb19-32" aria-hidden="true" tabindex="-1"></a>  baseline <span class="ot">&lt;-</span> <span class="fu">median</span>(tail_low, <span class="at">na.rm =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb19-33"><a href="#cb19-33" aria-hidden="true" tabindex="-1"></a>  noise_mad <span class="ot">&lt;-</span> <span class="fu">mad</span>(tail_low, <span class="at">na.rm =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb19-34"><a href="#cb19-34" aria-hidden="true" tabindex="-1"></a>  q15 <span class="ot">&lt;-</span> <span class="fu">as.numeric</span>(<span class="fu">quantile</span>(tail_low, <span class="fl">0.15</span>, <span class="at">na.rm =</span> <span class="cn">TRUE</span>))</span>
+<span id="cb19-35"><a href="#cb19-35" aria-hidden="true" tabindex="-1"></a>  q85 <span class="ot">&lt;-</span> <span class="fu">as.numeric</span>(<span class="fu">quantile</span>(tail_low, <span class="fl">0.85</span>, <span class="at">na.rm =</span> <span class="cn">TRUE</span>))</span>
+<span id="cb19-36"><a href="#cb19-36" aria-hidden="true" tabindex="-1"></a>  raw_noise <span class="ot">&lt;-</span> <span class="fu">max</span>(noise_mad, (q85 <span class="sc">-</span> q15) <span class="sc">/</span> <span class="dv">2</span>, <span class="at">na.rm =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb19-37"><a href="#cb19-37" aria-hidden="true" tabindex="-1"></a>  noise_at_floor <span class="ot">&lt;-</span> <span class="sc">!</span><span class="fu">is.finite</span>(raw_noise) <span class="sc">||</span> raw_noise <span class="sc">&lt;=</span> <span class="dv">0</span></span>
+<span id="cb19-38"><a href="#cb19-38" aria-hidden="true" tabindex="-1"></a>  noise <span class="ot">&lt;-</span> <span class="fu">max</span>(raw_noise, <span class="dv">1</span>, <span class="at">na.rm =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb19-39"><a href="#cb19-39" aria-hidden="true" tabindex="-1"></a>  snr   <span class="ot">&lt;-</span> (apex_int <span class="sc">-</span> baseline) <span class="sc">/</span> noise</span>
+<span id="cb19-40"><a href="#cb19-40" aria-hidden="true" tabindex="-1"></a>  v_idx <span class="ot">&lt;-</span> <span class="fu">tryCatch</span>(MsCoreUtils<span class="sc">::</span><span class="fu">valleys</span>(sm), <span class="at">error =</span> <span class="cf">function</span>(e) <span class="fu">integer</span>(<span class="dv">0</span>))</span>
+<span id="cb19-41"><a href="#cb19-41" aria-hidden="true" tabindex="-1"></a>  <span class="cf">if</span> (<span class="fu">length</span>(v_idx) <span class="sc">&gt;=</span> <span class="dv">2</span>L) {</span>
+<span id="cb19-42"><a href="#cb19-42" aria-hidden="true" tabindex="-1"></a>    left  <span class="ot">&lt;-</span> <span class="fu">suppressWarnings</span>(<span class="fu">max</span>(v_idx[v_idx <span class="sc">&lt;=</span> apex_local], <span class="at">na.rm =</span> <span class="cn">TRUE</span>))</span>
+<span id="cb19-43"><a href="#cb19-43" aria-hidden="true" tabindex="-1"></a>    right <span class="ot">&lt;-</span> <span class="fu">suppressWarnings</span>(<span class="fu">min</span>(v_idx[v_idx <span class="sc">&gt;=</span> apex_local], <span class="at">na.rm =</span> <span class="cn">TRUE</span>))</span>
+<span id="cb19-44"><a href="#cb19-44" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (<span class="sc">!</span><span class="fu">is.finite</span>(left))  left  <span class="ot">&lt;-</span> <span class="dv">1</span>L</span>
+<span id="cb19-45"><a href="#cb19-45" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (<span class="sc">!</span><span class="fu">is.finite</span>(right)) right <span class="ot">&lt;-</span> <span class="fu">length</span>(rt)</span>
+<span id="cb19-46"><a href="#cb19-46" aria-hidden="true" tabindex="-1"></a>  } <span class="cf">else</span> {</span>
+<span id="cb19-47"><a href="#cb19-47" aria-hidden="true" tabindex="-1"></a>    left <span class="ot">&lt;-</span> apex_local; right <span class="ot">&lt;-</span> apex_local</span>
+<span id="cb19-48"><a href="#cb19-48" aria-hidden="true" tabindex="-1"></a>    <span class="cf">while</span> (left  <span class="sc">&gt;</span> <span class="dv">1</span>L         <span class="sc">&amp;&amp;</span> sm[left  <span class="sc">-</span> <span class="dv">1</span>L] <span class="sc">&gt;</span> baseline <span class="sc">+</span> noise) left  <span class="ot">&lt;-</span> left  <span class="sc">-</span> <span class="dv">1</span>L</span>
+<span id="cb19-49"><a href="#cb19-49" aria-hidden="true" tabindex="-1"></a>    <span class="cf">while</span> (right <span class="sc">&lt;</span> <span class="fu">length</span>(rt) <span class="sc">&amp;&amp;</span> sm[right <span class="sc">+</span> <span class="dv">1</span>L] <span class="sc">&gt;</span> baseline <span class="sc">+</span> noise) right <span class="ot">&lt;-</span> right <span class="sc">+</span> <span class="dv">1</span>L</span>
+<span id="cb19-50"><a href="#cb19-50" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="cb19-51"><a href="#cb19-51" aria-hidden="true" tabindex="-1"></a>  pk_rt <span class="ot">&lt;-</span> rt[left<span class="sc">:</span>right]; pk_int <span class="ot">&lt;-</span> intensity[left<span class="sc">:</span>right]</span>
+<span id="cb19-52"><a href="#cb19-52" aria-hidden="true" tabindex="-1"></a>  area  <span class="ot">&lt;-</span> <span class="cf">if</span> (<span class="fu">length</span>(pk_rt) <span class="sc">&gt;=</span> <span class="dv">2</span>L)</span>
+<span id="cb19-53"><a href="#cb19-53" aria-hidden="true" tabindex="-1"></a>             <span class="fu">sum</span>(<span class="fu">diff</span>(pk_rt) <span class="sc">*</span> (pk_int[<span class="sc">-</span><span class="dv">1</span>] <span class="sc">+</span> pk_int[<span class="sc">-</span><span class="fu">length</span>(pk_int)]) <span class="sc">/</span> <span class="dv">2</span>)</span>
+<span id="cb19-54"><a href="#cb19-54" aria-hidden="true" tabindex="-1"></a>           <span class="cf">else</span> <span class="cn">NA_real_</span></span>
+<span id="cb19-55"><a href="#cb19-55" aria-hidden="true" tabindex="-1"></a>  hm    <span class="ot">&lt;-</span> (apex_int <span class="sc">-</span> baseline) <span class="sc">/</span> <span class="dv">2</span> <span class="sc">+</span> baseline</span>
+<span id="cb19-56"><a href="#cb19-56" aria-hidden="true" tabindex="-1"></a>  above <span class="ot">&lt;-</span> <span class="fu">which</span>(pk_int <span class="sc">&gt;=</span> hm)</span>
+<span id="cb19-57"><a href="#cb19-57" aria-hidden="true" tabindex="-1"></a>  fwhm  <span class="ot">&lt;-</span> <span class="cf">if</span> (<span class="fu">length</span>(above) <span class="sc">&gt;=</span> <span class="dv">2</span>L) <span class="fu">diff</span>(<span class="fu">range</span>(pk_rt[above])) <span class="cf">else</span> <span class="cn">NA_real_</span></span>
+<span id="cb19-58"><a href="#cb19-58" aria-hidden="true" tabindex="-1"></a>  nb_lo <span class="ot">&lt;-</span> <span class="fu">max</span>(<span class="dv">1</span>L, apex_local <span class="sc">-</span> <span class="dv">2</span>L); nb_hi <span class="ot">&lt;-</span> <span class="fu">min</span>(<span class="fu">length</span>(rt), apex_local <span class="sc">+</span> <span class="dv">2</span>L)</span>
+<span id="cb19-59"><a href="#cb19-59" aria-hidden="true" tabindex="-1"></a>  n_shape <span class="ot">&lt;-</span> <span class="fu">sum</span>(intensity[nb_lo<span class="sc">:</span>nb_hi] <span class="sc">&gt;=</span> <span class="fl">0.3</span> <span class="sc">*</span> apex_int, <span class="at">na.rm =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb19-60"><a href="#cb19-60" aria-hidden="true" tabindex="-1"></a>  detection <span class="ot">&lt;-</span> <span class="cf">if</span> (apex_int <span class="sc">&lt;=</span> baseline) <span class="st">"below_detection"</span></span>
+<span id="cb19-61"><a href="#cb19-61" aria-hidden="true" tabindex="-1"></a>               <span class="cf">else</span> <span class="cf">if</span> (snr <span class="sc">&lt;</span> snr_threshold) <span class="st">"below_detection"</span></span>
+<span id="cb19-62"><a href="#cb19-62" aria-hidden="true" tabindex="-1"></a>               <span class="cf">else</span> <span class="cf">if</span> (n_shape <span class="sc">&lt;</span> <span class="dv">2</span>L) <span class="st">"below_detection"</span></span>
+<span id="cb19-63"><a href="#cb19-63" aria-hidden="true" tabindex="-1"></a>               <span class="cf">else</span> <span class="cf">if</span> (noise_at_floor <span class="sc">&amp;&amp;</span> apex_int <span class="sc">&lt;</span> abs_min_counts) <span class="st">"below_detection"</span></span>
+<span id="cb19-64"><a href="#cb19-64" aria-hidden="true" tabindex="-1"></a>               <span class="cf">else</span> <span class="st">"detected"</span></span>
+<span id="cb19-65"><a href="#cb19-65" aria-hidden="true" tabindex="-1"></a>  <span class="fu">list</span>(<span class="at">detection =</span> detection, <span class="at">apex_rt =</span> apex_rt,</span>
+<span id="cb19-66"><a href="#cb19-66" aria-hidden="true" tabindex="-1"></a>       <span class="at">maxIntensity =</span> <span class="cf">if</span> (detection <span class="sc">==</span> <span class="st">"detected"</span>) apex_int <span class="cf">else</span> <span class="cn">NA_real_</span>,</span>
+<span id="cb19-67"><a href="#cb19-67" aria-hidden="true" tabindex="-1"></a>       <span class="at">areaUnderTic =</span> <span class="cf">if</span> (detection <span class="sc">==</span> <span class="st">"detected"</span>) area     <span class="cf">else</span> <span class="cn">NA_real_</span>,</span>
+<span id="cb19-68"><a href="#cb19-68" aria-hidden="true" tabindex="-1"></a>       <span class="at">xicFwhm     =</span> <span class="cf">if</span> (detection <span class="sc">==</span> <span class="st">"detected"</span>) fwhm     <span class="cf">else</span> <span class="cn">NA_real_</span>,</span>
+<span id="cb19-69"><a href="#cb19-69" aria-hidden="true" tabindex="-1"></a>       <span class="at">snr =</span> snr, <span class="at">baseline =</span> baseline, <span class="at">noise =</span> noise,</span>
+<span id="cb19-70"><a href="#cb19-70" aria-hidden="true" tabindex="-1"></a>       <span class="at">n_scans_in_shape =</span> n_shape)</span>
+<span id="cb19-71"><a href="#cb19-71" aria-hidden="true" tabindex="-1"></a>}</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+</div>
+</section>
+<section id="apply-the-picker" class="level2">
+<h2 class="anchored" data-anchor-id="apply-the-picker">7. Apply the picker</h2>
+<div class="cell">
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb20"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true" tabindex="-1"></a>cd_all <span class="ot">&lt;-</span> <span class="fu">as.data.frame</span>(<span class="fu">chromData</span>(chr_all))</span>
+<span id="cb20-2"><a href="#cb20-2" aria-hidden="true" tabindex="-1"></a>pkData <span class="ot">&lt;-</span> <span class="fu">peaksData</span>(chr_all)</span>
+<span id="cb20-3"><a href="#cb20-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb20-4"><a href="#cb20-4" aria-hidden="true" tabindex="-1"></a>metrics_rows <span class="ot">&lt;-</span> <span class="fu">vector</span>(<span class="st">"list"</span>, <span class="fu">nrow</span>(cd_all))</span>
+<span id="cb20-5"><a href="#cb20-5" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> (i <span class="cf">in</span> <span class="fu">seq_len</span>(<span class="fu">nrow</span>(cd_all))) {</span>
+<span id="cb20-6"><a href="#cb20-6" aria-hidden="true" tabindex="-1"></a>  pd <span class="ot">&lt;-</span> pkData[[i]]</span>
+<span id="cb20-7"><a href="#cb20-7" aria-hidden="true" tabindex="-1"></a>  <span class="cf">if</span> (<span class="fu">is.null</span>(pd) <span class="sc">||</span> <span class="sc">!</span><span class="fu">nrow</span>(pd)) {</span>
+<span id="cb20-8"><a href="#cb20-8" aria-hidden="true" tabindex="-1"></a>    metrics_rows[[i]] <span class="ot">&lt;-</span> <span class="fu">list</span>(<span class="at">detection =</span> <span class="st">"no_data"</span>,</span>
+<span id="cb20-9"><a href="#cb20-9" aria-hidden="true" tabindex="-1"></a>                              <span class="at">apex_rt =</span> <span class="cn">NA_real_</span>, <span class="at">maxIntensity =</span> <span class="cn">NA_real_</span>,</span>
+<span id="cb20-10"><a href="#cb20-10" aria-hidden="true" tabindex="-1"></a>                              <span class="at">areaUnderTic =</span> <span class="cn">NA_real_</span>, <span class="at">xicFwhm =</span> <span class="cn">NA_real_</span>,</span>
+<span id="cb20-11"><a href="#cb20-11" aria-hidden="true" tabindex="-1"></a>                              <span class="at">snr =</span> <span class="cn">NA_real_</span>, <span class="at">baseline =</span> <span class="cn">NA_real_</span>,</span>
+<span id="cb20-12"><a href="#cb20-12" aria-hidden="true" tabindex="-1"></a>                              <span class="at">noise =</span> <span class="cn">NA_real_</span>, <span class="at">n_scans_in_shape =</span> <span class="dv">0</span>L)</span>
+<span id="cb20-13"><a href="#cb20-13" aria-hidden="true" tabindex="-1"></a>    <span class="cf">next</span></span>
+<span id="cb20-14"><a href="#cb20-14" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="cb20-15"><a href="#cb20-15" aria-hidden="true" tabindex="-1"></a>  metrics_rows[[i]] <span class="ot">&lt;-</span> <span class="fu">extract_one</span>(pd[, <span class="st">"rtime"</span>], pd[, <span class="st">"intensity"</span>],</span>
+<span id="cb20-16"><a href="#cb20-16" aria-hidden="true" tabindex="-1"></a>                                   <span class="at">rt_prior        =</span> cd_all<span class="sc">$</span>rt_center[i],</span>
+<span id="cb20-17"><a href="#cb20-17" aria-hidden="true" tabindex="-1"></a>                                   <span class="at">apex_search_pad =</span> apex_search_pad)</span>
+<span id="cb20-18"><a href="#cb20-18" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb20-19"><a href="#cb20-19" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb20-20"><a href="#cb20-20" aria-hidden="true" tabindex="-1"></a>metrics_df <span class="ot">&lt;-</span> <span class="fu">bind_cols</span>(</span>
+<span id="cb20-21"><a href="#cb20-21" aria-hidden="true" tabindex="-1"></a>  cd_all <span class="sc">|&gt;</span> <span class="fu">select</span>(lab, polarity, anchor_n, replicate, source),</span>
+<span id="cb20-22"><a href="#cb20-22" aria-hidden="true" tabindex="-1"></a>  <span class="fu">bind_rows</span>(<span class="fu">lapply</span>(metrics_rows, as.data.frame))</span>
+<span id="cb20-23"><a href="#cb20-23" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb20-24"><a href="#cb20-24" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb20-25"><a href="#cb20-25" aria-hidden="true" tabindex="-1"></a><span class="fu">cat</span>(<span class="st">"Picker done — "</span>, <span class="fu">nrow</span>(metrics_df), <span class="st">" rows</span><span class="sc">\n</span><span class="st">"</span>,</span>
+<span id="cb20-26"><a href="#cb20-26" aria-hidden="true" tabindex="-1"></a>    <span class="st">"  detected:        "</span>, <span class="fu">sum</span>(metrics_df<span class="sc">$</span>detection <span class="sc">==</span> <span class="st">"detected"</span>), <span class="st">"</span><span class="sc">\n</span><span class="st">"</span>,</span>
+<span id="cb20-27"><a href="#cb20-27" aria-hidden="true" tabindex="-1"></a>    <span class="st">"  below_detection: "</span>, <span class="fu">sum</span>(metrics_df<span class="sc">$</span>detection <span class="sc">==</span> <span class="st">"below_detection"</span>), <span class="st">"</span><span class="sc">\n</span><span class="st">"</span>,</span>
+<span id="cb20-28"><a href="#cb20-28" aria-hidden="true" tabindex="-1"></a>    <span class="st">"  no_data:         "</span>, <span class="fu">sum</span>(metrics_df<span class="sc">$</span>detection <span class="sc">==</span> <span class="st">"no_data"</span>), <span class="st">"</span><span class="sc">\n</span><span class="st">"</span>,</span>
+<span id="cb20-29"><a href="#cb20-29" aria-hidden="true" tabindex="-1"></a>    <span class="at">sep =</span> <span class="st">""</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output cell-output-stdout">
+<pre><code>Picker done — 960 rows
+  detected:        950
+  below_detection: 8
+  no_data:         2</code></pre>
+</div>
+</div>
+</section>
+<section id="detection-summary" class="level2">
+<h2 class="anchored" data-anchor-id="detection-summary">8. Detection summary</h2>
+<div class="cell">
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb22"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true" tabindex="-1"></a>metrics_df <span class="sc">|&gt;</span></span>
+<span id="cb22-2"><a href="#cb22-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">count</span>(lab, polarity, detection) <span class="sc">|&gt;</span></span>
+<span id="cb22-3"><a href="#cb22-3" aria-hidden="true" tabindex="-1"></a>  tidyr<span class="sc">::</span><span class="fu">pivot_wider</span>(<span class="at">names_from =</span> detection, <span class="at">values_from =</span> n,</span>
+<span id="cb22-4"><a href="#cb22-4" aria-hidden="true" tabindex="-1"></a>                     <span class="at">values_fill =</span> <span class="dv">0</span>L) <span class="sc">|&gt;</span></span>
+<span id="cb22-5"><a href="#cb22-5" aria-hidden="true" tabindex="-1"></a>  knitr<span class="sc">::</span><span class="fu">kable</span>(<span class="at">caption =</span> <span class="st">"NAPS detection counts per (lab, polarity)."</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<caption>NAPS detection counts per (lab, polarity).</caption>
+<thead>
+<tr class="header">
+<th style="text-align: left;">lab</th>
+<th style="text-align: left;">polarity</th>
+<th style="text-align: right;">detected</th>
+<th style="text-align: right;">below_detection</th>
+<th style="text-align: right;">no_data</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">afekta</td>
+<td style="text-align: left;">neg</td>
+<td style="text-align: right;">120</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">afekta</td>
+<td style="text-align: left;">pos</td>
+<td style="text-align: right;">120</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">cembio</td>
+<td style="text-align: left;">neg</td>
+<td style="text-align: right;">120</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">cembio</td>
+<td style="text-align: left;">pos</td>
+<td style="text-align: right;">116</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">2</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">hmgu</td>
+<td style="text-align: left;">neg</td>
+<td style="text-align: right;">120</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">hmgu</td>
+<td style="text-align: left;">pos</td>
+<td style="text-align: right;">120</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">icl</td>
+<td style="text-align: left;">neg</td>
+<td style="text-align: right;">119</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">icl</td>
+<td style="text-align: left;">pos</td>
+<td style="text-align: right;">115</td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">0</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</section>
+<section id="assemble-final-naps-chrom_metrics" class="level2">
+<h2 class="anchored" data-anchor-id="assemble-final-naps-chrom_metrics">9. Assemble final NAPS chrom_metrics</h2>
+<div class="cell">
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb23"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb23-1"><a href="#cb23-1" aria-hidden="true" tabindex="-1"></a>naps_chrom_metrics <span class="ot">&lt;-</span> metrics_df <span class="sc">|&gt;</span></span>
+<span id="cb23-2"><a href="#cb23-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(detection <span class="sc">==</span> <span class="st">"detected"</span>) <span class="sc">|&gt;</span></span>
+<span id="cb23-3"><a href="#cb23-3" aria-hidden="true" tabindex="-1"></a>  <span class="fu">select</span>(lab, polarity, anchor_n, replicate, source,</span>
+<span id="cb23-4"><a href="#cb23-4" aria-hidden="true" tabindex="-1"></a>         apex_rt, areaUnderTic, xicFwhm, maxIntensity,</span>
+<span id="cb23-5"><a href="#cb23-5" aria-hidden="true" tabindex="-1"></a>         <span class="at">signalToNoiseRatio =</span> snr)</span>
+<span id="cb23-6"><a href="#cb23-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb23-7"><a href="#cb23-7" aria-hidden="true" tabindex="-1"></a><span class="fu">write.csv</span>(naps_chrom_metrics,</span>
+<span id="cb23-8"><a href="#cb23-8" aria-hidden="true" tabindex="-1"></a>          <span class="fu">file.path</span>(out_dir, <span class="st">"naps_chrom_metrics.csv"</span>),</span>
+<span id="cb23-9"><a href="#cb23-9" aria-hidden="true" tabindex="-1"></a>          <span class="at">row.names =</span> <span class="cn">FALSE</span>)</span>
+<span id="cb23-10"><a href="#cb23-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb23-11"><a href="#cb23-11" aria-hidden="true" tabindex="-1"></a><span class="fu">cat</span>(<span class="st">"naps_chrom_metrics.csv  --  "</span>, <span class="fu">nrow</span>(naps_chrom_metrics), <span class="st">" rows kept"</span>,</span>
+<span id="cb23-12"><a href="#cb23-12" aria-hidden="true" tabindex="-1"></a>    <span class="st">"  |  excluded (below_detection / no_data): "</span>,</span>
+<span id="cb23-13"><a href="#cb23-13" aria-hidden="true" tabindex="-1"></a>    <span class="fu">nrow</span>(metrics_df) <span class="sc">-</span> <span class="fu">nrow</span>(naps_chrom_metrics), <span class="st">"</span><span class="sc">\n</span><span class="st">"</span>,</span>
+<span id="cb23-14"><a href="#cb23-14" aria-hidden="true" tabindex="-1"></a>    <span class="st">"  path: "</span>, <span class="fu">file.path</span>(out_dir, <span class="st">"naps_chrom_metrics.csv"</span>), <span class="st">"</span><span class="sc">\n</span><span class="st">"</span>, <span class="at">sep =</span> <span class="st">""</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output cell-output-stdout">
+<pre><code>naps_chrom_metrics.csv  --  950 rows kept  |  excluded (below_detection / no_data): 10
+  path: C:/Users/phili/OneDrive - Scientific Network South Tyrol/Documents/GitHub/HUMAN_Ring_Trial/5_downstream_analysis/object/naps_chrom_metrics.csv</code></pre>
+</div>
+</div>
+</section>
+<section id="diagnostic-sample-below_detection-eics" class="level2">
+<h2 class="anchored" data-anchor-id="diagnostic-sample-below_detection-eics">10. Diagnostic — sample below_detection EICs</h2>
+<p>Rows the picker classified <code>below_detection</code> (failed SNR, shape, or absolute-floor guards from §6). NAPS standards are concentrated so this set should be small; if it isn’t, the picker thresholds need revisiting. Each panel = the wide (±60 s) EIC for one excluded row. Dotted line = the seed <code>rt_center</code>.</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb25"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb25-1"><a href="#cb25-1" aria-hidden="true" tabindex="-1"></a>bd_idx <span class="ot">&lt;-</span> <span class="fu">which</span>(metrics_df<span class="sc">$</span>detection <span class="sc">!=</span> <span class="st">"detected"</span>)</span>
+<span id="cb25-2"><a href="#cb25-2" aria-hidden="true" tabindex="-1"></a><span class="fu">cat</span>(<span class="st">"Rows flagged below_detection or no_data:"</span>, <span class="fu">length</span>(bd_idx), <span class="st">"</span><span class="sc">\n</span><span class="st">"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output cell-output-stdout">
+<pre><code>Rows flagged below_detection or no_data: 10 </code></pre>
+</div>
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb27"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb27-1"><a href="#cb27-1" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> (<span class="fu">length</span>(bd_idx) <span class="sc">&gt;</span> <span class="dv">0</span>L) {</span>
+<span id="cb27-2"><a href="#cb27-2" aria-hidden="true" tabindex="-1"></a>  n_show <span class="ot">&lt;-</span> <span class="fu">min</span>(<span class="dv">12</span>L, <span class="fu">length</span>(bd_idx))</span>
+<span id="cb27-3"><a href="#cb27-3" aria-hidden="true" tabindex="-1"></a>  show_idx <span class="ot">&lt;-</span> <span class="cf">if</span> (<span class="fu">length</span>(bd_idx) <span class="sc">&lt;=</span> <span class="dv">12</span>L) bd_idx <span class="cf">else</span> <span class="fu">sample</span>(bd_idx, n_show)</span>
+<span id="cb27-4"><a href="#cb27-4" aria-hidden="true" tabindex="-1"></a>  bd_eic <span class="ot">&lt;-</span> <span class="fu">bind_rows</span>(<span class="fu">lapply</span>(show_idx, <span class="cf">function</span>(j) {</span>
+<span id="cb27-5"><a href="#cb27-5" aria-hidden="true" tabindex="-1"></a>    pd <span class="ot">&lt;-</span> pkData[[j]]; <span class="cf">if</span> (<span class="fu">is.null</span>(pd) <span class="sc">||</span> <span class="sc">!</span><span class="fu">nrow</span>(pd)) <span class="fu">return</span>(<span class="cn">NULL</span>)</span>
+<span id="cb27-6"><a href="#cb27-6" aria-hidden="true" tabindex="-1"></a>    md <span class="ot">&lt;-</span> metrics_df[j, ]</span>
+<span id="cb27-7"><a href="#cb27-7" aria-hidden="true" tabindex="-1"></a>    <span class="fu">tibble</span>(<span class="at">rt        =</span> pd[, <span class="st">"rtime"</span>],</span>
+<span id="cb27-8"><a href="#cb27-8" aria-hidden="true" tabindex="-1"></a>           <span class="at">intensity =</span> pd[, <span class="st">"intensity"</span>],</span>
+<span id="cb27-9"><a href="#cb27-9" aria-hidden="true" tabindex="-1"></a>           <span class="at">rt_center =</span> cd_all<span class="sc">$</span>rt_center[j],</span>
+<span id="cb27-10"><a href="#cb27-10" aria-hidden="true" tabindex="-1"></a>           <span class="at">panel =</span> <span class="fu">sprintf</span>(<span class="st">"%s | %s | C%d r%d (%s)</span><span class="sc">\n</span><span class="st">detection=%s | snr=%.2f"</span>,</span>
+<span id="cb27-11"><a href="#cb27-11" aria-hidden="true" tabindex="-1"></a>                           md<span class="sc">$</span>lab, md<span class="sc">$</span>polarity, md<span class="sc">$</span>anchor_n, md<span class="sc">$</span>replicate,</span>
+<span id="cb27-12"><a href="#cb27-12" aria-hidden="true" tabindex="-1"></a>                           md<span class="sc">$</span>source, md<span class="sc">$</span>detection,</span>
+<span id="cb27-13"><a href="#cb27-13" aria-hidden="true" tabindex="-1"></a>                           <span class="fu">ifelse</span>(<span class="fu">is.finite</span>(md<span class="sc">$</span>snr), md<span class="sc">$</span>snr, <span class="cn">NA_real_</span>)))</span>
+<span id="cb27-14"><a href="#cb27-14" aria-hidden="true" tabindex="-1"></a>  }))</span>
+<span id="cb27-15"><a href="#cb27-15" aria-hidden="true" tabindex="-1"></a>  <span class="fu">ggplot</span>(bd_eic, <span class="fu">aes</span>(<span class="at">x =</span> rt, <span class="at">y =</span> intensity)) <span class="sc">+</span></span>
+<span id="cb27-16"><a href="#cb27-16" aria-hidden="true" tabindex="-1"></a>    <span class="fu">geom_line</span>(<span class="at">colour =</span> <span class="st">"#ff7f0e"</span>, <span class="at">linewidth =</span> <span class="fl">0.5</span>) <span class="sc">+</span></span>
+<span id="cb27-17"><a href="#cb27-17" aria-hidden="true" tabindex="-1"></a>    <span class="fu">geom_point</span>(<span class="at">size =</span> <span class="fl">0.8</span>, <span class="at">alpha =</span> <span class="fl">0.7</span>) <span class="sc">+</span></span>
+<span id="cb27-18"><a href="#cb27-18" aria-hidden="true" tabindex="-1"></a>    <span class="fu">geom_vline</span>(<span class="fu">aes</span>(<span class="at">xintercept =</span> rt_center),</span>
+<span id="cb27-19"><a href="#cb27-19" aria-hidden="true" tabindex="-1"></a>               <span class="at">linetype =</span> <span class="st">"dotted"</span>, <span class="at">colour =</span> <span class="st">"grey50"</span>) <span class="sc">+</span></span>
+<span id="cb27-20"><a href="#cb27-20" aria-hidden="true" tabindex="-1"></a>    <span class="fu">facet_wrap</span>(<span class="sc">~</span> panel, <span class="at">scales =</span> <span class="st">"free"</span>, <span class="at">ncol =</span> <span class="dv">3</span>) <span class="sc">+</span></span>
+<span id="cb27-21"><a href="#cb27-21" aria-hidden="true" tabindex="-1"></a>    <span class="fu">labs</span>(<span class="at">x =</span> <span class="st">"RT (s)"</span>, <span class="at">y =</span> <span class="st">"Intensity"</span>,</span>
+<span id="cb27-22"><a href="#cb27-22" aria-hidden="true" tabindex="-1"></a>         <span class="at">title =</span> <span class="st">"Below-detection EICs (sample)"</span>) <span class="sc">+</span></span>
+<span id="cb27-23"><a href="#cb27-23" aria-hidden="true" tabindex="-1"></a>    <span class="fu">theme_bw</span>() <span class="sc">+</span></span>
+<span id="cb27-24"><a href="#cb27-24" aria-hidden="true" tabindex="-1"></a>    <span class="fu">theme</span>(<span class="at">strip.text =</span> <span class="fu">element_text</span>(<span class="at">size =</span> <span class="fl">6.5</span>))</span>
+<span id="cb27-25"><a href="#cb27-25" aria-hidden="true" tabindex="-1"></a>} <span class="cf">else</span> {</span>
+<span id="cb27-26"><a href="#cb27-26" aria-hidden="true" tabindex="-1"></a>  <span class="fu">message</span>(<span class="st">"No below_detection / no_data rows."</span>)</span>
+<span id="cb27-27"><a href="#cb27-27" aria-hidden="true" tabindex="-1"></a>}</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output cell-output-stderr">
+<pre><code>Warning: Removed 319 rows containing missing values or values outside the scale range
+(`geom_line()`).</code></pre>
+</div>
+<div class="cell-output cell-output-stderr">
+<pre><code>Warning: Removed 2610 rows containing missing values or values outside the scale range
+(`geom_point()`).</code></pre>
+</div>
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="3_naps_extraction_files/figure-html/diag-below-detection-1.png" class="img-fluid figure-img" width="672"></p>
+<figcaption>Wide EICs (±60 s) for rows the picker flagged below_detection. Expected: flat or single-spike traces (rightly excluded). A visible peak here = guard threshold too strict.</figcaption>
+</figure>
+</div>
+</div>
+</div>
+</section>
+<section id="qc-chromextract-vs-original-naps.csv" class="level2">
+<h2 class="anchored" data-anchor-id="qc-chromextract-vs-original-naps.csv">11. QC — chromExtract vs original <code>naps.csv</code></h2>
+<p>Side-by-side: per <code>(lab, polarity, anchor_n, replicate)</code>, compare the re-extracted <code>apex_rt</code> to the original CSV value. Should agree to within ~1 s where xcms picked the right peak, recover obvious NAs, and (we hope) replace the high-SD outlier replicates in cembio-pos / icl.</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb30"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb30-1"><a href="#cb30-1" aria-hidden="true" tabindex="-1"></a>qc <span class="ot">&lt;-</span> naps_chrom_metrics <span class="sc">|&gt;</span></span>
+<span id="cb30-2"><a href="#cb30-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">left_join</span>(naps_csv_long, <span class="at">by =</span> <span class="fu">c</span>(<span class="st">"lab"</span>, <span class="st">"polarity"</span>,</span>
+<span id="cb30-3"><a href="#cb30-3" aria-hidden="true" tabindex="-1"></a>                                  <span class="st">"anchor_n"</span>, <span class="st">"replicate"</span>)) <span class="sc">|&gt;</span></span>
+<span id="cb30-4"><a href="#cb30-4" aria-hidden="true" tabindex="-1"></a>  <span class="fu">mutate</span>(<span class="at">delta =</span> apex_rt <span class="sc">-</span> rt_csv)</span>
+<span id="cb30-5"><a href="#cb30-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb30-6"><a href="#cb30-6" aria-hidden="true" tabindex="-1"></a>qc <span class="sc">|&gt;</span> <span class="fu">filter</span>(<span class="sc">!</span><span class="fu">is.na</span>(rt_csv)) <span class="sc">|&gt;</span></span>
+<span id="cb30-7"><a href="#cb30-7" aria-hidden="true" tabindex="-1"></a>  <span class="fu">group_by</span>(lab, polarity) <span class="sc">|&gt;</span></span>
+<span id="cb30-8"><a href="#cb30-8" aria-hidden="true" tabindex="-1"></a>  <span class="fu">summarise</span>(<span class="at">n               =</span> <span class="fu">n</span>(),</span>
+<span id="cb30-9"><a href="#cb30-9" aria-hidden="true" tabindex="-1"></a>            <span class="at">median_abs_delta =</span> <span class="fu">round</span>(<span class="fu">median</span>(<span class="fu">abs</span>(delta), <span class="at">na.rm =</span> <span class="cn">TRUE</span>), <span class="dv">3</span>),</span>
+<span id="cb30-10"><a href="#cb30-10" aria-hidden="true" tabindex="-1"></a>            <span class="at">p95_abs_delta   =</span> <span class="fu">round</span>(<span class="fu">quantile</span>(<span class="fu">abs</span>(delta), <span class="fl">0.95</span>, <span class="at">na.rm =</span> <span class="cn">TRUE</span>), <span class="dv">3</span>),</span>
+<span id="cb30-11"><a href="#cb30-11" aria-hidden="true" tabindex="-1"></a>            <span class="at">n_disagree_2s   =</span> <span class="fu">sum</span>(<span class="fu">abs</span>(delta) <span class="sc">&gt;</span> <span class="dv">2</span>, <span class="at">na.rm =</span> <span class="cn">TRUE</span>),</span>
+<span id="cb30-12"><a href="#cb30-12" aria-hidden="true" tabindex="-1"></a>            <span class="at">.groups =</span> <span class="st">"drop"</span>) <span class="sc">|&gt;</span></span>
+<span id="cb30-13"><a href="#cb30-13" aria-hidden="true" tabindex="-1"></a>  knitr<span class="sc">::</span><span class="fu">kable</span>(<span class="at">caption =</span> <span class="st">"chromExtract vs original CSV — agreement per (lab, polarity)."</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output-display">
+<table class="caption-top table table-sm table-striped small">
+<caption>chromExtract vs original CSV — agreement per (lab, polarity).</caption>
+<thead>
+<tr class="header">
+<th style="text-align: left;">lab</th>
+<th style="text-align: left;">polarity</th>
+<th style="text-align: right;">n</th>
+<th style="text-align: right;">median_abs_delta</th>
+<th style="text-align: right;">p95_abs_delta</th>
+<th style="text-align: right;">n_disagree_2s</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">afekta</td>
+<td style="text-align: left;">neg</td>
+<td style="text-align: right;">119</td>
+<td style="text-align: right;">0.000</td>
+<td style="text-align: right;">0.599</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">afekta</td>
+<td style="text-align: left;">pos</td>
+<td style="text-align: right;">120</td>
+<td style="text-align: right;">0.000</td>
+<td style="text-align: right;">0.599</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">cembio</td>
+<td style="text-align: left;">neg</td>
+<td style="text-align: right;">112</td>
+<td style="text-align: right;">0.499</td>
+<td style="text-align: right;">0.999</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">cembio</td>
+<td style="text-align: left;">pos</td>
+<td style="text-align: right;">105</td>
+<td style="text-align: right;">0.000</td>
+<td style="text-align: right;">0.677</td>
+<td style="text-align: right;">2</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">hmgu</td>
+<td style="text-align: left;">neg</td>
+<td style="text-align: right;">111</td>
+<td style="text-align: right;">0.000</td>
+<td style="text-align: right;">0.740</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">hmgu</td>
+<td style="text-align: left;">pos</td>
+<td style="text-align: right;">116</td>
+<td style="text-align: right;">0.658</td>
+<td style="text-align: right;">0.745</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">icl</td>
+<td style="text-align: left;">neg</td>
+<td style="text-align: right;">83</td>
+<td style="text-align: right;">0.228</td>
+<td style="text-align: right;">0.662</td>
+<td style="text-align: right;">4</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">icl</td>
+<td style="text-align: left;">pos</td>
+<td style="text-align: right;">72</td>
+<td style="text-align: right;">0.228</td>
+<td style="text-align: right;">0.685</td>
+<td style="text-align: right;">2</td>
+</tr>
+</tbody>
+</table>
+</div>
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb31"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb31-1"><a href="#cb31-1" aria-hidden="true" tabindex="-1"></a><span class="fu">cat</span>(<span class="st">"rows recovered (CSV NA → chromExtract found peak):"</span>,</span>
+<span id="cb31-2"><a href="#cb31-2" aria-hidden="true" tabindex="-1"></a>    <span class="fu">sum</span>(<span class="fu">is.na</span>(qc<span class="sc">$</span>rt_csv) <span class="sc">&amp;</span> <span class="sc">!</span><span class="fu">is.na</span>(qc<span class="sc">$</span>apex_rt)), <span class="st">"</span><span class="sc">\n</span><span class="st">"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output cell-output-stdout">
+<pre><code>rows recovered (CSV NA → chromExtract found peak): 112 </code></pre>
+</div>
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb33"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb33-1"><a href="#cb33-1" aria-hidden="true" tabindex="-1"></a><span class="fu">cat</span>(<span class="st">"rows lost (CSV had value → chromExtract NA):"</span>,</span>
+<span id="cb33-2"><a href="#cb33-2" aria-hidden="true" tabindex="-1"></a>    <span class="fu">sum</span>(<span class="sc">!</span><span class="fu">is.na</span>(qc<span class="sc">$</span>rt_csv) <span class="sc">&amp;</span> <span class="fu">is.na</span>(qc<span class="sc">$</span>apex_rt)), <span class="st">"</span><span class="sc">\n</span><span class="st">"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output cell-output-stdout">
+<pre><code>rows lost (CSV had value → chromExtract NA): 0 </code></pre>
+</div>
+</div>
+<div class="cell">
+<details class="code-fold">
+<summary>Code</summary>
+<div class="sourceCode cell-code" id="cb35"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb35-1"><a href="#cb35-1" aria-hidden="true" tabindex="-1"></a>sd_old <span class="ot">&lt;-</span> naps_csv_long <span class="sc">|&gt;</span></span>
+<span id="cb35-2"><a href="#cb35-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(<span class="sc">!</span><span class="fu">is.na</span>(rt_csv)) <span class="sc">|&gt;</span></span>
+<span id="cb35-3"><a href="#cb35-3" aria-hidden="true" tabindex="-1"></a>  <span class="fu">group_by</span>(lab, polarity, anchor_n) <span class="sc">|&gt;</span></span>
+<span id="cb35-4"><a href="#cb35-4" aria-hidden="true" tabindex="-1"></a>  <span class="fu">summarise</span>(<span class="at">rt_sd =</span> <span class="fu">sd</span>(rt_csv), <span class="at">n_rep =</span> <span class="fu">n</span>(), <span class="at">.groups =</span> <span class="st">"drop"</span>) <span class="sc">|&gt;</span></span>
+<span id="cb35-5"><a href="#cb35-5" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(n_rep <span class="sc">&gt;=</span> <span class="dv">2</span>L, <span class="sc">!</span><span class="fu">is.na</span>(rt_sd)) <span class="sc">|&gt;</span></span>
+<span id="cb35-6"><a href="#cb35-6" aria-hidden="true" tabindex="-1"></a>  <span class="fu">mutate</span>(<span class="at">source_tag =</span> <span class="st">"xcms (original CSV)"</span>)</span>
+<span id="cb35-7"><a href="#cb35-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb35-8"><a href="#cb35-8" aria-hidden="true" tabindex="-1"></a>sd_new <span class="ot">&lt;-</span> naps_chrom_metrics <span class="sc">|&gt;</span></span>
+<span id="cb35-9"><a href="#cb35-9" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(<span class="sc">!</span><span class="fu">is.na</span>(apex_rt)) <span class="sc">|&gt;</span></span>
+<span id="cb35-10"><a href="#cb35-10" aria-hidden="true" tabindex="-1"></a>  <span class="fu">group_by</span>(lab, polarity, anchor_n) <span class="sc">|&gt;</span></span>
+<span id="cb35-11"><a href="#cb35-11" aria-hidden="true" tabindex="-1"></a>  <span class="fu">summarise</span>(<span class="at">rt_sd =</span> <span class="fu">sd</span>(apex_rt), <span class="at">n_rep =</span> <span class="fu">n</span>(), <span class="at">.groups =</span> <span class="st">"drop"</span>) <span class="sc">|&gt;</span></span>
+<span id="cb35-12"><a href="#cb35-12" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(n_rep <span class="sc">&gt;=</span> <span class="dv">2</span>L, <span class="sc">!</span><span class="fu">is.na</span>(rt_sd)) <span class="sc">|&gt;</span></span>
+<span id="cb35-13"><a href="#cb35-13" aria-hidden="true" tabindex="-1"></a>  <span class="fu">mutate</span>(<span class="at">source_tag =</span> <span class="st">"chromExtract (new)"</span>)</span>
+<span id="cb35-14"><a href="#cb35-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb35-15"><a href="#cb35-15" aria-hidden="true" tabindex="-1"></a><span class="fu">bind_rows</span>(sd_old, sd_new) <span class="sc">|&gt;</span></span>
+<span id="cb35-16"><a href="#cb35-16" aria-hidden="true" tabindex="-1"></a>  <span class="fu">ggplot</span>(<span class="fu">aes</span>(<span class="at">x =</span> lab, <span class="at">y =</span> rt_sd, <span class="at">fill =</span> source_tag)) <span class="sc">+</span></span>
+<span id="cb35-17"><a href="#cb35-17" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_boxplot</span>(<span class="at">outlier.shape =</span> <span class="cn">NA</span>, <span class="at">alpha =</span> <span class="fl">0.7</span>,</span>
+<span id="cb35-18"><a href="#cb35-18" aria-hidden="true" tabindex="-1"></a>               <span class="at">position =</span> <span class="fu">position_dodge</span>(<span class="fl">0.8</span>)) <span class="sc">+</span></span>
+<span id="cb35-19"><a href="#cb35-19" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_jitter</span>(<span class="fu">aes</span>(<span class="at">group =</span> source_tag),</span>
+<span id="cb35-20"><a href="#cb35-20" aria-hidden="true" tabindex="-1"></a>              <span class="at">position =</span> <span class="fu">position_jitterdodge</span>(<span class="at">jitter.width =</span> <span class="fl">0.1</span>,</span>
+<span id="cb35-21"><a href="#cb35-21" aria-hidden="true" tabindex="-1"></a>                                              <span class="at">dodge.width =</span> <span class="fl">0.8</span>),</span>
+<span id="cb35-22"><a href="#cb35-22" aria-hidden="true" tabindex="-1"></a>              <span class="at">alpha =</span> <span class="fl">0.4</span>, <span class="at">size =</span> <span class="fl">0.7</span>) <span class="sc">+</span></span>
+<span id="cb35-23"><a href="#cb35-23" aria-hidden="true" tabindex="-1"></a>  <span class="fu">scale_y_log10</span>() <span class="sc">+</span></span>
+<span id="cb35-24"><a href="#cb35-24" aria-hidden="true" tabindex="-1"></a>  <span class="fu">facet_wrap</span>(<span class="sc">~</span> polarity) <span class="sc">+</span></span>
+<span id="cb35-25"><a href="#cb35-25" aria-hidden="true" tabindex="-1"></a>  <span class="fu">scale_fill_manual</span>(<span class="at">values =</span> <span class="fu">c</span>(<span class="st">`</span><span class="at">xcms (original CSV)</span><span class="st">`</span> <span class="ot">=</span> <span class="st">"grey60"</span>,</span>
+<span id="cb35-26"><a href="#cb35-26" aria-hidden="true" tabindex="-1"></a>                               <span class="st">`</span><span class="at">chromExtract (new)</span><span class="st">`</span>   <span class="ot">=</span> <span class="st">"#4DBBD5"</span>)) <span class="sc">+</span></span>
+<span id="cb35-27"><a href="#cb35-27" aria-hidden="true" tabindex="-1"></a>  <span class="fu">labs</span>(<span class="at">x =</span> <span class="cn">NULL</span>, <span class="at">y =</span> <span class="st">"Within-lab replicate SD (s, log)"</span>,</span>
+<span id="cb35-28"><a href="#cb35-28" aria-hidden="true" tabindex="-1"></a>       <span class="at">fill =</span> <span class="cn">NULL</span>,</span>
+<span id="cb35-29"><a href="#cb35-29" aria-hidden="true" tabindex="-1"></a>       <span class="at">title =</span> <span class="st">"NAPS within-lab precision: xcms vs chromExtract"</span>) <span class="sc">+</span></span>
+<span id="cb35-30"><a href="#cb35-30" aria-hidden="true" tabindex="-1"></a>  <span class="fu">theme_bw</span>() <span class="sc">+</span></span>
+<span id="cb35-31"><a href="#cb35-31" aria-hidden="true" tabindex="-1"></a>  <span class="fu">theme</span>(<span class="at">legend.position =</span> <span class="st">"top"</span>,</span>
+<span id="cb35-32"><a href="#cb35-32" aria-hidden="true" tabindex="-1"></a>        <span class="at">axis.text.x =</span> <span class="fu">element_text</span>(<span class="at">angle =</span> <span class="dv">30</span>, <span class="at">hjust =</span> <span class="dv">1</span>))</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell-output-display">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><img src="3_naps_extraction_files/figure-html/qc-within-lab-sd-1.png" class="img-fluid figure-img" width="672"></p>
+<figcaption>Per-anchor within-lab replicate SD: original CSV (xcms) vs chromExtract. Lower = tighter.</figcaption>
+</figure>
+</div>
+</div>
+</div>
+</section>
+</section>
+<section id="notes" class="level1">
+<h1>Notes</h1>
+<ul>
+<li><code>4_rt_alignment.qmd</code> should now read <code>naps_chrom_metrics.csv</code> in preference to the per-lab <code>naps.csv</code> files. The structure is long-form already (<code>(lab, polarity, anchor_n, replicate, source,   apex_rt)</code>), so the existing <code>naps_long</code> build in §P2.1 collapses to a single read.</li>
+<li><code>source</code> distinguishes own-seeded vs consensus-propagated rows. Downstream filtering on <code>source == "own"</code> reproduces the xcms-replacement view; including <code>consensus</code> rows is the propagation-augmented view.</li>
+<li>The QC scatter / SD plots above are the gate: if the new chromExtract SDs are not noticeably tighter than the original xcms ones for the problematic labs (cembio-pos, icl), revisit the seed propagation or the m/z tolerance before trusting the alignment downstream.</li>
+</ul>
+</section>
+
+</main>
+<!-- /main column -->
+<script id="quarto-html-after-body" type="application/javascript">
+window.document.addEventListener("DOMContentLoaded", function (event) {
+  const toggleBodyColorMode = (bsSheetEl) => {
+    const mode = bsSheetEl.getAttribute("data-mode");
+    const bodyEl = window.document.querySelector("body");
+    if (mode === "dark") {
+      bodyEl.classList.add("quarto-dark");
+      bodyEl.classList.remove("quarto-light");
+    } else {
+      bodyEl.classList.add("quarto-light");
+      bodyEl.classList.remove("quarto-dark");
+    }
+  }
+  const toggleBodyColorPrimary = () => {
+    const bsSheetEl = window.document.querySelector("link#quarto-bootstrap");
+    if (bsSheetEl) {
+      toggleBodyColorMode(bsSheetEl);
+    }
+  }
+  toggleBodyColorPrimary();  
+  const icon = "";
+  const anchorJS = new window.AnchorJS();
+  anchorJS.options = {
+    placement: 'right',
+    icon: icon
+  };
+  anchorJS.add('.anchored');
+  const isCodeAnnotation = (el) => {
+    for (const clz of el.classList) {
+      if (clz.startsWith('code-annotation-')) {                     
+        return true;
+      }
+    }
+    return false;
+  }
+  const onCopySuccess = function(e) {
+    // button target
+    const button = e.trigger;
+    // don't keep focus
+    button.blur();
+    // flash "checked"
+    button.classList.add('code-copy-button-checked');
+    var currentTitle = button.getAttribute("title");
+    button.setAttribute("title", "Copied!");
+    let tooltip;
+    if (window.bootstrap) {
+      button.setAttribute("data-bs-toggle", "tooltip");
+      button.setAttribute("data-bs-placement", "left");
+      button.setAttribute("data-bs-title", "Copied!");
+      tooltip = new bootstrap.Tooltip(button, 
+        { trigger: "manual", 
+          customClass: "code-copy-button-tooltip",
+          offset: [0, -8]});
+      tooltip.show();    
+    }
+    setTimeout(function() {
+      if (tooltip) {
+        tooltip.hide();
+        button.removeAttribute("data-bs-title");
+        button.removeAttribute("data-bs-toggle");
+        button.removeAttribute("data-bs-placement");
+      }
+      button.setAttribute("title", currentTitle);
+      button.classList.remove('code-copy-button-checked');
+    }, 1000);
+    // clear code selection
+    e.clearSelection();
+  }
+  const getTextToCopy = function(trigger) {
+      const codeEl = trigger.previousElementSibling.cloneNode(true);
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+  }
+  const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+    text: getTextToCopy
+  });
+  clipboard.on('success', onCopySuccess);
+  if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+    // For code content inside modals, clipBoardJS needs to be initialized with a container option
+    // TODO: Check when it could be a function (https://github.com/zenorocha/clipboard.js/issues/860)
+    const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+      text: getTextToCopy,
+      container: window.document.getElementById('quarto-embedded-source-code-modal')
+    });
+    clipboardModal.on('success', onCopySuccess);
+  }
+    var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+    var mailtoRegex = new RegExp(/^mailto:/);
+      var filterRegex = new RegExp('/' + window.location.host + '/');
+    var isInternal = (href) => {
+        return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+    }
+    // Inspect non-navigation links and adorn them if external
+ 	var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+    for (var i=0; i<links.length; i++) {
+      const link = links[i];
+      if (!isInternal(link.href)) {
+        // undo the damage that might have been done by quarto-nav.js in the case of
+        // links that we want to consider external
+        if (link.dataset.originalHref !== undefined) {
+          link.href = link.dataset.originalHref;
+        }
+      }
+    }
+  function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+    const config = {
+      allowHTML: true,
+      maxWidth: 500,
+      delay: 100,
+      arrow: false,
+      appendTo: function(el) {
+          return el.parentElement;
+      },
+      interactive: true,
+      interactiveBorder: 10,
+      theme: 'quarto',
+      placement: 'bottom-start',
+    };
+    if (contentFn) {
+      config.content = contentFn;
+    }
+    if (onTriggerFn) {
+      config.onTrigger = onTriggerFn;
+    }
+    if (onUntriggerFn) {
+      config.onUntrigger = onUntriggerFn;
+    }
+    window.tippy(el, config); 
+  }
+  const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+  for (var i=0; i<noterefs.length; i++) {
+    const ref = noterefs[i];
+    tippyHover(ref, function() {
+      // use id or data attribute instead here
+      let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+      try { href = new URL(href).hash; } catch {}
+      const id = href.replace(/^#\/?/, "");
+      const note = window.document.getElementById(id);
+      if (note) {
+        return note.innerHTML;
+      } else {
+        return "";
+      }
+    });
+  }
+  const xrefs = window.document.querySelectorAll('a.quarto-xref');
+  const processXRef = (id, note) => {
+    // Strip column container classes
+    const stripColumnClz = (el) => {
+      el.classList.remove("page-full", "page-columns");
+      if (el.children) {
+        for (const child of el.children) {
+          stripColumnClz(child);
+        }
+      }
+    }
+    stripColumnClz(note)
+    if (id === null || id.startsWith('sec-')) {
+      // Special case sections, only their first couple elements
+      const container = document.createElement("div");
+      if (note.children && note.children.length > 2) {
+        container.appendChild(note.children[0].cloneNode(true));
+        for (let i = 1; i < note.children.length; i++) {
+          const child = note.children[i];
+          if (child.tagName === "P" && child.innerText === "") {
+            continue;
+          } else {
+            container.appendChild(child.cloneNode(true));
+            break;
+          }
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(container);
+        }
+        return container.innerHTML
+      } else {
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        return note.innerHTML;
+      }
+    } else {
+      // Remove any anchor links if they are present
+      const anchorLink = note.querySelector('a.anchorjs-link');
+      if (anchorLink) {
+        anchorLink.remove();
+      }
+      if (window.Quarto?.typesetMath) {
+        window.Quarto.typesetMath(note);
+      }
+      // TODO in 1.5, we should make sure this works without a callout special case
+      if (note.classList.contains("callout")) {
+        return note.outerHTML;
+      } else {
+        return note.innerHTML;
+      }
+    }
+  }
+  for (var i=0; i<xrefs.length; i++) {
+    const xref = xrefs[i];
+    tippyHover(xref, undefined, function(instance) {
+      instance.disable();
+      let url = xref.getAttribute('href');
+      let hash = undefined; 
+      if (url.startsWith('#')) {
+        hash = url;
+      } else {
+        try { hash = new URL(url).hash; } catch {}
+      }
+      if (hash) {
+        const id = hash.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note !== null) {
+          try {
+            const html = processXRef(id, note.cloneNode(true));
+            instance.setContent(html);
+          } finally {
+            instance.enable();
+            instance.show();
+          }
+        } else {
+          // See if we can fetch this
+          fetch(url.split('#')[0])
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.getElementById(id);
+            if (note !== null) {
+              const html = processXRef(id, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      } else {
+        // See if we can fetch a full url (with no hash to target)
+        // This is a special case and we should probably do some content thinning / targeting
+        fetch(url)
+        .then(res => res.text())
+        .then(html => {
+          const parser = new DOMParser();
+          const htmlDoc = parser.parseFromString(html, "text/html");
+          const note = htmlDoc.querySelector('main.content');
+          if (note !== null) {
+            // This should only happen for chapter cross references
+            // (since there is no id in the URL)
+            // remove the first header
+            if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+              note.children[0].remove();
+            }
+            const html = processXRef(null, note);
+            instance.setContent(html);
+          } 
+        }).finally(() => {
+          instance.enable();
+          instance.show();
+        });
+      }
+    }, function(instance) {
+    });
+  }
+      let selectedAnnoteEl;
+      const selectorForAnnotation = ( cell, annotation) => {
+        let cellAttr = 'data-code-cell="' + cell + '"';
+        let lineAttr = 'data-code-annotation="' +  annotation + '"';
+        const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+        return selector;
+      }
+      const selectCodeLines = (annoteEl) => {
+        const doc = window.document;
+        const targetCell = annoteEl.getAttribute("data-target-cell");
+        const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+        const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+        const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+        const lineIds = lines.map((line) => {
+          return targetCell + "-" + line;
+        })
+        let top = null;
+        let height = null;
+        let parent = null;
+        if (lineIds.length > 0) {
+            //compute the position of the single el (top and bottom and make a div)
+            const el = window.document.getElementById(lineIds[0]);
+            top = el.offsetTop;
+            height = el.offsetHeight;
+            parent = el.parentElement.parentElement;
+          if (lineIds.length > 1) {
+            const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+            const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+            height = bottom - top;
+          }
+          if (top !== null && height !== null && parent !== null) {
+            // cook up a div (if necessary) and position it 
+            let div = window.document.getElementById("code-annotation-line-highlight");
+            if (div === null) {
+              div = window.document.createElement("div");
+              div.setAttribute("id", "code-annotation-line-highlight");
+              div.style.position = 'absolute';
+              parent.appendChild(div);
+            }
+            div.style.top = top - 2 + "px";
+            div.style.height = height + 4 + "px";
+            div.style.left = 0;
+            let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+            if (gutterDiv === null) {
+              gutterDiv = window.document.createElement("div");
+              gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+              gutterDiv.style.position = 'absolute';
+              const codeCell = window.document.getElementById(targetCell);
+              const gutter = codeCell.querySelector('.code-annotation-gutter');
+              gutter.appendChild(gutterDiv);
+            }
+            gutterDiv.style.top = top - 2 + "px";
+            gutterDiv.style.height = height + 4 + "px";
+          }
+          selectedAnnoteEl = annoteEl;
+        }
+      };
+      const unselectCodeLines = () => {
+        const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+        elementsIds.forEach((elId) => {
+          const div = window.document.getElementById(elId);
+          if (div) {
+            div.remove();
+          }
+        });
+        selectedAnnoteEl = undefined;
+      };
+        // Handle positioning of the toggle
+    window.addEventListener(
+      "resize",
+      throttle(() => {
+        elRect = undefined;
+        if (selectedAnnoteEl) {
+          selectCodeLines(selectedAnnoteEl);
+        }
+      }, 10)
+    );
+    function throttle(fn, ms) {
+    let throttle = false;
+    let timer;
+      return (...args) => {
+        if(!throttle) { // first call gets through
+            fn.apply(this, args);
+            throttle = true;
+        } else { // all the others get throttled
+            if(timer) clearTimeout(timer); // cancel #2
+            timer = setTimeout(() => {
+              fn.apply(this, args);
+              timer = throttle = false;
+            }, ms);
+        }
+      };
+    }
+      // Attach click handler to the DT
+      const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+      for (const annoteDlNode of annoteDls) {
+        annoteDlNode.addEventListener('click', (event) => {
+          const clickedEl = event.target;
+          if (clickedEl !== selectedAnnoteEl) {
+            unselectCodeLines();
+            const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+            if (activeEl) {
+              activeEl.classList.remove('code-annotation-active');
+            }
+            selectCodeLines(clickedEl);
+            clickedEl.classList.add('code-annotation-active');
+          } else {
+            // Unselect the line
+            unselectCodeLines();
+            clickedEl.classList.remove('code-annotation-active');
+          }
+        });
+      }
+  const findCites = (el) => {
+    const parentEl = el.parentElement;
+    if (parentEl) {
+      const cites = parentEl.dataset.cites;
+      if (cites) {
+        return {
+          el,
+          cites: cites.split(' ')
+        };
+      } else {
+        return findCites(el.parentElement)
+      }
+    } else {
+      return undefined;
+    }
+  };
+  var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+  for (var i=0; i<bibliorefs.length; i++) {
+    const ref = bibliorefs[i];
+    const citeInfo = findCites(ref);
+    if (citeInfo) {
+      tippyHover(citeInfo.el, function() {
+        var popup = window.document.createElement('div');
+        citeInfo.cites.forEach(function(cite) {
+          var citeDiv = window.document.createElement('div');
+          citeDiv.classList.add('hanging-indent');
+          citeDiv.classList.add('csl-entry');
+          var biblioDiv = window.document.getElementById('ref-' + cite);
+          if (biblioDiv) {
+            citeDiv.innerHTML = biblioDiv.innerHTML;
+          }
+          popup.appendChild(citeDiv);
+        });
+        return popup.innerHTML;
+      });
+    }
+  }
+});
+</script>
+</div> <!-- /content -->
+
+
+
+
+</body></html>

@@ -1,0 +1,743 @@
+---
+title: "RT alignment: per-lab NAPS spline (Phase 2)"
+format:
+    html:
+        toc: true
+        toc-location: right
+        code-fold: true
+---
+
+# Goal
+
+Build a per-`(lab, polarity)` **monotonic spline** that maps each
+lab's local apex RT onto a cross-lab consensus RT in seconds, using
+the NAPS anchor ladder. The output is a reusable RT → aligned-RT
+mapping consumed downstream:
+
+- **P3** uses it to bin RT for RT-local normalization factors.
+- **P5** uses it to compute cross-lab RT concordance for the
+  confidence tier.
+
+Per the project plan: **per-lab local alignment, not a single global
+RTI map**.
+
+The phase deliverables are:
+
+1. Within-lab NAPS precision (P2.2) — the precision floor against
+   which the post-alignment cross-lab residual is benchmarked.
+2. Per-lab monotonic spline (P2.3) and optional standards-as-anchor
+   extension (P2.4).
+3. Cross-lab apex-RT residual distribution **before vs after**
+   alignment (P2.5), compared to the within-lab floor.
+4. Early-RT region caveat (P2.6) — APS spacing is sparse for C1–C5,
+   wider band expected there.
+5. Reusable mapping (P2.7) — `object/rt_alignment_table.csv` for
+   linear interpolation and `object/rt_alignment_splines.RData` for
+   direct spline application.
+
+## Setup
+
+```{r setup}
+#| message: false
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(here)
+library(purrr)
+
+labs           <- c("afekta", "cembio", "hmgu", "icl")
+producer_dir   <- here("3_annotation_manual", "HE", "3_Sirius_curation",
+                       "results_all_ms2")
+naps_xcms_path <- function(lab) here("1_preprocessing", lab, "HE", "naps.csv")
+naps_ce_path   <- here("5_downstream_analysis", "object",
+                       "naps_chrom_metrics.csv")
+out_dir        <- here("5_downstream_analysis", "object")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+# NAPS source: "chromextract" reads naps_chrom_metrics.csv from
+# 3_naps_extraction.qmd (preferred — recovers icl C1–C3 and replaces
+# cembio-pos outliers). "xcms" reads the per-lab naps.csv (legacy path,
+# kept for side-by-side comparison).
+naps_source <- "chromextract"
+
+# When using chromextract, "own" keeps only seed=own rows (xcms had a
+# value); "all" includes consensus-propagated rows too.
+naps_chromextract_use <- "all"   # "all" or "own"
+
+# Standards-as-anchor selection.
+#
+# Two modes:
+# - "raw_sd": qualify a compound when ≥N labs annotate it and raw cross-lab
+#   apex-RT SD ≤ standards_anchor_max_raw_sd.
+# - "iterative": fit splines from NAPS only, align candidates through them,
+#   qualify by *aligned* SD ≤ standards_anchor_max_aligned_sd. Picks up
+#   many more compounds in the metabolite-dense region by accounting for
+#   the systematic per-lab shift before judging cross-lab agreement.
+standards_anchor_mode            <- "iterative"
+standards_anchor_min_labs        <- 3
+standards_anchor_max_raw_sd      <- 5   # raw_sd mode threshold (s)
+# Threshold sweep (P13.1, all values from rendered production runs):
+#   threshold  n_std  median_aligned_sd  p95_aligned_sd  pos_main_sd  pos_A_tier
+#       3 s      2          7.80 s         23.80 s         9.71 s        21
+#       5 s      3          7.75 s         26.09 s        11.73 s        21
+#       7 s      5          7.15 s         23.35 s         9.87 s        27   ← chosen
+# 7 s is the sweet spot. At 5 s, two standards holding the pos-main
+# region spline together drop out → pos-main aligned SD jumps to
+# 11.73 s (worse than baseline 9.71) and all 6 A-tier promotions
+# revert. At 7 s, 5 standards qualify, pos-early 6.49 → 5.58 s, +6
+# A-tier promotions (mostly cembio pos). Beyond 10 s the picture
+# degraded again (low-quality standards dominate).
+standards_anchor_max_aligned_sd  <- 7   # iterative mode threshold (s)
+```
+
+# P2.1 Load NAPS data
+
+Long form: one row per `(lab, polarity, anchor_n, rep, rt_sec)`. RTI =
+N × 100 (deterministic ladder); seconds is the working unit because
+the alignment target is in seconds.
+
+Two sources, switched by `naps_source` in setup:
+
+- `"chromextract"` (default) reads `naps_chrom_metrics.csv` from
+  `3_naps_extraction.qmd`. Recovers anchors xcms missed (icl C1–C3)
+  and replaces the wrong-peak outliers in cembio-pos. Carries a
+  `source` column (`own` / `consensus`) that survives downstream so
+  you can filter on it.
+- `"xcms"` reads the legacy `1_preprocessing/{lab}/HE/naps.csv` files
+  (xcms-derived). Useful for direct before-vs-after-chromExtract
+  comparison.
+
+```{r load-naps}
+read_naps_lab <- function(lab) {
+  df <- read.csv(naps_xcms_path(lab), stringsAsFactors = FALSE,
+                 check.names = FALSE)
+  df$anchor_n <- suppressWarnings(
+    as.integer(gsub("^C(\\d+).*", "\\1", df$Name)))
+  pos_cols <- grep("^NAPS_POS_", names(df), value = TRUE)
+  neg_cols <- grep("^NAPS_NEG_", names(df), value = TRUE)
+  bind_rows(
+    df |> select(anchor_n, RTI, all_of(pos_cols)) |>
+      pivot_longer(all_of(pos_cols), names_to = "rep_col",
+                   values_to = "rt_sec") |>
+      mutate(polarity = "pos",
+             rep = as.integer(gsub("^NAPS_POS_", "", rep_col))),
+    df |> select(anchor_n, RTI, all_of(neg_cols)) |>
+      pivot_longer(all_of(neg_cols), names_to = "rep_col",
+                   values_to = "rt_sec") |>
+      mutate(polarity = "neg",
+             rep = as.integer(gsub("^NAPS_NEG_", "", rep_col)))
+  ) |>
+    select(anchor_n, RTI, polarity, rep, rt_sec) |>
+    mutate(lab = lab, source = "own", .before = 1)
+}
+
+read_naps_chromextract <- function() {
+  # The NA-FWHM peak-integrity gate now lives in the producer
+  # (3_naps_extraction.qmd §9), so the CSV here is already clean.
+  df <- read.csv(naps_ce_path, stringsAsFactors = FALSE)
+  if (naps_chromextract_use == "own") {
+    df <- df |> filter(source == "own")
+  }
+  df |>
+    mutate(RTI = anchor_n * 100L) |>
+    transmute(lab, source, anchor_n, RTI, polarity,
+              rep = replicate, rt_sec = apex_rt)
+}
+
+naps_long <- if (naps_source == "chromextract" && file.exists(naps_ce_path)) {
+  cat("NAPS source: chromextract  (", naps_ce_path, ")\n")
+  read_naps_chromextract()
+} else {
+  if (naps_source == "chromextract") {
+    warning("naps_chrom_metrics.csv not found; falling back to xcms naps.csv.",
+            call. = FALSE)
+  }
+  cat("NAPS source: xcms (per-lab naps.csv)\n")
+  bind_rows(lapply(labs, read_naps_lab))
+}
+naps_long <- naps_long |>
+  filter(!is.na(rt_sec), !is.na(anchor_n))
+
+cat("NAPS rows (lab × polarity × anchor × rep):", nrow(naps_long),
+    " | per-lab non-NA counts:\n")
+naps_long |> count(lab, polarity) |>
+  tidyr::pivot_wider(names_from = polarity, values_from = n) |>
+  knitr::kable()
+```
+
+# P2.2 Within-lab NAPS precision (the floor)
+
+Per `(lab, polarity, anchor_n)`, SD of `rt_sec` across the 6 replicates
+is the per-anchor within-lab precision. The median across anchors is
+the lab's typical precision. This is the fair benchmark — cross-lab
+residual after alignment should approach (not surpass) this floor.
+
+```{r within-lab-sd}
+within_lab_sd <- naps_long |>
+  group_by(lab, polarity, anchor_n) |>
+  summarise(n_rep   = n(),
+            rt_mean = mean(rt_sec, na.rm = TRUE),
+            rt_sd   = sd(rt_sec, na.rm = TRUE),
+            .groups = "drop") |>
+  filter(n_rep >= 2L, !is.na(rt_sd))
+
+within_lab_sd |>
+  group_by(lab, polarity) |>
+  summarise(n_anchors = n(),
+            median_sd = round(median(rt_sd, na.rm = TRUE), 3),
+            mean_sd   = round(mean(rt_sd,   na.rm = TRUE), 3),
+            p95_sd    = round(quantile(rt_sd, 0.95, na.rm = TRUE), 3),
+            .groups = "drop") |>
+  knitr::kable(caption = "Within-lab NAPS replicate SD (seconds).")
+```
+
+```{r within-lab-sd-plot}
+#| fig-height: 4
+#| fig-cap: "Per-anchor within-lab replicate SD (seconds). Median per (lab, polarity) = the precision floor."
+ggplot(within_lab_sd, aes(x = lab, y = rt_sd, fill = polarity)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(aes(group = polarity),
+              position = position_jitterdodge(jitter.width = 0.1,
+                                              dodge.width = 0.8),
+              alpha = 0.5, size = 0.8) +
+  scale_y_log10() +
+  labs(x = NULL, y = "Within-lab replicate SD (s, log scale)",
+       fill = "Polarity",
+       title = "Within-lab NAPS replicate precision") +
+  theme_bw() +
+  theme(legend.position = "top",
+        axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+# P2.3 Build cross-lab consensus RT
+
+Per-lab median per `(polarity, anchor_n)` (across 6 replicates); then
+median across the 4 labs per `(polarity, anchor_n)` = consensus RT in
+seconds. Anchors visible in `< min_labs_for_consensus` labs are
+dropped from the consensus.
+
+```{r consensus-rt}
+min_labs_for_consensus <- 2
+
+per_lab_median <- naps_long |>
+  group_by(lab, polarity, anchor_n) |>
+  summarise(rt_med = median(rt_sec, na.rm = TRUE),
+            n_rep  = sum(!is.na(rt_sec)),
+            .groups = "drop") |>
+  filter(n_rep >= 1L)
+
+consensus_rt <- per_lab_median |>
+  group_by(polarity, anchor_n) |>
+  summarise(consensus_rt = median(rt_med, na.rm = TRUE),
+            n_labs       = n_distinct(lab),
+            .groups = "drop") |>
+  filter(n_labs >= min_labs_for_consensus)
+
+cat("Consensus anchors per polarity:\n")
+consensus_rt |> count(polarity) |>
+  knitr::kable(col.names = c("polarity", "n_anchors"))
+```
+
+```{r consensus-plot}
+#| fig-height: 4
+#| fig-cap: "Per-lab median apex RT vs consensus RT per anchor. Diagonal = perfect agreement."
+per_lab_median |>
+  inner_join(consensus_rt, by = c("polarity", "anchor_n")) |>
+  ggplot(aes(x = consensus_rt, y = rt_med, colour = lab)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed",
+              colour = "grey50") +
+  geom_point(size = 2, alpha = 0.85) +
+  facet_wrap(~ polarity, scales = "free") +
+  scale_color_hue() +
+  labs(x = "Consensus RT (s)", y = "Lab-local median RT (s)",
+       colour = "Lab", title = "Per-lab NAPS RT vs consensus") +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+# P2.4 Per-lab monotonic spline alignment
+
+For each `(lab, polarity)` we fit `splinefun(method = "hyman")`. Hyman
+guarantees monotonicity, so the alignment never inverts the RT order —
+a real LC peak that elutes before another in the lab cannot end up
+elution-reordered after alignment.
+
+**Why this model.** Every simpler model is ruled out by what we know
+about the data:
+
+- A **single shift** (`rt + b`) assumes uniform drift across the
+  gradient. NAPS shows per-lab offsets ~0.5 s at C1 (RT 25 s) but
+  ~5 s at C20 (RT 560 s) — drift grows with RT.
+- A **linear fit** (`a · rt + b`) handles proportional drift but the
+  consensus_rt vs rt_local plot has clear curvature in the [30, 60] s
+  region — early-gradient solvation physics differs from
+  late-gradient.
+- A **polynomial** fits curvature but oscillates at the ends with
+  only ~20 anchors (Runge's phenomenon) and can't accommodate
+  region-specific drift.
+- **Piecewise linear** has kinks at every anchor; downstream the
+  LOESS RT-normalization surface ([`5_normalization.qmd`](5_normalization.qmd))
+  propagates those kinks as artifacts.
+- An **unconstrained cubic spline** (or LOWESS) is smooth but can be
+  non-monotonic. Non-monotonic RT alignment would scramble peak
+  order, breaking cross-lab feature matching and the decile binning
+  in P3.
+- **Hyman** is the cheapest model that simultaneously gives
+  per-region nonlinear fit, smoothness (continuous first derivative),
+  and a hard monotonicity guarantee. With slope-limited cubic
+  segments it's stable with the ~20 anchors we have.
+
+**Why per-lab** rather than one global function: each LC system has
+its own dwell volume / gradient delay / column equilibration. The
+drift profiles are different *shapes*, not just different magnitudes,
+so a global function would wash out the corrections we want to make.
+
+**Why a cross-lab consensus target** rather than a reference lab:
+picking one lab as the anchor target silently exports its drift to
+everyone else. The cross-lab median is robust — one bad anchor
+contributes ≤ 25 % of the target.
+
+**Why the PAV pre-step**: the rare cases where a single anchor's
+local rank disagrees with its consensus rank (we saw 2 such anchors
+in icl_neg C2/C3) would otherwise break Hyman's monotonic input
+contract. `isoreg` collapses these to their pooled value before the
+spline sees them.
+
+**Why not obiwarp / DTW / COW**: those are designed for un-anchored
+non-targeted alignment where you discover correspondences from full
+MS1 chromatograms. We have ~20 known-identity NAPS anchors with
+sub-second within-lab replicate SD — anchor-based alignment is
+strictly better-conditioned for this data structure.
+
+Two paths to qualify spiked standards as anchors (toggle via
+`standards_anchor_mode` in setup):
+
+- **`raw_sd`** — a compound is added when annotated in ≥
+  `standards_anchor_min_labs` labs **and** raw cross-lab apex-RT SD ≤
+  `standards_anchor_max_raw_sd`. Strict on raw seconds — usually only
+  a handful of compounds qualify.
+- **`iterative`** (default) — round 1 fits splines from NAPS only;
+  round 2 aligns every candidate's apex_rt through the round-1 spline
+  and qualifies on the **aligned** SD ≤
+  `standards_anchor_max_aligned_sd`. Removes the systematic per-lab
+  offset before judging agreement, so many more compounds make it in
+  — especially in the metabolite-dense early-RT region where APS
+  spacing is sparse.
+
+```{r load-annotation}
+identity_df <- read.csv(file.path(producer_dir,
+                                  "annotation_identity.csv"),
+                        stringsAsFactors = FALSE,
+                        colClasses = c(mixture = "character"))
+chrom_df    <- read.csv(file.path(producer_dir,
+                                  "annotation_chrom_metrics.csv"),
+                        stringsAsFactors = FALSE,
+                        colClasses = c(mixture = "character"))
+
+# Per (mixture, lab, compound, polarity), dominant peak.
+chrom_dom <- chrom_df |>
+  filter(!is.na(apex_rt), !is.na(maxIntensity)) |>
+  group_by(mixture, lab, compound, polarity) |>
+  slice_max(maxIntensity, n = 1, with_ties = FALSE) |>
+  ungroup()
+
+# Keep only compounds with a SIRIUS identity in that (lab, polarity).
+chrom_with_id <- chrom_dom |>
+  semi_join(identity_df |>
+              distinct(mixture, lab, compound, polarity),
+            by = c("mixture", "lab", "compound", "polarity"))
+```
+
+```{r build-naps-anchor-table}
+naps_anchor_long <- per_lab_median |>
+  inner_join(consensus_rt |> select(polarity, anchor_n, consensus_rt),
+             by = c("polarity", "anchor_n")) |>
+  transmute(lab, polarity,
+            rt_local     = rt_med,
+            consensus_rt = consensus_rt,
+            anchor_label = paste0("C", anchor_n, "-APS"))
+```
+
+```{r fit-one-spline}
+# Fit monotonic spline per (lab, polarity).
+#
+# splinefun(method = "hyman") requires the input (rt_local, consensus_rt)
+# to be monotonic in BOTH x and y. Standards anchors can violate this
+# (a compound's local apex RT and the cross-lab consensus disagree on
+# the rank order). Steps:
+#   1. dedupe x (median y per unique rt_local)
+#   2. enforce monotonic y via isoreg (PAV — drops y inversions)
+#   3. dedupe y (collapse flat runs by averaging their x)
+#   4. fit hyman → monoH.FC → linear approxfun as triple-tier fallback
+fit_one_spline <- function(df) {
+  df <- df |> filter(is.finite(rt_local), is.finite(consensus_rt))
+  if (nrow(df) < 4L) return(NULL)
+  df <- df |>
+    group_by(rt_local) |>
+    summarise(consensus_rt = median(consensus_rt), .groups = "drop") |>
+    arrange(rt_local)
+  # PAV monotonicity. isoreg returns a non-decreasing fitted vector `yf`.
+  df$consensus_rt <- isoreg(df$rt_local, df$consensus_rt)$yf
+  df <- df |>
+    group_by(consensus_rt) |>
+    summarise(rt_local = mean(rt_local), .groups = "drop") |>
+    arrange(rt_local)
+  if (nrow(df) < 4L) return(NULL)
+  tryCatch(
+    splinefun(df$rt_local, df$consensus_rt, method = "hyman"),
+    error = function(e1) {
+      message("  hyman failed: ", conditionMessage(e1),
+              " — falling back to monoH.FC.")
+      tryCatch(
+        splinefun(df$rt_local, df$consensus_rt, method = "monoH.FC"),
+        error = function(e2) {
+          message("  monoH.FC failed; using linear approxfun.")
+          approxfun(df$rt_local, df$consensus_rt,
+                    method = "linear", rule = 2)
+        })
+    })
+}
+
+# Fit a `splines` list keyed by "lab_polarity" from any anchor table.
+fit_splines_for <- function(table) {
+  grps        <- table |> group_by(lab, polarity) |> group_split()
+  names(grps) <- vapply(grps,
+    function(d) paste(d$lab[1], d$polarity[1], sep = "_"),
+    character(1))
+  lapply(grps, fit_one_spline)
+}
+
+# Apply a `splines` map to a data frame's apex_rt, clamped to per-key
+# anchor range. Used twice: once for round-1 candidate qualification,
+# once for the final P2.5 alignment.
+apply_splines <- function(df, splines_map, anchors_for_range) {
+  df$key        <- paste(df$lab, df$polarity, sep = "_")
+  df$aligned_rt <- NA_real_
+  for (key_i in unique(df$key)) {
+    f <- splines_map[[key_i]]
+    if (is.null(f)) next
+    anchor_range <- anchors_for_range |>
+      filter(paste(lab, polarity, sep = "_") == key_i) |>
+      pull(rt_local) |> range(na.rm = TRUE)
+    idx       <- which(df$key == key_i)
+    rt_lab    <- df$apex_rt[idx]
+    in_range  <- !is.na(rt_lab) &
+                 rt_lab >= anchor_range[1] &
+                 rt_lab <= anchor_range[2]
+    df$aligned_rt[idx[in_range]] <- as.numeric(f(rt_lab[in_range]))
+  }
+  df$key <- NULL
+  df
+}
+```
+
+```{r qualify-standards}
+if (standards_anchor_mode == "raw_sd") {
+  qualifying <- chrom_with_id |>
+    group_by(mixture, compound, polarity) |>
+    summarise(n_labs = n_distinct(lab),
+              rt_sd  = sd(apex_rt, na.rm = TRUE),
+              .groups = "drop") |>
+    filter(n_labs >= standards_anchor_min_labs,
+           !is.na(rt_sd),
+           rt_sd <= standards_anchor_max_raw_sd) |>
+    select(mixture, compound, polarity)
+
+  cat("Standards qualifying (raw_sd, ≥", standards_anchor_min_labs,
+      " labs, raw SD ≤ ", standards_anchor_max_raw_sd, " s): ",
+      nrow(qualifying), "\n", sep = "")
+
+} else if (standards_anchor_mode == "iterative") {
+  splines_r1 <- fit_splines_for(naps_anchor_long)
+
+  cand <- chrom_with_id |>
+    group_by(mixture, compound, polarity) |>
+    filter(n_distinct(lab) >= standards_anchor_min_labs) |>
+    ungroup() |>
+    apply_splines(splines_r1, naps_anchor_long) |>
+    rename(aligned_rt_r1 = aligned_rt)
+
+  qualifying <- cand |>
+    filter(!is.na(aligned_rt_r1)) |>
+    group_by(mixture, compound, polarity) |>
+    summarise(n_labs_aligned = n(),
+              aligned_sd     = sd(aligned_rt_r1),
+              .groups = "drop") |>
+    filter(n_labs_aligned >= standards_anchor_min_labs,
+           !is.na(aligned_sd),
+           aligned_sd <= standards_anchor_max_aligned_sd) |>
+    select(mixture, compound, polarity)
+
+  cat("Standards qualifying (iterative, ≥", standards_anchor_min_labs,
+      " labs, aligned SD ≤ ", standards_anchor_max_aligned_sd, " s): ",
+      nrow(qualifying), "\n", sep = "")
+} else {
+  stop("Unknown standards_anchor_mode: ", standards_anchor_mode)
+}
+
+standards_anchor_long <- chrom_with_id |>
+  inner_join(qualifying,
+             by = c("mixture", "compound", "polarity")) |>
+  group_by(mixture, compound, polarity) |>
+  mutate(consensus_rt = median(apex_rt, na.rm = TRUE)) |>
+  ungroup() |>
+  select(lab, polarity,
+         rt_local     = apex_rt,
+         consensus_rt,
+         anchor_label = compound)
+```
+
+```{r build-splines}
+# Toggle to compare NAPS-only vs NAPS+standards downstream.
+use_standards_anchors <- TRUE
+anchor_table <- if (use_standards_anchors) {
+  bind_rows(naps_anchor_long, standards_anchor_long)
+} else {
+  naps_anchor_long
+}
+
+cat("Final anchor table — rows per (lab, polarity):\n")
+anchor_table |> count(lab, polarity) |>
+  tidyr::pivot_wider(names_from = polarity, values_from = n) |>
+  knitr::kable()
+
+splines <- fit_splines_for(anchor_table)
+
+cat("Splines fitted (lab_polarity):\n  ",
+    paste(names(splines), collapse = ", "), "\n")
+```
+
+```{r spline-curves-plot}
+#| fig-height: 6
+#| fig-cap: "Per-lab spline alignment curves. x = local RT (s); y = consensus RT (s). The diagonal = identity (no alignment needed)."
+plot_grid <- bind_rows(lapply(names(splines), function(key) {
+  parts <- strsplit(key, "_")[[1]]
+  lab_i <- parts[1]; pol_i <- parts[2]
+  rt_local_range <- anchor_table |>
+    filter(lab == lab_i, polarity == pol_i) |>
+    pull(rt_local) |> range(na.rm = TRUE)
+  if (any(!is.finite(rt_local_range))) return(NULL)
+  rt_seq <- seq(rt_local_range[1], rt_local_range[2], length.out = 400)
+  data.frame(lab = lab_i, polarity = pol_i,
+             rt_local = rt_seq,
+             rt_aligned = splines[[key]](rt_seq))
+}))
+
+ggplot(plot_grid, aes(x = rt_local, y = rt_aligned, colour = lab)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_line(linewidth = 0.9) +
+  geom_point(data = anchor_table,
+             aes(x = rt_local, y = consensus_rt, colour = lab),
+             size = 1.5, alpha = 0.6, inherit.aes = FALSE) +
+  facet_wrap(~ polarity, scales = "free") +
+  scale_color_hue() +
+  labs(x = "Local apex RT (s)", y = "Consensus / aligned RT (s)",
+       colour = "Lab",
+       title = "Per-lab monotonic spline alignment",
+       subtitle = "Lines = spline; points = anchors (NAPS + qualifying standards)") +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+# P2.5 Cross-lab apex-RT residual: before vs after alignment
+
+Apply each per-lab spline to `apex_rt` in `annotation_chrom_metrics.csv`.
+Per `(mixture, compound, polarity)` with detections in ≥ 2 labs:
+
+- **before** = SD of raw `apex_rt` across labs
+- **after**  = SD of `aligned_rt` across labs
+
+Compare against the within-lab floor from P2.2.
+
+```{r apply-alignment}
+apply_alignment <- function(df) {
+  # Apply final (NAPS + qualified standards) splines, clamped to the
+  # per-(lab, polarity) anchor range. Out-of-range rows → aligned_rt = NA
+  # so they don't poison cross-lab residual stats downstream.
+  apply_splines(df, splines, anchor_table)
+}
+
+chrom_aligned <- chrom_dom |>
+  apply_alignment()
+
+residual_df <- chrom_aligned |>
+  filter(!is.na(apex_rt), !is.na(aligned_rt)) |>
+  group_by(mixture, compound, polarity) |>
+  summarise(n_labs        = n_distinct(lab),
+            sd_raw        = sd(apex_rt,    na.rm = TRUE),
+            sd_aligned    = sd(aligned_rt, na.rm = TRUE),
+            range_raw     = max(apex_rt)     - min(apex_rt),
+            range_aligned = max(aligned_rt) - min(aligned_rt),
+            .groups = "drop") |>
+  filter(n_labs >= 2L, !is.na(sd_raw), !is.na(sd_aligned))
+
+residual_df |>
+  summarise(n = n(),
+            median_sd_raw     = round(median(sd_raw),     2),
+            median_sd_aligned = round(median(sd_aligned), 2),
+            p95_sd_raw        = round(quantile(sd_raw,     0.95), 2),
+            p95_sd_aligned    = round(quantile(sd_aligned, 0.95), 2)) |>
+  knitr::kable(caption = "Cross-lab apex-RT SD (seconds) before vs after alignment.")
+```
+
+```{r residual-vs-floor}
+#| fig-height: 5
+#| fig-cap: "Distribution of cross-lab apex-RT SD before (grey) vs after (blue) per-lab spline alignment. Red line = median within-lab NAPS floor."
+floor_sd <- median(within_lab_sd$rt_sd, na.rm = TRUE)
+
+residual_long <- residual_df |>
+  select(mixture, compound, polarity, sd_raw, sd_aligned) |>
+  pivot_longer(c(sd_raw, sd_aligned), names_to = "stage",
+               values_to = "sd_s") |>
+  mutate(stage = recode(stage, sd_raw = "Before", sd_aligned = "After"),
+         stage = factor(stage, levels = c("Before", "After")))
+
+ggplot(residual_long, aes(x = sd_s, fill = stage)) +
+  geom_histogram(bins = 60, alpha = 0.7, position = "identity") +
+  geom_vline(xintercept = floor_sd, colour = "red", linetype = "dashed") +
+  annotate("text", x = floor_sd, y = Inf,
+           label = sprintf("within-lab floor = %.2f s", floor_sd),
+           hjust = -0.05, vjust = 1.4, colour = "red", size = 3) +
+  scale_fill_manual(values = c(Before = "grey60", After = "#4DBBD5")) +
+  scale_x_log10(labels = scales::label_number(accuracy = 0.1)) +
+  facet_wrap(~ polarity) +
+  labs(x = "Cross-lab apex-RT SD (s, log)", y = "Count",
+       fill = NULL,
+       title = "Cross-lab RT residual before vs after per-lab alignment") +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+```{r residual-by-rt-region}
+#| fig-height: 4
+#| fig-cap: "Cross-lab SD vs consensus apex RT, before (grey) and after (blue). x-axis = where the peak elutes on the consensus axis. Wider band at early RT reflects the APS-sparse C1–C5 region (see P2.6)."
+chrom_aligned |>
+  filter(!is.na(aligned_rt)) |>
+  group_by(mixture, compound, polarity) |>
+  summarise(n_labs        = n_distinct(lab),
+            rt_consensus  = median(aligned_rt, na.rm = TRUE),
+            sd_raw        = sd(apex_rt,    na.rm = TRUE),
+            sd_aligned    = sd(aligned_rt, na.rm = TRUE),
+            .groups = "drop") |>
+  filter(n_labs >= 2L) |>
+  pivot_longer(c(sd_raw, sd_aligned), names_to = "stage", values_to = "sd_s") |>
+  mutate(stage = recode(stage, sd_raw = "Before", sd_aligned = "After"),
+         stage = factor(stage, levels = c("Before", "After"))) |>
+  ggplot(aes(x = rt_consensus, y = sd_s, colour = stage)) +
+  geom_point(alpha = 0.5, size = 1) +
+  geom_smooth(method = "loess", se = FALSE, linewidth = 0.8) +
+  geom_hline(yintercept = floor_sd, colour = "red", linetype = "dashed") +
+  scale_colour_manual(values = c(Before = "grey50", After = "#4DBBD5")) +
+  scale_y_log10() +
+  facet_wrap(~ polarity) +
+  labs(x = "Consensus apex RT (s)", y = "Cross-lab SD (s, log)",
+       colour = NULL,
+       title = "Residual SD vs consensus RT") +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+# P2.6 Early-RT region caveat
+
+The APS ladder spaces anchors by ~1 unit of carbon count = ~1 s in
+the early (most polar) region. C1 (~27 s) and C2 (~28 s) are nearly
+co-eluting; C2 → C3 → C4 spans ~6 s on most labs. **A 1-second RT
+delta in this region equals ~100 RTI units.** Metabolites cluster in
+this 23–45 s window, so:
+
+- Spline slopes are steep but the per-anchor SD is comparable to
+  later anchors in absolute seconds → the spline can over-correct or
+  under-correct local distortion.
+- Standards-as-anchors (P2.4) help most here: any spiked metabolite
+  with concordant cross-lab RT extends the anchor density in the
+  region where APS resolution is poor.
+
+Practically: report alignment uncertainty separately for the
+< 60 s region. Expect the post-alignment residual band to remain
+wider here even after alignment helps in absolute terms.
+
+```{r early-rt-residual}
+chrom_aligned |>
+  filter(!is.na(aligned_rt)) |>
+  group_by(mixture, compound, polarity) |>
+  summarise(n_labs        = n_distinct(lab),
+            rt_consensus  = median(aligned_rt, na.rm = TRUE),
+            sd_raw        = sd(apex_rt,    na.rm = TRUE),
+            sd_aligned    = sd(aligned_rt, na.rm = TRUE),
+            .groups = "drop") |>
+  filter(n_labs >= 2L) |>
+  mutate(rt_region = ifelse(rt_consensus < 60, "early (< 60 s)",
+                            "main (≥ 60 s)")) |>
+  group_by(polarity, rt_region) |>
+  summarise(n                 = n(),
+            median_sd_raw     = round(median(sd_raw), 2),
+            median_sd_aligned = round(median(sd_aligned), 2),
+            p95_sd_aligned    = round(quantile(sd_aligned, 0.95), 2),
+            .groups = "drop") |>
+  knitr::kable(caption = "Residual SD split by RT region.")
+```
+
+# P2.7 Export reusable RT → aligned mapping
+
+Two outputs at `5_downstream_analysis/object/`:
+
+- `rt_alignment_table.csv` — sampled lookup of `(lab, polarity,
+  rt_local, rt_aligned)` so downstream R / Python code can apply via
+  linear interpolation without needing the splines.
+- `rt_alignment_splines.RData` — the `splines` list of `splinefun`
+  objects, for direct use from R sessions that load this file.
+
+P3 and P5 should source `rt_alignment_table.csv` (vendor-neutral) by
+default and fall back to the RData for sub-second precision when
+needed.
+
+```{r export-mapping}
+sample_grid <- bind_rows(lapply(names(splines), function(key) {
+  parts <- strsplit(key, "_")[[1]]
+  lab_i <- parts[1]; pol_i <- parts[2]
+  rt_range <- anchor_table |>
+    filter(lab == lab_i, polarity == pol_i) |>
+    pull(rt_local) |> range(na.rm = TRUE)
+  if (any(!is.finite(rt_range))) return(NULL)
+  rt_seq <- seq(rt_range[1], rt_range[2], length.out = 1000)
+  data.frame(lab        = lab_i,
+             polarity   = pol_i,
+             rt_local   = rt_seq,
+             rt_aligned = splines[[key]](rt_seq))
+}))
+
+write.csv(sample_grid,
+          file.path(out_dir, "rt_alignment_table.csv"),
+          row.names = FALSE)
+
+# Also write the per-(lab, polarity, anchor) input table so P5 can
+# trace which anchors drove the fit.
+write.csv(anchor_table,
+          file.path(out_dir, "rt_alignment_anchors.csv"),
+          row.names = FALSE)
+
+save(splines, file = file.path(out_dir, "rt_alignment_splines.RData"))
+
+cat("Exports written:\n",
+    " ", file.path(out_dir, "rt_alignment_table.csv"),    "(", nrow(sample_grid), " rows )\n",
+    " ", file.path(out_dir, "rt_alignment_anchors.csv"),  "(", nrow(anchor_table), " rows )\n",
+    " ", file.path(out_dir, "rt_alignment_splines.RData"), "\n", sep = "")
+```
+
+# Summary
+
+- Within-lab NAPS replicate SD is the precision floor; numbers in
+  P2.2.
+- Per-lab Hyman monotonic splines map local apex RT → consensus RT
+  per polarity (P2.3). Standards extension active by default
+  (`use_standards_anchors = TRUE`).
+- Cross-lab apex-RT SD distribution before vs after alignment is in
+  P2.5. The post-alignment median should approach the within-lab
+  floor everywhere except the C1–C5 early-RT region (P2.6).
+- Outputs at `5_downstream_analysis/object/`:
+  - `rt_alignment_table.csv` — interpolation lookup
+  - `rt_alignment_anchors.csv` — anchor table used for fitting
+  - `rt_alignment_splines.RData` — `splines` list of `splinefun`
+    objects
+- P3 and P5 should load `rt_alignment_table.csv` (or RData for
+  sub-second precision) and apply per `(lab, polarity)`.
