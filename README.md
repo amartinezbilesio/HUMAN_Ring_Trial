@@ -197,6 +197,38 @@ for the current headline numbers + framing decisions.
 
 -----
 
+## 🗃️ Reproducing the downstream analysis
+
+Cloning the repository gives you everything needed to **re-render** Step 5
+QMDs from `5_normalization.qmd` onward without re-running SIRIUS or
+xcms — the canonical CSVs (`annotation_chrom_metrics.csv`,
+`annotation_identity.csv`, `naps_chrom_metrics.csv`,
+`annotation_chrom_metrics_normalized.csv`, the `detected_peaks_*_HE.csv`
+xcms outputs, `rt_alignment_splines.RData`, and most of the smaller
+`*.RData` objects) are all tracked.
+
+A few preprocessed Spectra objects exceed GitHub's 100 MB per-file
+limit and are excluded by `.gitignore`. They are needed only for
+`1_full_detected_objects.qmd` and Phase 1 of `8_data_level_progression.qmd`:
+
+| File | Size | Used by |
+|---|---:|---|
+| `5_downstream_analysis/object/sp_full.RData` | ~10 GB | QMD 1 + 8 Phase 1 |
+| `5_downstream_analysis/object/sp_full_detect.RData` | ~206 MB | QMD 1 + 8 Phase 1 |
+| `5_downstream_analysis/object/sp_icl.RData` | ~128 MB | QMD 1 |
+| `5_downstream_analysis/object/correspondence_grouped*.rds` | ~60-70 MB each | QMD 2 (regenerated on first render, ~5 min) |
+
+If you need to render those specific QMDs, either:
+
+1. **Regenerate locally** from the upstream raw data + preprocessing
+   scripts (`1_preprocessing/`). Requires the lab's raw mzML files.
+2. **Contact the repo maintainer** ([philoulouail@gmail.com](mailto:philoulouail@gmail.com))
+   to obtain the prebuilt `sp_*.RData` files via an out-of-band share
+   (OneDrive / Zenodo).
+
+The QMDs from `5_normalization.qmd` onward render without these large
+files — they read only the tracked canonical CSVs.
+
 ## 🛠️ Usage
 
 To reproduce the analysis or adapt it to new data, follow the numerical order
