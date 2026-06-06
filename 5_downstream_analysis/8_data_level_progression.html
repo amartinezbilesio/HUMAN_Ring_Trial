@@ -194,7 +194,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <tr class="even">
 <td><strong>Consensus</strong></td>
 <td><code>2_consensus_peaks.qmd</code> cross-lab feature matching</td>
-<td>~1,787 features matched in all 4 labs</td>
+<td><strong>3 490</strong> (NAPS-aligned) / <strong>1 787</strong> (Phase 5 legacy cache — see Cache vintage note in §5) features matched in all 4 labs</td>
 <td>sample × consensus-peak matrix</td>
 </tr>
 </tbody>
@@ -1016,6 +1016,7 @@ Attaching package: 'Matrix'</code></pre>
 <h1>Phase 5: Peak Feature Analysis — Consensus Peaks</h1>
 <p>This phase extends the global analysis by incorporating peak-level metrics computed from EICs of consensus peaks detected across all 4 laboratories. This provides a more refined view of inter-lab reproducibility at the individual peak level.</p>
 <p><strong>Scope note.</strong> Phase 5 reads <code>peak_metrics_detected_all4labs.csv</code> from <code>2_consensus_peaks.qmd</code>, which matches <strong>xcms-detected</strong> peaks across labs without any spike-in identity. It is independent of the SIRIUS producer cluster-RT algorithm — re-running the producer does <strong>not</strong> require re-rendering <code>2_consensus_peaks.qmd</code>. Phase 5 answers a different question: “for the same chromatographic feature detected in all 4 labs, how reproducible is the peak shape / intensity?” — the flip side of the Annotated row, where Phase 5 measures <em>detection-level</em> agreement and the Annotated row measures <em>identity-level</em> abundance.</p>
+<p><strong>Cache vintage.</strong> The peak_metrics table currently on disk was produced by <code>2_consensus_peaks.qmd</code> under <strong>raw-RT matching</strong> (1 787 4-lab features). The current <code>2_consensus_peaks.qmd</code> uses NAPS-aligned matching with raw-RT fallback, which recovers ~3 490 4-lab features. Refreshing Phase 5 to the aligned-matched feature set requires loading <code>sp_full.RData</code> (~ 10 GB) to re-extract EICs and is deferred. The Annotated-level and Annotated-level-derived ICC numbers (reported in <code>7_icc_reproducibility.qmd</code>) are unaffected.</p>
 <section id="data-overview" class="level2">
 <h2 class="anchored" data-anchor-id="data-overview">5.1 Data Overview</h2>
 <p>The peak feature data comes from <code>2_consensus_peaks.qmd</code>, which:</p>

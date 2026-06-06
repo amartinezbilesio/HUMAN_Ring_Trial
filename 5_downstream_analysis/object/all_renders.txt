@@ -491,7 +491,7 @@ annotation rows with decile assigned: 1806  / 2336
 ann_chrom <- ann_chrom |>   left_join(factor_global_tbl,             by = c("lab", "sample", "polarity")) |>   left_join(factor_decile_tbl |>               select(lab, sample, polarity, decile, factor_decile),             by = c("lab", "sample", "polarity", "decile"))  # Evaluate LOESS factor at each annotated peak's aligned_rt. ann_chrom$factor_loess <- NA_real_ for (i in seq_len(nrow(loess_fits))) {   fit <- loess_fits$fit[[i]]   if (is.null(fit)) next   idx <- which(ann_chrom$lab      == loess_fits$lab[i]     &                ann_chrom$sample   == loess_fits$sample[i]  &                ann_chrom$polarity == loess_fits$polarity[i] &                !is.na(ann_chrom$aligned_rt))   if (!length(idx)) next   pred <- suppressWarnings(     predict(fit, newdata = data.frame(aligned_rt = ann_chrom$aligned_rt[idx])))   # LOESS was fit on log10(factor) — convert back to linear.   ann_chrom$factor_loess[idx] <- 10 ^ pred }  cat("annotation rows with each factor:",     "\n  global:", sum(!is.na(ann_chrom$factor_global)),     "\n  decile:", sum(!is.na(ann_chrom$factor_decile)),     "\n  loess :", sum(!is.na(ann_chrom$factor_loess)),     " /", nrow(ann_chrom), "\n")
 
   OUTPUT 12:
-annotation rows with each factor:    global: 2336    decile: 1806    loess : 1613  / 2336
+annotation rows with each factor:    global: 2336    decile: 1806    loess : 1612  / 2336
 
   OUTPUT 13:
 # Scale both abundance metrics by each factor. We carry both forward # because they answer different questions: #   - `maxIntensity`   — scan-rate robust (good when scan rates differ ~15x #                         across labs) #   - `areaUnderTic`   — standard TIC-style integral (matches the bulk #                         metric in 8_data_level_progression.qmd) ann_chrom <- ann_chrom |>   mutate(maxIntensity_global = maxIntensity * factor_global,          maxIntensity_decile = maxIntensity * factor_decile,          maxIntensity_loess  = maxIntensity * factor_loess,          areaUnderTic_global = areaUnderTic * factor_global,          areaUnderTic_decile = areaUnderTic * factor_decile,          areaUnderTic_loess  = areaUnderTic * factor_loess)  write.csv(ann_chrom,           file.path(object_dir, "annotation_chrom_metrics_normalized.csv"),           row.names = FALSE)  cat("Wrote: ",     file.path(object_dir, "annotation_chrom_metrics_normalized.csv"),     "\n  rows: ", nrow(ann_chrom), "\n", sep = "")
@@ -524,20 +524,20 @@ Wrote: C:/Users/phili/OneDrive - Scientific Network South Tyrol/Documents/GitHub
   TABLE 1: Tier counts per polarity. A = both axes strong; B = one strong + one marginal; C = both marginal-to-weak but defined; D = at least one axis undefined.
      polarity | A | B | C | D 
      neg | 16 | 51 | 100 | 64 
-     pos | 21 | 61 | 76 | 84 
+     pos | 27 | 61 | 70 | 84 
 
   TABLE 2: Tier counts per (lab, polarity) on the identity table itself. Same tier value is replicated across all lab rows for the same (mixture, compound, polarity) tuple.
      lab | polarity | A | B | C | D 
      afekta | neg | 5 | 8 | 27 | 10 
-     afekta | pos | 4 | 16 | 27 | 15 
+     afekta | pos | 6 | 19 | 22 | 15 
      cembio | neg | 12 | 49 | 92 | 50 
-     cembio | pos | 20 | 59 | 70 | 72 
+     cembio | pos | 26 | 59 | 64 | 72 
      hmgu | neg | 5 | 16 | 25 | 28 
-     hmgu | pos | 3 | 8 | 10 | 18 
+     hmgu | pos | 3 | 9 | 9 | 18 
      icl | neg | 0 | 1 | 1 | 0 
-     icl | pos | 0 | 2 | 1 | 1 
+     icl | pos | 1 | 1 | 1 | 1 
 
-=== Printed outputs (16 <pre> blocks) ===
+=== Printed outputs (17 <pre> blocks) ===
 
   OUTPUT 1:
 # Identity table (one row per (mixture, lab, compound, polarity), with COSMIC). # Read mixture as character — the canonical "2.10" trap. identity_df <- read.csv(   file.path(producer_dir, "annotation_identity.csv"),   stringsAsFactors = FALSE,   colClasses = c(mixture = "character"))  cat("identity_df rows:", nrow(identity_df), "\n")
@@ -564,12 +564,15 @@ Tuples with computable RT SD (>=2labs aligned): 392 / 438
 combined_axes |>   count(polarity, tier) |>   pivot_wider(names_from = tier, values_from = n, values_fill = 0L,               names_sort = TRUE) |>   knitr::kable(caption = "Tier counts per polarity. A = both axes strong; B = one strong + one marginal; C = both marginal-to-weak but defined; D = at least one axis undefined.")
 
   OUTPUT 9:
-identity_df_tiered <- identity_df |>   select(-confidence_tier) |>   left_join(combined_axes |>               select(mixture, compound, polarity, tier),             by = c("mixture", "compound", "polarity")) |>   rename(confidence_tier = tier) |>   # Defensive: any join misses default back to D so the column has no NAs.   mutate(confidence_tier = coalesce(confidence_tier, "D"))  stopifnot(all(c("confidence_tier") %in% names(identity_df_tiered))) stopifnot(nrow(identity_df_tiered) == nrow(identity_df))  # Re-order columns to match the original schema (CANONICAL_SCHEMAS.md). identity_df_tiered <- identity_df_tiered |>   select(mixture, lab, compound, inchikey_2d, polarity,          best_formula_rank, best_structure_rank, adducts,          molecularFormula, expected_formula, expected_inchikey,          mz_observed, confidenceExactMatch, confidenceApproxMatch,          confidence_tier)  write.csv(identity_df_tiered,           file.path(producer_dir, "annotation_identity.csv"),           row.names = FALSE)  cat("Overwrote: ",     file.path(producer_dir, "annotation_identity.csv"),     "\n  rows: ", nrow(identity_df_tiered), "\n", sep = "")
+Warning in scale_y_log10(): log-10 transformation introduced infinite values.
 
   OUTPUT 10:
-Overwrote: C:/Users/phili/OneDrive - Scientific Network South Tyrol/Documents/GitHub/HUMAN_Ring_Trial/3_annotation_manual/HE/3_Sirius_curation/results_all_ms2/annotation_identity.csv   rows: 655
+identity_df_tiered <- identity_df |>   select(-confidence_tier) |>   left_join(combined_axes |>               select(mixture, compound, polarity, tier),             by = c("mixture", "compound", "polarity")) |>   rename(confidence_tier = tier) |>   # Defensive: any join misses default back to D so the column has no NAs.   mutate(confidence_tier = coalesce(confidence_tier, "D"))  stopifnot(all(c("confidence_tier") %in% names(identity_df_tiered))) stopifnot(nrow(identity_df_tiered) == nrow(identity_df))  # Re-order columns to match the original schema (CANONICAL_SCHEMAS.md). identity_df_tiered <- identity_df_tiered |>   select(mixture, lab, compound, inchikey_2d, polarity,          best_formula_rank, best_structure_rank, adducts,          molecularFormula, expected_formula, expected_inchikey,          mz_observed, confidenceExactMatch, confidenceApproxMatch,          confidence_tier)  write.csv(identity_df_tiered,           file.path(producer_dir, "annotation_identity.csv"),           row.names = FALSE)  cat("Overwrote: ",     file.path(producer_dir, "annotation_identity.csv"),     "\n  rows: ", nrow(identity_df_tiered), "\n", sep = "")
 
   OUTPUT 11:
+Overwrote: C:/Users/phili/OneDrive - Scientific Network South Tyrol/Documents/GitHub/HUMAN_Ring_Trial/3_annotation_manual/HE/3_Sirius_curation/results_all_ms2/annotation_identity.csv   rows: 655
+
+  OUTPUT 12:
 identity_df_tiered |>   count(lab, polarity, confidence_tier) |>   pivot_wider(names_from = confidence_tier, values_from = n,               values_fill = 0L, names_sort = TRUE) |>   knitr::kable(caption = "Tier counts per (lab, polarity) on the identity table itself. Same tier value is replicated across all lab rows for the same (mixture, compound, polarity) tuple.")
 
 
@@ -607,17 +610,17 @@ identity_df_tiered |>   count(lab, polarity, confidence_tier) |>   pivot_wider(n
      areaUnderTic | Negative | Decile | 0.219 | 4.42 | 15.79 
      areaUnderTic | Negative | LOESS | 0.211 | 4.45 | 16.60 
      areaUnderTic | Positive | Raw | 0.208 | 4.34 | 16.50 
-     areaUnderTic | Positive | Global | 0.256 | 4.32 | 12.60 
-     areaUnderTic | Positive | Decile | 0.263 | 4.47 | 12.53 
-     areaUnderTic | Positive | LOESS | 0.264 | 4.45 | 12.39 
+     areaUnderTic | Positive | Global | 0.255 | 4.36 | 12.73 
+     areaUnderTic | Positive | Decile | 0.261 | 4.46 | 12.66 
+     areaUnderTic | Positive | LOESS | 0.264 | 4.50 | 12.54 
      maxIntensity | Negative | Raw | 0.313 | 7.72 | 16.98 
      maxIntensity | Negative | Global | 0.308 | 7.63 | 17.16 
      maxIntensity | Negative | Decile | 0.340 | 7.90 | 15.32 
      maxIntensity | Negative | LOESS | 0.329 | 7.90 | 16.12 
      maxIntensity | Positive | Raw | 0.257 | 5.91 | 17.07 
-     maxIntensity | Positive | Global | 0.286 | 5.95 | 14.84 
-     maxIntensity | Positive | Decile | 0.305 | 6.24 | 14.20 
-     maxIntensity | Positive | LOESS | 0.289 | 6.02 | 14.79 
+     maxIntensity | Positive | Global | 0.286 | 6.00 | 14.97 
+     maxIntensity | Positive | Decile | 0.304 | 6.21 | 14.23 
+     maxIntensity | Positive | LOESS | 0.291 | 6.10 | 14.89 
     [145 rows, skipped] Pairwise ICC (Strict). ★ = same-platform pair.
     [33 rows, skipped] Per-lab rank + log correlation vs cross-lab consensus.
     [33 rows, skipped] Per-lab rank/log correlation vs LOO consensus.
@@ -638,9 +641,9 @@ identity_df_tiered |>   count(lab, polarity, confidence_tier) |>   pivot_wider(n
      areaUnderTic | Positive | Raw | 0.492 | 4.09 | 4.23 
      areaUnderTic | Positive | Aligned | 0.577 | 7.01 | 5.15 
      areaUnderTic | Positive | Lab-median | 0.596 | 4.09 | 2.77 
-     areaUnderTic | Positive | Global | 0.550 | 6.98 | 5.71 
-     areaUnderTic | Positive | Decile | 0.543 | 7.31 | 6.16 
-     areaUnderTic | Positive | LOESS | 0.558 | 7.10 | 5.63 
+     areaUnderTic | Positive | Global | 0.550 | 6.97 | 5.72 
+     areaUnderTic | Positive | Decile | 0.535 | 7.20 | 6.25 
+     areaUnderTic | Positive | LOESS | 0.560 | 7.10 | 5.58 
      maxIntensity | Negative | Raw | 0.403 | 5.54 | 8.20 
      maxIntensity | Negative | Aligned | 0.385 | 5.95 | 9.49 
      maxIntensity | Negative | Lab-median | 0.569 | 5.54 | 4.19 
@@ -650,9 +653,9 @@ identity_df_tiered |>   count(lab, polarity, confidence_tier) |>   pivot_wider(n
      maxIntensity | Positive | Raw | 0.316 | 5.49 | 11.88 
      maxIntensity | Positive | Aligned | 0.294 | 5.34 | 12.83 
      maxIntensity | Positive | Lab-median | 0.467 | 5.49 | 6.27 
-     maxIntensity | Positive | Global | 0.281 | 5.40 | 13.81 
-     maxIntensity | Positive | Decile | 0.300 | 5.78 | 13.51 
-     maxIntensity | Positive | LOESS | 0.284 | 5.48 | 13.82 
+     maxIntensity | Positive | Global | 0.281 | 5.40 | 13.82 
+     maxIntensity | Positive | Decile | 0.298 | 5.72 | 13.49 
+     maxIntensity | Positive | LOESS | 0.285 | 5.49 | 13.76 
 
   TABLE 9: Per-compound pairwise correlations.
      metric | polarity | pair | contains_hmgu | Spearman | Pearson(log2) | n 
@@ -688,9 +691,9 @@ identity_df_tiered |>   count(lab, polarity, confidence_tier) |>   pivot_wider(n
      neg | Decile | 82 | 1.172 | 1.241 | 0.0 | 2.4 
      neg | LOESS | 78 | 1.095 | 1.147 | 2.6 | 3.8 
      pos | Raw | 83 | 1.236 | 1.371 | 0.0 | 1.2 
-     pos | Global | 83 | 1.476 | 1.434 | 0.0 | 4.8 
-     pos | Decile | 83 | 1.431 | 1.428 | 0.0 | 2.4 
-     pos | LOESS | 77 | 1.383 | 1.306 | 3.9 | 6.5 
+     pos | Global | 83 | 1.473 | 1.435 | 0.0 | 3.6 
+     pos | Decile | 83 | 1.436 | 1.428 | 0.0 | 2.4 
+     pos | LOESS | 77 | 1.384 | 1.301 | 3.9 | 6.5 
 
 === Printed outputs (37 <pre> blocks) ===
 
@@ -905,9 +908,9 @@ print(round(cor_area, 3))
 
   TABLE 1: Structure rank summary per lab
      lab | n | median_rank | pct_rank1 | pct_top3 | pct_top10 
-     afekta | 31 | 1 | 83.9 | 93.5 | 96.8 
-     cembio | 109 | 1 | 100.0 | 100.0 | 100.0 
-     hmgu | 28 | 1 | 78.6 | 85.7 | 92.9 
+     afekta | 36 | 1 | 86.1 | 94.4 | 97.2 
+     cembio | 116 | 1 | 100.0 | 100.0 | 100.0 
+     hmgu | 29 | 1 | 75.9 | 86.2 | 93.1 
      icl | 3 | 1 | 66.7 | 66.7 | 100.0 
 
   TABLE 2: Top 20 (mixture, compound, polarity) by cross-lab apex RT range
@@ -973,7 +976,7 @@ print(round(cor_area, 3))
 === Printed outputs (48 <pre> blocks) ===
 
   OUTPUT 1:
-identity_df rows (tier-kept): 208  | chrom_df rows: 2336
+identity_df rows (tier-kept): 220  | chrom_df rows: 2336
 
   OUTPUT 2:
 chrom_one_per_compound <- chrom_df |>   group_by(mixture, lab, compound) |>   slice_max(maxIntensity, n = 1, with_ties = FALSE) |>   ungroup()
@@ -1003,7 +1006,7 @@ identity_df |>   tidyr::separate_rows(adducts, sep = ";") |>   filter(!is.na(add
 mz_dev_df <- identity_df |>   filter(!is.na(mz_observed)) |>   group_by(mixture, compound, polarity) |>   mutate(n_labs    = n_distinct(lab),          mean_mass = mean(mz_observed, na.rm = TRUE),          ppm_dev   = (mz_observed - mean_mass) / mean_mass * 1e6) |>   ungroup() |>   filter(n_labs >= 2)  cat("(mixture, compound, polarity) pairs with >= 2 labs:",     n_distinct(paste(mz_dev_df$mixture, mz_dev_df$compound,                      mz_dev_df$polarity)), "\n")
 
   OUTPUT 11:
-(mixture, compound, polarity) pairs with >= 2 labs: 43
+(mixture, compound, polarity) pairs with >= 2 labs: 48
 
   OUTPUT 12:
 mz_dev_df |>   group_by(mixture, compound, lab) |>   summarise(ppm_dev = median(ppm_dev, na.rm = TRUE), .groups = "drop") |>   right_join(expected_grid, by = c("mixture", "lab", "compound")) |>   ggplot(aes(x = lab, y = compound, fill = ppm_dev)) +   geom_tile(colour = "white", linewidth = 0.4) +   facet_grid(mixture ~ ., scales = "free_y", space = "free_y") +   scale_fill_gradient2(low = "#3b4cc0", mid = "white", high = "#b40426",                        midpoint = 0, na.value = "#eeeeee",                        name = "ppm dev\nvs mean") +   labs(x = NULL, y = NULL,        title = "Inter-lab m/z shift per (mixture, compound, lab)") +   theme_bw() +   theme(axis.text.y = element_text(size = 9),         axis.text.x = element_text(face = "bold", size = 11),         strip.text.y = element_text(angle = 0, face = "bold"))

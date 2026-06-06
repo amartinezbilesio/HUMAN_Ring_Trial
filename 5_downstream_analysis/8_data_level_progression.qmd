@@ -18,7 +18,7 @@ processing pipeline:
 | **Full**       | mzML, no peak detection | all MS1 ions | TIC, BPC |
 | **Detected**   | xcms (per-lab, per-sample peak picking) | per-injection detected peaks | TIC, BPC restricted to detected ions |
 | **Annotated**  | SIRIUS MS2 + SNR-aware chromExtract | the spike-in panel (~250 (mix × compound) tuples detected in ≥1 lab) | sum/max of maxIntensity over the panel |
-| **Consensus**  | `2_consensus_peaks.qmd` cross-lab feature matching | ~1,787 features matched in all 4 labs | sample × consensus-peak matrix |
+| **Consensus**  | `2_consensus_peaks.qmd` cross-lab feature matching | **3 490** (NAPS-aligned) / **1 787** (Phase 5 legacy cache — see Cache vintage note in §5) features matched in all 4 labs | sample × consensus-peak matrix |
 
 This file asks **one question**: *does each successive layer recover
 biological signal from technical variance?* The answer is yes — see the
@@ -706,6 +706,15 @@ different question: "for the same chromatographic feature detected in
 all 4 labs, how reproducible is the peak shape / intensity?" — the
 flip side of the Annotated row, where Phase 5 measures *detection-level*
 agreement and the Annotated row measures *identity-level* abundance.
+
+**Cache vintage.** The peak_metrics table currently on disk was
+produced by `2_consensus_peaks.qmd` under **raw-RT matching** (1 787
+4-lab features). The current `2_consensus_peaks.qmd` uses
+NAPS-aligned matching with raw-RT fallback, which recovers ~3 490
+4-lab features. Refreshing Phase 5 to the aligned-matched feature set
+requires loading `sp_full.RData` (~ 10 GB) to re-extract EICs and is
+deferred. The Annotated-level and Annotated-level-derived ICC numbers
+(reported in `7_icc_reproducibility.qmd`) are unaffected.
 
 ## 5.1 Data Overview
 

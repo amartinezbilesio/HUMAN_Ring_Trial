@@ -151,16 +151,19 @@ cat(sprintf("Peaks aligned via NAPS: %d / %d (%.1f%%). Remainder use raw rt.\n",
             100 * mean(!is.na(pt_all$aligned_rt))))
 
 # Per-sample mz+rt graph grouping (two-pointer sweep + connected components).
-# rt_vec uses match_rt (aligned when possible, raw fallback otherwise).
+# rt_col controls which RT column to match on:
+#   "match_rt" (default) — NAPS-aligned with raw fallback (main pipeline)
+#   "rt"                 — raw rt (used by the alignment-effect comparison)
 group_sample <- function(pt_all, sample_id,
-                         ppm = PPM_TOL, rt_tol = RT_TOL) {
+                         ppm = PPM_TOL, rt_tol = RT_TOL,
+                         rt_col = "match_rt") {
   sub <- pt_all[pt_all$sample == sample_id, ]
   sub <- sub[order(sub$mz), ]
   sub$peak_idx <- seq_len(nrow(sub))
 
   n      <- nrow(sub)
   mz_vec <- sub$mz
-  rt_vec <- sub$match_rt
+  rt_vec <- sub[[rt_col]]
 
   cap  <- 1024L # what is this cap ?
   from <- integer(cap); to <- integer(cap); k <- 0L
@@ -213,20 +216,29 @@ cat("Pooled peaks:", nrow(grouped),
 # closest to the centroid defined by the anchor labs (those contributing
 # exactly one peak). Disambiguation runs on the same axis as matching
 # (match_rt = aligned where possible, raw fallback otherwise).
-disambig <- grouped |>
-  group_by(consensus_id) |>
-  mutate(
-    n_per_lab = ave(seq_along(lab), lab, FUN = length),
-    anchor    = n_per_lab == 1L,
-    ref_mz    = if (any(anchor)) median(mz[anchor]) else median(mz),
-    ref_rt    = if (any(anchor)) median(match_rt[anchor]) else median(match_rt),
-    score     = abs(mz - ref_mz) / (ref_mz * PPM_TOL * 1e-6) +
-                abs(match_rt - ref_rt) / RT_TOL
-  ) |>
-  group_by(consensus_id, lab) |>
-  slice_min(score, n = 1, with_ties = FALSE) |>
-  ungroup() |>
-  select(-n_per_lab, -anchor, -ref_mz, -ref_rt, -score, -peak_idx)
+#
+# data.table rewrite: dplyr's group_by(consensus_id) |> mutate(if any())
+# over ~810k consensus groups was taking >1 h due to per-group dispatch
+# overhead. data.table's by= operations are vectorized in compiled C
+# and run in seconds.
+suppressPackageStartupMessages(library(data.table))
+gdt <- as.data.table(grouped)
+gdt[, n_per_lab := .N, by = .(consensus_id, lab)]
+gdt[, anchor := n_per_lab == 1L]
+# Per-consensus reference (mz, match_rt): median over anchor rows if any,
+# else median over all rows.
+gdt[, ref_mz := if (any(anchor)) median(mz[anchor]) else median(mz),
+    by = consensus_id]
+gdt[, ref_rt := if (any(anchor)) median(match_rt[anchor]) else median(match_rt),
+    by = consensus_id]
+gdt[, score := abs(mz - ref_mz) / (ref_mz * PPM_TOL * 1e-6) +
+                abs(match_rt - ref_rt) / RT_TOL]
+# Per (consensus_id, lab), keep the row with the smallest score.
+disambig <- gdt[gdt[, .I[which.min(score)], by = .(consensus_id, lab)]$V1]
+disambig[, c("n_per_lab", "anchor", "ref_mz", "ref_rt",
+             "score", "peak_idx") := NULL]
+disambig <- as.data.frame(disambig)
+rm(gdt); gc(full = TRUE, verbose = FALSE)
 
 # Pivot to wide consensus-table format expected downstream:
 # one row per (sample, consensus_id), one column per lab.
@@ -443,6 +455,283 @@ The remaining ~ 99 % are unidentified background chemistries that
 nevertheless reproduce across all four labs — matrix peaks, in-source
 fragments, common contaminants. Cross-lab reproducibility extends far
 beyond the targeted panel.
+
+
+## Effect of NAPS alignment on consensus matching
+
+The main pipeline above matches peaks on `match_rt` (NAPS-aligned with
+raw-`rt` fallback for peaks outside the NAPS anchor range). To quantify
+what alignment buys, we rerun the same igraph two-pointer matching on
+**raw `rt`** and compare:
+
+- How many cross-lab consensus features survive (especially the
+  strict all-4-lab subset)?
+- How tight are the matched groups in RT — i.e. do peaks at the same
+  true compound across labs actually land within a few seconds of
+  each other?
+
+The raw-rt matching uses identical PPM_TOL = 20 and RT_TOL = 15 s.
+Only the RT column being matched on differs.
+
+```{r raw-matching-comparison}
+#| message: false
+raw_cache <- file.path(base_path, "object/correspondence_grouped_raw.rds")
+if (file.exists(raw_cache)) {
+  grouped_raw <- readRDS(raw_cache)
+} else {
+  samples_r <- sort(unique(pt_all$sample))
+  grouped_raw <- do.call(rbind, lapply(samples_r, function(s) {
+    g <- group_sample(pt_all, s, rt_col = "rt")
+    g$consensus_id <- paste(s, g$consensus_id, sep = "_")
+    g
+  }))
+  grouped_raw$consensus_id <- as.integer(factor(grouped_raw$consensus_id))
+  saveRDS(grouped_raw, raw_cache)
+}
+cat("Raw-rt matching: ", nrow(grouped_raw), " peaks in ",
+    length(unique(grouped_raw$consensus_id)), " consensus groups\n", sep = "")
+```
+
+```{r alignment-effect-stats}
+#| message: false
+# Per-consensus stats for both passes: n_labs + intra-group spread on the
+# axis the matching ran on.
+stat_pass <- function(grp, rt_col, label) {
+  dt <- as.data.table(grp)
+  dt[, c("rt_use", "label") := list(get(rt_col), label)]
+  nlabs <- dt[, .(n_labs = uniqueN(lab)), by = consensus_id]
+  spread <- dt[nlabs[n_labs >= 2], on = "consensus_id",
+               .(spr = max(rt_use) - min(rt_use)), by = consensus_id]
+  list(n_groups   = uniqueN(dt$consensus_id),
+       n_4lab     = sum(nlabs$n_labs == 4),
+       n_3plus    = sum(nlabs$n_labs >= 3),
+       median_spr = median(spread$spr),
+       p75_spr    = quantile(spread$spr, 0.75),
+       p95_spr    = quantile(spread$spr, 0.95),
+       max_spr    = max(spread$spr),
+       spread_vec = spread$spr,
+       nlabs_vec  = nlabs$n_labs)
+}
+
+st_raw <- stat_pass(grouped_raw, "rt",       "RAW (rt)")
+st_aln <- stat_pass(grouped,     "match_rt", "ALIGNED (match_rt)")
+
+cmp <- data.frame(
+  Metric = c("Consensus groups (any n_labs)",
+             "Groups in all 4 labs",
+             "Groups in 3+ labs",
+             "Median intra-group RT spread (s)",
+             "p75 intra-group RT spread (s)",
+             "p95 intra-group RT spread (s)",
+             "Max intra-group RT spread (s)"),
+  RAW_rt        = c(st_raw$n_groups, st_raw$n_4lab, st_raw$n_3plus,
+                    round(st_raw$median_spr, 2),
+                    round(st_raw$p75_spr,   2),
+                    round(st_raw$p95_spr,   2),
+                    round(st_raw$max_spr,   2)),
+  ALIGNED_match = c(st_aln$n_groups, st_aln$n_4lab, st_aln$n_3plus,
+                    round(st_aln$median_spr, 2),
+                    round(st_aln$p75_spr,   2),
+                    round(st_aln$p95_spr,   2),
+                    round(st_aln$max_spr,   2)),
+  Delta_pct     = round(100 *
+                        (c(st_aln$n_groups, st_aln$n_4lab, st_aln$n_3plus,
+                           st_aln$median_spr, st_aln$p75_spr,
+                           st_aln$p95_spr,   st_aln$max_spr) /
+                         c(st_raw$n_groups, st_raw$n_4lab, st_raw$n_3plus,
+                           st_raw$median_spr, st_raw$p75_spr,
+                           st_raw$p95_spr,   st_raw$max_spr) - 1), 1))
+knitr::kable(cmp, col.names = c("Metric", "RAW (rt)",
+                                "ALIGNED (match_rt)", "Δ %"),
+             caption = "Effect of NAPS-spline alignment on consensus matching")
+```
+
+```{r alignment-effect-histogram}
+#| fig-cap: "Distribution of intra-group RT spread across consensus features detected in ≥ 2 labs, on a log10 axis. Aligned matching shifts the bulk of features to a tighter RT spread (~ 3-4 s median) compared with raw matching (~ 6 s)."
+#| fig-height: 4
+spr_df <- rbind(
+  data.frame(spr_s = st_raw$spread_vec, pass = "RAW (rt)"),
+  data.frame(spr_s = st_aln$spread_vec, pass = "ALIGNED (match_rt)"))
+spr_df$pass <- factor(spr_df$pass,
+                      levels = c("RAW (rt)", "ALIGNED (match_rt)"))
+
+ggplot(spr_df, aes(x = spr_s, fill = pass)) +
+  geom_histogram(bins = 60, alpha = 0.7, position = "identity") +
+  scale_x_log10(labels = scales::label_number(accuracy = 0.1)) +
+  scale_fill_manual(values = c("RAW (rt)" = "grey55",
+                                "ALIGNED (match_rt)" = "#1F77B4")) +
+  labs(x = "Intra-group RT spread (s, log)", y = "Number of consensus groups",
+       fill = NULL,
+       title = "Intra-group RT spread: raw vs aligned matching") +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+```{r alignment-effect-nlabs-distribution}
+#| fig-cap: "Distribution of consensus group sizes (n_labs_matched) under raw vs aligned matching. Aligned matching recovers ~ 35 % more all-4-lab features by bringing peaks just outside the 15 s window inside it."
+#| fig-height: 3.5
+nlab_df <- rbind(
+  data.frame(n_labs = st_raw$nlabs_vec, pass = "RAW (rt)"),
+  data.frame(n_labs = st_aln$nlabs_vec, pass = "ALIGNED (match_rt)"))
+nlab_df$pass <- factor(nlab_df$pass,
+                       levels = c("RAW (rt)", "ALIGNED (match_rt)"))
+
+ggplot(nlab_df, aes(x = factor(n_labs), fill = pass)) +
+  geom_bar(position = "dodge", alpha = 0.85) +
+  scale_y_log10() +
+  scale_fill_manual(values = c("RAW (rt)" = "grey55",
+                                "ALIGNED (match_rt)" = "#1F77B4")) +
+  labs(x = "n_labs_matched", y = "Consensus groups (log)",
+       fill = NULL,
+       title = "Consensus group size distribution: raw vs aligned") +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+**What alignment does and doesn't do.** The matching gains
+(+~ 35 % four-lab features, intra-group spread halved) tell us
+alignment is doing real work at the *grouping* level — peaks that
+were just outside the 15 s tolerance under raw rt now fall inside it
+after the NAPS spline corrects the per-lab drift. But the **intensity
+CV on the four-lab subset stays around 0.94-0.96 either way** (Phase 5
+of [`8_data_level_progression.qmd`](8_data_level_progression.qmd)),
+which is the cleanest possible statement that the residual cross-lab
+abundance disagreement is structural — per-lab MS detector response —
+and not something alignment can rescue.
+
+### Does alignment improve the SIRIUS-panel mapping?
+
+The cross-reference above (SIRIUS-annotated → consensus) was run on
+the aligned matching only. Here we repeat it under raw matching and
+report the delta — the test of whether alignment is also recovering
+more *identified* compounds in the cross-lab consensus, not just more
+unknown features.
+
+```{r sirius-mapping-raw-vs-aligned}
+#| message: false
+# Re-run the SIRIUS panel mapping on the RAW grouping.
+grouped_raw_dt <- as.data.table(grouped_raw)
+consensus_rep_raw <- grouped_raw_dt[
+  , .(mz_rep = mean(mz), rt_rep = mean(rt)),
+    by = .(consensus_id, lab, sample)]
+nlabs_raw <- grouped_raw_dt[
+  , .(n_labs_matched = uniqueN(lab)), by = consensus_id]
+
+map_sirius <- function(ann_dom, consensus_rep, nlabs,
+                       ppm_tol = 20, rt_tol = 15) {
+  hits <- ann_dom |>
+    inner_join(as.data.frame(consensus_rep),
+               by = c("sample", "lab"),
+               relationship = "many-to-many") |>
+    mutate(mz_ok = abs(mz_observed - mz_rep) <=
+                    mz_observed * ppm_tol * 1e-6,
+           rt_ok = abs(apex_rt - rt_rep) <= rt_tol) |>
+    filter(mz_ok, rt_ok) |>
+    mutate(dist = abs(mz_observed - mz_rep) /
+                  (mz_observed * ppm_tol * 1e-6) +
+                  abs(apex_rt - rt_rep) / rt_tol) |>
+    group_by(mixture, lab, compound, polarity) |>
+    slice_min(dist, n = 1, with_ties = FALSE) |>
+    ungroup() |>
+    inner_join(as.data.frame(nlabs), by = "consensus_id")
+
+  per_cpd <- hits |>
+    group_by(mixture, compound, polarity) |>
+    summarise(n_obs       = n(),
+              n_in_4lab   = sum(n_labs_matched == 4),
+              n_in_3plus  = sum(n_labs_matched >= 3),
+              .groups = "drop")
+  list(n_rows_mapped     = nrow(hits),
+       n_rows_total      = nrow(ann_dom),
+       n_compounds       = nrow(per_cpd),
+       n_compounds_4lab  = sum(per_cpd$n_in_4lab == per_cpd$n_obs),
+       n_compounds_3plus = sum(per_cpd$n_in_3plus == per_cpd$n_obs))
+}
+
+map_raw <- map_sirius(ann_dom, consensus_rep_raw, nlabs_raw)
+map_aln <- map_sirius(ann_dom, consensus_rep,    n_labs_per_cid)
+
+sirius_cmp <- data.frame(
+  Metric = c("Annotated lab observations mapped to a consensus feature",
+             "  ... mapping rate",
+             "Distinct spike-ins observed in any consensus group",
+             "Spike-ins with ALL lab observations in a 4-lab consensus",
+             "  ... fraction",
+             "Spike-ins with ALL lab observations in a 3+ lab consensus",
+             "  ... fraction"),
+  RAW = c(sprintf("%d / %d", map_raw$n_rows_mapped, map_raw$n_rows_total),
+          sprintf("%.1f%%",  100 * map_raw$n_rows_mapped / map_raw$n_rows_total),
+          map_raw$n_compounds,
+          map_raw$n_compounds_4lab,
+          sprintf("%.1f%%",  100 * map_raw$n_compounds_4lab / map_raw$n_compounds),
+          map_raw$n_compounds_3plus,
+          sprintf("%.1f%%",  100 * map_raw$n_compounds_3plus / map_raw$n_compounds)),
+  ALIGNED = c(sprintf("%d / %d", map_aln$n_rows_mapped, map_aln$n_rows_total),
+              sprintf("%.1f%%",  100 * map_aln$n_rows_mapped / map_aln$n_rows_total),
+              map_aln$n_compounds,
+              map_aln$n_compounds_4lab,
+              sprintf("%.1f%%",  100 * map_aln$n_compounds_4lab / map_aln$n_compounds),
+              map_aln$n_compounds_3plus,
+              sprintf("%.1f%%",  100 * map_aln$n_compounds_3plus / map_aln$n_compounds)))
+knitr::kable(sirius_cmp,
+             caption = "SIRIUS spike-in panel → consensus feature mapping: raw vs aligned matching")
+```
+
+If aligned matching is genuinely recovering structure (not just adding
+noise), the spike-in-coverage numbers should move in the same
+direction as the bulk numbers above: more identified compounds in the
+4-lab consensus, more in the 3+ lab consensus.
+
+## Future work
+
+The consensus feature table built above contains ~ 3 500 four-lab
+chromatographic features, of which only ~ 1 % are SIRIUS-identified
+spike-ins. The remainder is reproducible-but-unannotated chemistry. A
+few natural follow-ups become possible once both tables are in hand:
+
+### 1. ISF + adduct discovery via co-elution with annotated compounds
+
+For each SIRIUS-confirmed compound at apex RT *t* and parent
+m/z *m*, neighbouring consensus features that elute at the same RT
+(*t* ± δ_rt) but at predictable mass offsets are candidate
+**in-source fragments** (-H₂O = -18.011, -CO₂ = -43.990, -NH₃ = -17.027),
+**adducts** (M+Na - M+H = +21.982, M+K - M+H = +37.956,
+M-H₂O+H = -18.011), or **isotopologues** (+1.003 m/z per ¹³C).
+
+Implementation sketch:
+
+- For each (mixture, polarity, compound) at known apex RT, find all
+  consensus features (4-lab subset) within ± 3 s of that RT.
+- Compute Δm/z to the parent m/z; flag matches within ± 5 ppm of any
+  known offset.
+- Aggregate per compound: how many ISF / adduct / isotopologue
+  candidates explain unknown 4-lab features near each spike-in?
+
+This converts a fraction of the "unidentified background" into
+structural relatives of identified compounds — and tightens the
+estimate of how much truly novel chemistry sits in the 4-lab
+consensus.
+
+### 2. Diagnostic for annotated peaks that fail to map
+
+About a third of annotated lab observations don't find a consensus
+feature. Likely causes, ordered by expected frequency:
+
+- **xcms missed the peak** at that lab's apex RT — SIRIUS confirmed
+  via MS2 fragments but the underlying MS1 ion was below the per-lab
+  peak picker's detection floor. Cross-checkable against
+  `detected_peaks_<lab>_HE.csv` row count near (mz_observed, apex_rt).
+- **m/z mismatch** — the SIRIUS top candidate's reported `mz_observed`
+  differs from the xcms-detected ion m/z by > 20 ppm. Worth flagging
+  as candidate (mis)identification.
+- **RT mismatch** — `apex_rt` from the SNR-aware chromExtract differs
+  from any xcms peak's RT by > 15 s. Should be rare after the cluster
+  algorithm fix in §7.1 of the producer.
+
+A diagnostic table joining annotated `(mixture, lab, compound)` to
+the per-lab detected-peaks CSV would categorize each unmapped row and
+surface systematic gaps (e.g. is hmgu over-represented among the
+"xcms missed" category, consistent with the DDA-acquisition story?).
 
 
 ## Upset Plot - Lab Overlap

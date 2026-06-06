@@ -62,6 +62,7 @@
 # render of 2_consensus_peaks.qmd. Excluded to keep the repo lighter.
 5_downstream_analysis/object/correspondence_grouped.rds
 5_downstream_analysis/object/correspondence_grouped_aligned.rds
+5_downstream_analysis/object/correspondence_grouped_raw.rds
 
 # ---- Editor / OS / temp ---------------------------------------------------
 *.DS_Store
