@@ -77,6 +77,12 @@ slurm-*.out
 /auth
 .env
 
+# ---- Internal analysis docs (kept local, not for GitHub) -----------------
+5_downstream_analysis/MANUSCRIPT_NOTES.md
+5_downstream_analysis/CANONICAL_SCHEMAS.md
+5_downstream_analysis/object/PRESENTATION_PROMPT.md
+HUMAN_RingTrial_Presentation.zip
+
 # ---- Tool metadata --------------------------------------------------------
 .claude/
 
