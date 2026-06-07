@@ -81,6 +81,7 @@ slurm-*.out
 5_downstream_analysis/MANUSCRIPT_NOTES.md
 5_downstream_analysis/CANONICAL_SCHEMAS.md
 5_downstream_analysis/object/PRESENTATION_PROMPT.md
+5_downstream_analysis/object/all_renders.txt
 HUMAN_RingTrial_Presentation.zip
 
 # ---- Tool metadata --------------------------------------------------------

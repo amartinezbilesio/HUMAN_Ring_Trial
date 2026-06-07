@@ -25,8 +25,8 @@ based on:
    median). Small SD → labs agree on chromatographic position →
    high cross-lab confidence in the identification.
 
-The CANONICAL_SCHEMAS.md contract says this column is overwritten in
-place. Downstream consumers (`9_per_compound_diagnostics.qmd`,
+This column is overwritten in place in `annotation_identity.csv`.
+Downstream consumers (`9_per_compound_diagnostics.qmd`,
 `7_icc_reproducibility.qmd`) can then filter by `confidence_tier %in% c("A",
 "B")` to restrict to confident identifications.
 
@@ -175,9 +175,9 @@ ggplot(combined_axes |> filter(!is.na(cosmic_max), !is.na(rt_sd_aligned)),
 
 ## 5. Overwrite `confidence_tier` in `annotation_identity.csv`
 
-Per the CANONICAL_SCHEMAS.md contract, `confidence_tier` is updated in
-place. The same `(mixture, compound, polarity)` tuple gets the same
-tier across all lab rows.
+`confidence_tier` is updated in place in `annotation_identity.csv`.
+The same `(mixture, compound, polarity)` tuple gets the same tier
+across all lab rows.
 
 ```{r overwrite-confidence}
 identity_df_tiered <- identity_df |>
@@ -192,7 +192,7 @@ identity_df_tiered <- identity_df |>
 stopifnot(all(c("confidence_tier") %in% names(identity_df_tiered)))
 stopifnot(nrow(identity_df_tiered) == nrow(identity_df))
 
-# Re-order columns to match the original schema (CANONICAL_SCHEMAS.md).
+# Re-order columns to match the original identity-table schema.
 identity_df_tiered <- identity_df_tiered |>
   select(mixture, lab, compound, inchikey_2d, polarity,
          best_formula_rank, best_structure_rank, adducts,

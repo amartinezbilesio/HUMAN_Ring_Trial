@@ -191,9 +191,6 @@ because of producer/consumer chains.
     explainer sections on cembio block-MS2 acquisition and hmgu DDA
     open-precursor selection.
 
-See `5_downstream_analysis/CANONICAL_SCHEMAS.md` for the column
-contracts on the shared CSVs and `5_downstream_analysis/MANUSCRIPT_NOTES.md`
-for the current headline numbers + framing decisions.
 
 -----
 

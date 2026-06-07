@@ -67,7 +67,7 @@ object_dir     <- here("5_downstream_analysis", "object")
 # pooled aligned_rt distribution so bins are cross-lab comparable.
 n_rt_bins <- 10L
 
-# Palette for strategy comparison (matches MANUSCRIPT_NOTES / project plan).
+# Palette for strategy comparison.
 # "Aligned" is added as a neutral grey to isolate the contribution of the
 # alignment step alone (no intensity factor) from the normalization on top.
 # "Lab-median" added per the §P3.5.b sanity check — it's 2_global's

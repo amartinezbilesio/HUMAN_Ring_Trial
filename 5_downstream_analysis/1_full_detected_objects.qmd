@@ -178,8 +178,7 @@ The annotated level no longer materialises in this file. The producer
 writes `results_all_ms2/annotation_chrom_metrics.csv` directly; the
 bulk annotated TIC (P4) is `sum(areaUnderTic)` per `(lab, mixture,
 polarity)` over that table, computed inline in
-`8_data_level_progression.qmd`. See
-[`CANONICAL_SCHEMAS.md`](CANONICAL_SCHEMAS.md).
+`8_data_level_progression.qmd`.
 
 # Summary
 
