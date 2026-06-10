@@ -1,6 +1,8 @@
 ---
 title: "Object Creation for Lab Comparison Analysis"
-format: html
+format:
+  html:
+    embed-resources: true
 ---
 
 # Introduction
@@ -20,7 +22,7 @@ library(MsExperiment)
 library(here)
 
 base_path <- here("5_downstream_analysis")
-source(file.path(base_path, "rt_analysis_function.R"))
+source(file.path(base_path, "helpers.R"))
 ```
 
 ```{r cores-cluster}
@@ -175,15 +177,15 @@ if (!file.exists(file.path(base_path, "object/tic_detect.RData"))) {
 
 The annotated level no longer materialises in this file. The producer
 `3_annotation_manual/HE/3_Sirius_curation/sirius_annotation_all_ms2.qmd`
-writes `results_all_ms2/annotation_chrom_metrics.csv` directly; the
+writes `5_downstream_analysis/object/annotation_chrom_metrics.csv` directly; the
 bulk annotated TIC (P4) is `sum(areaUnderTic)` per `(lab, mixture,
 polarity)` over that table, computed inline in
-`8_data_level_progression.qmd`.
+`7_reproducibility_results.qmd`.
 
 # Summary
 
-Public objects (consumed by `8_data_level_progression.qmd`,
-`2_consensus_peaks.qmd`):
+Public objects (consumed by `7_reproducibility_results.qmd`,
+`4_consensus_peaks.qmd`):
 
 - `sp_full.RData` — full spectra, all labs
 - `bpc_full.RData`, `tic_full.RData` — BPC / TIC, full signal
@@ -195,7 +197,7 @@ recover from a partial detect_signal() build):
 `sp_afekta.RData`, `sp_hmgu.RData`, `sp_icl.RData`, `sp_cembio.RData`.
 
 The annotated level lives in the SIRIUS producer's
-`results_all_ms2/annotation_chrom_metrics.csv` — consumers derive bulk
+`5_downstream_analysis/object/annotation_chrom_metrics.csv` — consumers derive bulk
 and per-compound annotated views from that CSV. Stale RData files from
 prior runs (`sp_full_ann`, `bpc_ann`, `tic_ann`, `eics_ann`,
 `tic_full_spectra`, `eics_detected`) can be deleted from `object/`.

@@ -4,41 +4,46 @@ format:
   html:
     fig-width: 12
     fig-height: 8
+    embed-resources: true
 ---
 
 ## Goal
 
 Annotate **all MS2-bearing features** from every lab, without requiring
-cross-lab consensus, and emit the two canonical CSVs defined in
+cross-lab consensus, and emit the two SIRIUS-side canonical CSVs
+defined in
 [`5_downstream_analysis/CANONICAL_SCHEMAS.md`](../../../5_downstream_analysis/CANONICAL_SCHEMAS.md):
 
 - `annotation_identity.csv` — one row per `(mixture, lab, compound,
   polarity)` with best ranks, adducts, COSMIC scores, and a
   `confidence_tier` placeholder (`"unfiltered"`; P5 overwrites).
-- `annotation_chrom_metrics.csv` — one row per `(mixture, lab,
-  polarity, compound, adduct, source)` with `areaUnderTic, xicFwhm,
-  maxIntensity, apex_rt` from the two-pass EIC pipeline.
+- `feat_rts.csv` — one row per identified feature with the MS2-trigger
+  RT, `ionMass`, `adduct`, `cosmic`. The downstream MS1 anchoring +
+  cluster + EIC steps in
+  [`5_downstream_analysis/3_rt_alignment.qmd`](../../../5_downstream_analysis/3_rt_alignment.qmd)
+  §P2.9-§P2.10 consume this and produce `annotation_chrom_metrics.csv`.
 
-This file is a **pure producer**: no cross-lab comparison plots, no
-abundance / RT / presence analysis. Those live in
-`5_downstream_analysis/9_per_compound_diagnostics.qmd`.
+This file is a **pure producer**: no EIC extraction, no peak picking,
+no cross-lab comparison. Those moved to `3_rt_alignment.qmd` so MS1
+anchoring runs before clustering. The producer is now SIRIUS only.
 
 ## Workflow overview
 
 ```{mermaid}
 flowchart LR
-  A[Raw mzML] --> B[MS2 noise filter<br/>5% base peak OR 1000 cnt]
-  B --> C{Lab type}
-  C -->|cembio| D[Group MS2 by<br/>precursor m/z]
-  C -->|DDA<br/>afekta hmgu icl| E[fragmentGroupIndex<br/>MS1 with co-eluting MS2]
-  D --> F[Batch 200 features]
+  A["Raw mzML"] --> B["MS2 noise filter<br/>5 pct base peak OR 1000 cnt"]
+  B --> C{"Lab type"}
+  C -->|cembio| D["rle group MS2 by<br/>precursor m/z<br/>per stepped-CE cycle"]
+  C -->|"DDA: afekta hmgu icl"| E["fragmentGroupIndex<br/>MS1 with co-eluting MS2"]
+  D --> F["Batch 200 features"]
   E --> F
-  F --> G[SIRIUS<br/>formula ID + CSI:FingerID + BIO DB]
-  G --> H[Per batch CSV cache]
-  H --> I[Aggregate across<br/>labs and mixtures]
-  I --> J[Match to<br/>expected compounds]
-  J --> K[MS1 EIC extraction<br/>two-pass]
-  K --> L[Write canonical CSVs<br/>identity + chrom_metrics]
+  F --> G["SIRIUS<br/>formula ID + CSI:FingerID + BIO DB"]
+  G --> H["Per batch CSV cache"]
+  H --> I["Aggregate across<br/>labs and mixtures"]
+  I --> J["Match to<br/>expected compounds"]
+  J --> K["Extract MS2-trigger RT<br/>per feature"]
+  K --> L["Write annotation_identity.csv<br/>and feat_rts.csv"]
+  L -.->|consumed by| M["3_rt_alignment.qmd P2.9<br/>MS1 anchoring + cluster + EIC"]
 ```
 
 ## Setup
@@ -86,17 +91,24 @@ returns the MS1+MS2 spectra ready for SIRIUS, split by polarity.
 files; HMGU acquires MS1+MS2 together in the regular sample file. For
 DDA labs (afekta, hmgu, icl) features are formed by `fragmentGroupIndex()`
 (one MS1 + its triggered MS2). Cembio acquires MS1 and MS2 in temporally
-disjoint blocks within one file with a targeted inclusion list, so
-co-elution-based pairing is impossible. Cembio features are formed by
-**RT-proximity grouping**: two MS2 of the same precursor m/z belong to
-the same feature iff their RT gap is ≤ `cembio_block_gap_s` (default
-30 s). This replaces a legacy `rle(precursorMz)` approach that started
-a new feature every time another inclusion-list precursor fired
-between two MS2 of the same precursor — shattering one chromatographic
-peak into many features (e.g. ritalinic acid in mix 2.9 pos: one
-inclusion-list scan window at m/z 220.1335 fired 11 MS2 at 5-9 s
-intervals interleaved with other precursors → legacy `rle` made
-11 features; proximity grouping correctly makes 1).
+disjoint blocks within one file with a targeted inclusion list (stepped
+CE 10/20/40 eV per precursor), so co-elution-based pairing is impossible.
+Cembio features are formed by **`rle(precursorMz)` grouping**: each
+contiguous run of MS2 at the same precursor m/z (in acquisition order)
+becomes one feature. For stepped-CE acquisition this naturally yields
+one feature per 3-CE cycle (clean per-CE fragmentation, ideal SIRIUS
+input). A previous RT-proximity merge (`cembio_block_gap_s = 30`)
+collapsed all schedule fires of the same precursor into one feature
+with mixed CE levels; this hurt SIRIUS identification (~87% → 73%
+spike-in coverage) because the merged spectrum smears clean per-CE
+ladders. We restore the shattered-per-cycle approach and handle the
+resulting multi-feature-per-peak issue **downstream**: an MS1-anchoring
+step in `5_downstream_analysis/3_rt_alignment.qmd` §P2.9 rewrites every
+lab's feature `rt_sec` (cembio + DDA) to the nearest MS1 chromatographic
+peak at the precursor m/z. For cembio this corrects the ~18 s schedule
+offset; for DDA labs it corrects coincidental SIRIUS hits on in-source
+matrix fragments triggered far from the real peak (see §P2.9.1 case
+study).
 
 **Noise filter.** After loading we apply a per-MS2 intensity filter:
 keep peaks with intensity ≥ 5% of the base peak OR ≥ 1000 counts. This
@@ -156,31 +168,29 @@ extract_all_ms2 <- function(lab_name, study_group, mixture) {
     sp <- filterEmptySpectra(sp)
     if (length(sp) == 0L) return(empty_result(sp))
 
-    # Proximity-aware grouping for cembio's block-MS2 acquisition.
+    # `rle(precursorMz)` grouping for cembio's block-MS2 acquisition.
     #
-    # Legacy `rle(precursorMz)` started a new feature every time another
-    # inclusion-list precursor fired in between two MS2 of the same
-    # precursor, shattering one chromatographic peak into many "features".
-    # E.g. cembio mix 2.9 ritalinic acid pos: one inclusion-list scan
-    # window at m/z 220.1335 produced 11 MS2 firings 5-9 s apart between
-    # MS2 of other precursors → 11 separate group_idx values.
+    # The inclusion-list cycles through precursors with stepped CE
+    # (10/20/40 eV). In acquisition order, this produces runs of 3
+    # consecutive MS2 at the same precursor m/z (one per CE), then the
+    # next precursor, etc. We group each contiguous run as one feature
+    # → one feature per 3-CE cycle, with clean per-CE fragmentation
+    # ideal for SIRIUS.
     #
-    # New rule: sort by (file, precursorMz, RT). Two MS2 of the same
-    # precursor m/z in the same file are in the same group iff their
-    # RT gap is <= `cembio_block_gap_s`. This correctly collapses
-    # interleaved firings of the same precursor while still splitting
-    # truly distinct chromatographic peaks of the same m/z at well-
-    # separated RTs.
-    cembio_block_gap_s <- 30
-
-    key       <- paste0(sp$dataOrigin, "|", sprintf("%.4f", sp$precursorMz))
-    ord       <- order(key, sp$rtime)
-    key_s     <- key[ord]
-    rt_s      <- sp$rtime[ord]
+    # Multiple cycles of the same precursor (the schedule cycles back
+    # every ~15-30 s) produce MULTIPLE features at different RTs along
+    # the gradient. The MS2-trigger RT of each feature is the
+    # schedule-fire time, which is NOT the chromatographic peak RT.
+    # The downstream MS1-anchoring step in 3_rt_alignment.qmd §P2.9
+    # rewrites every lab's rt_sec to the nearest MS1 peak (uniform
+    # across cembio + DDA labs, since all separate-injection labs
+    # have some offset between MS2-trigger RT and MS1 peak RT).
+    ord       <- order(sp$dataOrigin, sp$rtime)
+    key_s     <- paste0(sp$dataOrigin[ord], "|",
+                        sprintf("%.4f", sp$precursorMz[ord]))
 
     starts_new_group <- c(TRUE,
-                          key_s[-1L] != key_s[-length(key_s)] |
-                          (rt_s[-1L] - rt_s[-length(rt_s)]) > cembio_block_gap_s)
+                          key_s[-1L] != key_s[-length(key_s)])
     grp_sorted <- cumsum(starts_new_group)
 
     grp <- integer(length(sp))
@@ -685,7 +695,7 @@ structure_hits_all |>
 RT per feature is extracted from the MS2 spectra and cached per (lab,
 mixture) so raw files are only read once. `hit_rt` joins the RT onto
 expected-compound matches and is the input to §7.1's `eic_params`. No
-cross-lab RT analysis here — that lives in `9_per_compound_diagnostics.qmd`.
+cross-lab RT analysis here — that lives in `8_per_compound_diagnostics.qmd`.
 
 ```{r}
 #| label: extract-rt
@@ -800,7 +810,7 @@ of locking onto the tallest local maximum even when no real peak is
 present (see §7.4 rationale).
 
 The current build also addresses three MS2-hit-level issues identified
-in `9_per_compound_diagnostics.qmd`:
+in `8_per_compound_diagnostics.qmd`:
 
 * **All adducts get their own EIC.** The legacy code did `adduct =
   first(adduct)` per `(mixture, lab, polarity, compound)`, silently
@@ -810,57 +820,63 @@ in `9_per_compound_diagnostics.qmd`:
 * **All features get a vote (no median collapse).** The legacy code
   did `rt_sec = median(rt_sec)` per `(mixture, lab, polarity, compound,
   adduct)`. For cembio's block-MS2 mode, `extract_all_ms2()`'s
-  `rle(precursorMz)` can shatter ONE chromatographic peak into many
-  features when other inclusion-list precursors interleave — e.g.
-  ritalinic acid in cembio mix 2.9 pos has 11 features spanning RT
-  198–258 s. The median (227 s) isn't any of them. We now keep every
-  feature as a candidate so the clustering step decides which RTs
-  belong to one peak.
+  `rle(precursorMz)` deliberately shatters each schedule fire into its
+  own feature (one feature per 3-CE cycle) — clean per-CE input for
+  SIRIUS. The downstream MS1-anchoring step in
+  `5_downstream_analysis/3_rt_alignment.qmd` §P2.9 rewrites every
+  lab's `rt_sec` to the nearest MS1 chromatographic peak; the cluster
+  algorithm in §P2.10 then sees real RTs and picks the correct peak
+  per compound.
 * **Cluster-based consensus RT** combines cross-lab, cross-polarity,
   and cross-feature evidence to pick the "true" RT for every
   `(mixture, compound)`. The algorithm:
 
   1. Pool all candidate RTs from every `(lab, polarity, adduct, feature)`
      tuple that SIRIUS annotated for this compound.
-  2. Greedy 1-D clustering with a 30 s window (configurable via
-     `rt_cluster_window`).
-  3. Score each cluster as `n_labs × 10 + n_polarities × 5 +
-     sum_cosmic`. Highest score wins.
-  4. The winning cluster's mean RT becomes the **consensus RT** used
-     for every lab's chromExtract of that compound, in both polarities.
-  5. Labs whose own MS2 fell in the winning cluster get `source =
-     "own"`; labs whose MS2 fell in a non-winning cluster (DDA hit the
-     wrong peak) get `source = "consensus"` — their wrong RT no longer
-     contaminates the propagation. Labs that never annotated this
-     compound also get `source = "consensus"`.
+  2. **Within-lab Stage 1** (`ms1_anchor.R::find_ms1_candidates`):
+     extract the MS1 EIC at the precursor *m/z* per row, run
+     `find_all_peaks` (SNR ≥ 5), and validate each peak with the same
+     six guards Stage 3 uses (per-lab intensity floor, peak shape ≥ 2
+     scans, real-scan support, signal concentration ≥ 0.45). Keep
+     peaks ≥ 50 % of the surviving max as candidates.
+  3. **Cross-lab Stage 2** (`ms1_anchor.R::anchor_rts`): forward-align
+     every candidate to the consensus axis via the NAPS splines, then
+     apply a ±8 s **similarity rule** — for each candidate RT count
+     distinct `(lab, polarity)` within ±8 s; among the max-support
+     candidates take the median of their aligned RTs as the centre;
+     consensus RT = median of all candidates within ±8 s of that
+     centre. Score the supporting set as
+     `n_labs × 10 + n_polarities × 5 + sum_cosmic`.
+  4. **Cross-compound isobaric resolution** runs in the same Stage 2:
+     per mixture, pairs of compounds with any-adduct *m/z* within
+     20 ppm AND consensus RT within 5 s collapse — keep the
+     higher-scoring compound, drop the loser.
+  5. **Snap + inverse-align** (Stage 2, end): the consensus RT is
+     inverse-aligned to each lab's local time, and each lab's row
+     snaps to the candidate nearest that local target. Labs whose own
+     candidate survived get `source = "own"`; labs that never
+     annotated this compound get `source = "consensus"` (the EIC will
+     be extracted at the inverse-aligned consensus RT in Stage 3).
 
   This naturally fixes the cross-polarity disagreement, the cembio
   feature-shattering, and the wrong-peak DDA-trigger problem in one
   pass.
 
 ```{r}
-#| label: peak-table
+#| label: eic-candidates
 #| message: false
-library(Chromatograms)
-
-sps_all <- Spectra(lab_files$path, backend = MsBackendMzR())
-sps_all <- sps_all[msLevel(sps_all) == 1L]
-canon   <- unique(dataOrigin(sps_all))
-lab_files$dataOrigin <- canon[match(basename(lab_files$path), basename(canon))]
-stopifnot(all(!is.na(lab_files$dataOrigin)))
-
 # --- eic_candidates: one row per FEATURE per (mixture, lab, polarity,
 # compound, adduct). No collapse across features within (lab, polarity,
-# compound, adduct). This is the raw candidate pool that cluster-based
-# consensus operates on.
+# compound, adduct). This is the raw candidate pool that the
+# cluster-based consensus algorithm in 3_rt_alignment.qmd operates on.
 #
 # Note: a single (lab, polarity, compound, adduct) tuple can have many
-# feature rows here — e.g. cembio mix 2.9 ritalinic acid pos [M+H]+
-# has 11 features at RTs 198–258 s because the block-MS2 `rle(...)`
-# grouping splits one chromatographic peak into many pieces when other
-# precursors interleave. Keeping all of them lets cross-lab + cross-
-# polarity clustering decide whether they're 11 separate peaks or one
-# peak that was shattered.
+# feature rows here — e.g. cembio mix 2_9 ritalinic acid pos [M+H]+
+# has multiple features (one per inclusion-list MS2 trigger) before the
+# Stage 2 similarity rule snaps them to one consensus RT. Keeping all
+# of them lets
+# cross-lab + cross-polarity clustering decide whether they're separate
+# peaks or one peak that was shattered by the inclusion-list schedule.
 eic_candidates <- hit_rt |>
   select(mixture, lab, polarity, xcms_fts, compound, inchikey_2d, rt_sec) |>
   distinct() |>
@@ -871,609 +887,39 @@ eic_candidates <- hit_rt |>
             by = c("mixture", "lab", "xcms_fts" = "externalFeatureId")) |>
   filter(!is.na(ionMass), !is.na(rt_sec)) |>
   rename(cosmic = confidenceExactMatch)
-
-# --- RT clustering per (mixture, compound)
-#
-# For each (mixture, compound), pool ALL candidate RTs from every
-# (lab, polarity, adduct, feature) tuple. Cluster them with a greedy
-# 1-D agglomeration: sort RTs, walk the sorted list, start a new
-# cluster whenever the gap between consecutive RTs exceeds
-# `rt_cluster_window`. This naturally collapses cembio's 11
-# ritalinic-acid pos features (5–6 s apart) into one cluster while
-# separating the wrong-peak co-eluting contaminants (≥ 30 s away).
-rt_cluster_window <- 30   # s
-
-cluster_rts_greedy <- function(rt) {
-  if (length(rt) == 0L) return(integer(0))
-  ord <- order(rt); s <- rt[ord]
-  out <- integer(length(rt))
-  cl <- 1L; out[ord[1L]] <- cl
-  if (length(s) >= 2L) for (i in 2:length(s)) {
-    if (s[i] - s[i - 1L] > rt_cluster_window) cl <- cl + 1L
-    out[ord[i]] <- cl
-  }
-  out
-}
-
-eic_candidates <- eic_candidates |>
-  group_by(mixture, compound) |>
-  mutate(rt_cluster = cluster_rts_greedy(rt_sec)) |>
-  ungroup()
-
-# --- Score clusters and pick the winning RT per (mixture, compound)
-#
-# Score weights:
-#   n_labs       × 10   (cross-lab agreement is the strongest signal)
-#   n_polarities × 5    (cross-polarity confirmation is good evidence)
-#   sum_cosmic         (COSMIC tiebreaker; NA → 0)
-#
-# Highest-score cluster per (mixture, compound) is the "true" RT.
-cluster_scores <- eic_candidates |>
-  group_by(mixture, compound, rt_cluster) |>
-  summarise(n_labs       = n_distinct(lab),
-            n_polarities = n_distinct(polarity),
-            n_features   = n(),
-            sum_cosmic   = sum(cosmic, na.rm = TRUE),
-            # median is more robust than mean against asymmetric feature
-            # distributions (e.g. cembio's shattering produces 11 evenly-
-            # spaced features but they need not be symmetric around the
-            # true apex)
-            rt_center    = median(rt_sec),
-            rt_min       = min(rt_sec),
-            rt_max       = max(rt_sec),
-            .groups      = "drop") |>
-  mutate(score = n_labs * 10 + n_polarities * 5 + sum_cosmic)
-
-winning_cluster <- cluster_scores |>
-  group_by(mixture, compound) |>
-  slice_max(score, n = 1, with_ties = FALSE) |>
-  ungroup() |>
-  select(mixture, compound,
-         winning_cluster   = rt_cluster,
-         consensus_rt      = rt_center,
-         consensus_n_labs  = n_labs,
-         consensus_n_pol   = n_polarities,
-         consensus_features= n_features,
-         consensus_score   = score)
-
-# --- Single-annotation diagnostic
-#
-# How many (mixture, compound) had only ONE cluster (clean — single
-# annotation = single RT, no cross-feature splits, no cross-polarity
-# disagreement)? How many had multiple clusters?
-n_clusters_per_cpd <- cluster_scores |>
-  count(mixture, compound, name = "n_clusters")
-
-cluster_summary <- n_clusters_per_cpd |>
-  count(n_clusters, name = "n_compounds")
-
-cat("Cluster-based consensus RT — annotation evaluation\n")
-cat("===================================================\n")
-cat("Compounds with N RT clusters (mixture × compound):\n")
-print(as.data.frame(cluster_summary))
-
-cat("\nWinning-cluster cross-lab / cross-polarity support:\n")
-winning_cluster |>
-  count(consensus_n_labs, consensus_n_pol) |>
-  arrange(desc(consensus_n_labs), desc(consensus_n_pol)) |>
-  as.data.frame() |> print()
-
-cat("\nMulti-cluster compounds: how many of the candidate features fell into\n",
-    "the non-winning ('alternate') cluster? These are the rows whose MS2\n",
-    "trigger landed at the wrong chromatographic peak.\n", sep = "")
-alt_features <- eic_candidates |>
-  inner_join(winning_cluster |>
-               select(mixture, compound, winning_cluster),
-             by = c("mixture", "compound")) |>
-  mutate(in_winning = rt_cluster == winning_cluster) |>
-  group_by(mixture, compound) |>
-  summarise(n_winning = sum(in_winning),
-            n_alt     = sum(!in_winning),
-            .groups   = "drop")
-cat(sprintf("  Compounds with any alternate-cluster features: %d / %d (%.1f%%)\n",
-            sum(alt_features$n_alt > 0L), nrow(alt_features),
-            100 * mean(alt_features$n_alt > 0L)))
-cat(sprintf("  Total alternate-cluster features: %d\n",
-            sum(alt_features$n_alt)))
-
-# --- Build eic_params: per (mixture, lab, polarity, compound, adduct)
-# Each row uses the lab's OWN rt_sec if any of its features for this
-# (lab, polarity, adduct) fell into the winning cluster; otherwise the
-# row is dropped here (it gets a "consensus" extraction later).
-#
-# Adducts are first-class — every (lab, polarity, compound, adduct)
-# tuple where the lab has at least one feature in the winning cluster
-# gets its own own-row.
-eic_params <- eic_candidates |>
-  inner_join(winning_cluster |> select(mixture, compound, winning_cluster),
-             by = c("mixture", "compound")) |>
-  filter(rt_cluster == winning_cluster) |>
-  group_by(mixture, lab, polarity, compound, adduct) |>
-  summarise(ionMass    = median(ionMass),
-            # median over the lab's features in the winning cluster
-            rt_sec     = median(rt_sec),
-            # rt_spread tells §7.5 how wide to make the picker's apex
-            # search window. 0 for DDA labs (one MS2 per feature); for
-            # cembio the spread can be 30–60 s when the inclusion-list
-            # scan window spans multiple cycles.
-            rt_spread  = max(rt_sec) - min(rt_sec),
-            n_features = n(),
-            .groups    = "drop")
-
-# --- eic_consensus: the cluster's RT, broadcast to every (mixture,
-# polarity, compound, adduct) combination that any lab annotated for
-# this compound. So a lab that didn't annotate this compound in this
-# polarity still gets a `consensus` extraction at the winning RT.
-adduct_inventory <- eic_candidates |>
-  distinct(mixture, polarity, compound, adduct, ionMass) |>
-  group_by(mixture, polarity, compound, adduct) |>
-  summarise(ionMass = median(ionMass), .groups = "drop")
-
-eic_consensus <- adduct_inventory |>
-  inner_join(winning_cluster |> select(mixture, compound, consensus_rt),
-             by = c("mixture", "compound")) |>
-  rename(rt_sec = consensus_rt)
-
-ppm_tol  <- 20
-pad_wide <- 60   # symmetric ±60 s — see §7.1 rationale
-
-peak_table <- tidyr::expand_grid(
-    lab             = labs,
-    mix_pol_cpd_add = eic_consensus |>
-                        distinct(mixture, polarity, compound, adduct)) |>
-  tidyr::unnest(mix_pol_cpd_add) |>
-  left_join(eic_params,    by = c("lab", "mixture", "polarity",
-                                  "compound", "adduct")) |>
-  left_join(eic_consensus, by = c("mixture", "polarity",
-                                  "compound", "adduct"),
-            suffix = c("", "_cons")) |>
-  mutate(source = if_else(is.na(ionMass), "consensus", "own"),
-         rt     = coalesce(rt_sec,  rt_sec_cons),
-         mz     = coalesce(ionMass, ionMass_cons)) |>
-  filter(!is.na(rt), !is.na(mz)) |>
-  left_join(lab_files |> select(lab, mixture, polarity, dataOrigin),
-            by = c("lab", "mixture", "polarity")) |>
-  filter(!is.na(dataOrigin)) |>
-  transmute(mzMin     = mz * (1 - ppm_tol / 1e6),
-            mzMax     = mz * (1 + ppm_tol / 1e6),
-            rtMin     = pmax(0, rt - pad_wide),
-            rtMax     = rt + pad_wide,
-            msLevel   = 1L,
-            dataOrigin, lab, mixture, polarity, compound, adduct, source,
-            mz_center = mz, rt_center = rt)
-
-peak_table |>
-  count(mixture, lab, source) |>
-  tidyr::pivot_wider(names_from = source, values_from = n, values_fill = 0)
 ```
 
-### 7.2 One `chromExtract()` call
+### 7.2 Write feature-RT table for downstream consumption
+
+The per-feature MS2-trigger RTs in `eic_candidates` are the input to
+the alignment-based cluster algorithm in `5_downstream_analysis/3_rt_alignment.qmd`
+(`§P2.9` onwards). From there the EIC extraction + SNR-aware picker
+writes `5_downstream_analysis/object/annotation_chrom_metrics.csv`.
+
+This producer no longer does EIC extraction — the SIRIUS run + the
+expected-compound matching above are its only responsibilities. All
+downstream chromatography work — alignment, cluster RT, EIC, picker,
+metrics — lives in `3_rt_alignment.qmd`.
 
 ```{r}
-#| label: chromextract
-#| message: false
-chr_base <- Chromatograms(sps_all)
-chr_all  <- chromExtract(chr_base, peak.table = peak_table,
-                         by = c("msLevel", "dataOrigin"))
-chr_all
-```
+#| label: write-feat-rts
+feat_rts <- eic_candidates |>
+  select(mixture, lab, polarity, xcms_fts, compound, inchikey_2d,
+         rt_sec, ionMass, adduct, cosmic)
 
-### 7.3 EICs centred at annotation RT - sanity-check
-
-Diagnostic plot for **one display mixture only** (`display_mixture`,
-default `"1.1"`) to keep the panel count manageable. Sections 7.4–7.6
-operate on `chr_all` across all mixtures; cross-mixture comparisons live
-in `9_per_compound_diagnostics.qmd`.
-
-```{r}
-#| label: plot-eics
-#| fig-height: 14
-#| fig-cap: "Pass-1 MS1 EICs (tight ±20 s) for the display mixture. Solid = lab's own annotation; dashed = consensus borrow."
-display_mixture <- "1.1"
-disp_idx <- which(chromData(chr_all)$mixture == display_mixture)
-
-eic_df <- bind_rows(lapply(disp_idx, function(i) {
-  cd <- chromData(chr_all)[i, , drop = FALSE]
-  pd <- peaksData(chr_all[i])[[1L]]
-  if (!nrow(pd)) return(NULL)
-  tibble(rt_sec = pd[, "rtime"], intensity = pd[, "intensity"],
-         lab = cd$lab, mixture = cd$mixture, polarity = cd$polarity,
-         compound = cd$compound, source = cd$source, rt_center = cd$rt_center)
-})) |>
-  mutate(rt_rel = rt_sec - rt_center)
-
-eic_df_disp <- eic_df |>
-  filter(abs(rt_rel) <= 100) |>
-  group_by(lab, polarity, source, compound) |>
-  filter(n() >= 2L) |>
-  ungroup()
-
-center_dots <- eic_df_disp |>
-  filter(source == "own") |>
-  group_by(lab, compound, polarity) |>
-  slice_min(abs(rt_rel), n = 1, with_ties = FALSE) |>
-  ungroup()
-
-ggplot(eic_df_disp,
-       aes(x = rt_rel, y = intensity, colour = lab, linetype = source,
-           group = interaction(lab, polarity, source))) +
-  geom_line(linewidth = 0.5) +
-  geom_vline(xintercept = 0, linetype = "dotted", colour = "grey50") +
-  geom_point(data = center_dots,
-             aes(x = rt_rel, y = intensity, colour = lab),
-             shape = 21, size = 2, fill = "white", stroke = 1,
-             inherit.aes = FALSE) +
-  facet_wrap(~ compound, scales = "free_y", ncol = 4) +
-  scale_linetype_manual(values = c(own = "solid", consensus = "dashed")) +
-  labs(x = "RT - annotation RT (s)", y = "Intensity",
-       colour = NULL, linetype = NULL,
-       title = sprintf("EICs centred at annotation RT - mixture %s (%d ppm)",
-                       display_mixture, ppm_tol)) +
-  theme_bw() +
-  theme(strip.text = element_text(size = 7), legend.position = "bottom")
-```
-
-### 7.4 SNR-aware peak picking — rationale
-
-The previous pipeline used `Chromatograms::peakBoundary()` to find the
-tallest local maximum in each EIC, then re-extracted on its boundary.
-For real peaks this works fine, but it has a critical failure mode:
-**when the compound is below detection at a given lab, the EIC is
-mostly noise, and `peakBoundary()` happily returns the tallest noise
-spike as the apex**. The two-pass widening retry doesn't help — it just
-gives the noise more room to find a louder spike.
-
-We saw this in raw-file diagnostics: hmgu's NAPS standards are the
-strongest of any lab (geo-mean 3.5 × 10⁵ counts in pos), but ~70 % of
-its annotated spike-in rows reported maxIntensity in the 1-100 count
-range with apex_rt scattered across the full chromatogram. Those
-"measurements" were noise — the chromatographic peak simply wasn't
-there at the dilution used. Sciex ESI source ionisation efficiency
-appears compound-specific; a panel tuned for Agilent Jet Stream falls
-under hmgu's per-compound floor for a chunk of the panel.
-
-The new picker applies three **independent** rejection guards. A row
-must pass all three to be reported as `detection = "detected"`:
-
-1. **SNR.** apex_int − baseline must exceed `snr_threshold × noise`,
-   where baseline = median of intensities at |rt − apex| > 25 s and
-   noise = max(MAD, IQR/2, 1) of the **low-intensity portion of the
-   tail only** (intensities below the tail's 50 th percentile). The
-   bottom-half restriction matters because at the 20 ppm m/z window
-   used in §7.1, EICs frequently contain other chromatographic peaks
-   in the tail region (isomers, late-eluting contaminants at the same
-   m/z). Including those in the noise estimate makes "noise" the size
-   of a peak, not the size of background, and crushes the SNR of
-   real apex peaks (e.g. cembio L-phenylalanine got noise = 894 k,
-   apex = 4.6 M → SNR ≈ 0; bottom-half tail gives noise ≈ 75 k,
-   SNR ≈ 60). The IQR floor matters for sparse-positive data: MAD
-   goes to 0 when the tail is mostly exact zeros, IQR catches the
-   spread of low-count noise spikes that MAD misses.
-
-2. **Shape.** The apex's immediate neighbours (apex index ±2, raw, not
-   smoothed) must also be elevated. We require ≥ 2 of those 5 scans
-   to be ≥ 30 % of apex_int. A single-scan spike with zero-neighbours
-   = noise. A real chromatographic peak has a rising and falling
-   shoulder spanning at least the next-scan ↔ apex pair.
-
-3. **Absolute floor (only when noise estimate is at its hard floor).**
-   If both MAD and IQR are exactly 0, the tail region had no useful
-   noise context (a "flat-zero EIC, except for one tiny spike at the
-   prior"). We can't trust SNR there; require apex_int ≥ 30 counts
-   absolute. This kills the residual hmgu noise grabs that the SNR
-   guard alone passes because (5.7 − 0) / (floor-noise=1) = 5.7.
-
-Each row also gets a **source-aware RT prior**:
-
-- `prior_kind = "own"`: the lab annotated this compound via SIRIUS
-  *and* its COSMIC ≥ 0.1 *and* its own apex_rt agrees with the
-  cross-lab consensus within 30 s. Search ±8 s around the lab's own
-  RT (tight — SIRIUS already told us where the peak is).
-- `prior_kind = "consensus"`: everything else. Search ±15 s around the
-  cross-lab median of "own" RTs (wider — accommodates inter-lab
-  chromatographic drift). This includes "own" rows the demotion
-  guards disagreed with (missing COSMIC, or RT > 30 s off consensus —
-  a clue the SIRIUS hit was spurious).
-
-Returns include the metrics (`maxIntensity`, `areaUnderTic`,
-`xicFwhm`), the apex_rt, and the diagnostic columns (`snr`,
-`baseline`, `noise`, `n_scans_in_shape`, `prior_kind`, `detection`).
-
-### 7.5 Per-row RT priors
-
-```{r}
-#| label: per-row-priors
-## Cross-lab + cross-polarity + cross-feature consensus RT for each
-## (mixture, compound). Source = §7.1's `winning_cluster`, the highest-
-## scoring RT cluster from the greedy clustering. Broadcast to (mixture,
-## polarity, compound) so the existing per-row prior logic below stays
-## one-step.
-rt_consensus_per_cpd <- winning_cluster |>
-  select(mixture, compound, rt_consensus = consensus_rt) |>
-  tidyr::expand_grid(polarity = c("pos", "neg"))
-
-## COSMIC scores per row (used by the demotion guard).
-cosmic_lookup <- annotation_identity_seed <-
-  ## Pull straight from the candidate-best id_summary (built in §8.1).
-  ## Materialise it here on demand to avoid forward-reference fragility.
-  all_summaries |>
-    filter(!is.na(inchiKey)) |>
-    mutate(inchikey_2d = substr(inchiKey, 1, 14)) |>
-    group_by(mixture, lab, inchikey_2d, polarity) |>
-    slice_max(csiScore, n = 1, with_ties = FALSE) |>
-    ungroup() |>
-    select(mixture, lab, inchikey_2d, polarity,
-           cosmic = confidenceExactMatch)
-
-cosmic_per_row <- structure_hits_all |>
-  select(mixture, lab, compound, inchikey_2d, polarity) |>
-  left_join(cosmic_lookup,
-            by = c("mixture","lab","inchikey_2d","polarity")) |>
-  group_by(mixture, lab, compound, polarity) |>
-  summarise(cosmic = suppressWarnings(max(cosmic, na.rm = TRUE)),
-            .groups = "drop") |>
-  mutate(cosmic = ifelse(is.infinite(cosmic), NA_real_, cosmic))
-
-## Build the per-row RT prior. eic_params has the lab's own median RT
-## within the winning cluster and the rt_spread (max - min) of the
-## lab's features in that cluster.
-##
-## apex_pad logic:
-##   "own" rows  : pad must cover the lab's feature spread plus a 5 s
-##                 safety margin. For DDA labs (1 MS2 per feature) the
-##                 spread is 0, so pad = 8 s (the tight DDA default).
-##                 For cembio's block-MS2 the spread can be 30–60 s,
-##                 so pad grows to ~35 s; the SNR picker still
-##                 rejects noise spikes within this wider window.
-##   "consensus" : pad = 15 s, the default for lab×polarity tuples
-##                 where the lab itself did not annotate this compound.
-prior_per_row <- chromData(chr_all) |>
-  as.data.frame() |>
-  select(mixture, lab, polarity, compound, adduct, source) |>
-  # eic_params keys on adduct too (one row per (mixture, lab, polarity,
-  # compound, adduct) since the all-adducts refactor in §7.1). The join
-  # MUST include adduct or one chrom_metrics row gets multiple matches
-  # and the row count blows up (apply-picker's
-  # `stopifnot(nrow(cd_all) == nrow(prior_per_row))` then fails).
-  left_join(eic_params |>
-              select(mixture, lab, polarity, compound, adduct,
-                     rt_own = rt_sec, rt_spread_own = rt_spread),
-            by = c("mixture","lab","polarity","compound","adduct")) |>
-  left_join(rt_consensus_per_cpd,
-            by = c("mixture","polarity","compound")) |>
-  left_join(cosmic_per_row,
-            by = c("mixture","lab","polarity","compound")) |>
-  mutate(prior_kind = case_when(
-           source == "own" &
-             !is.na(rt_own) & !is.na(cosmic) & cosmic >= 0.1 &
-             !is.na(rt_consensus) & abs(rt_own - rt_consensus) <= 30 ~ "own",
-           TRUE ~ "consensus"),
-         rt_prior  = ifelse(prior_kind == "own", rt_own, rt_consensus),
-         apex_pad  = ifelse(prior_kind == "own",
-                            pmax(8, replace_na(rt_spread_own, 0) / 2 + 5),
-                            15))
-
-cat("Prior kinds (after own→consensus demotions):\n")
-prior_per_row |> count(source, prior_kind) |>
-  tidyr::pivot_wider(names_from = prior_kind, values_from = n,
-                     values_fill = 0L) |>
-  knitr::kable()
-```
-
-### 7.6 Picker function and per-row extraction
-
-```{r}
-#| label: snr-picker
-extract_one <- function(rt, intensity, rt_prior,
-                        apex_search_pad = 10,
-                        tail_pad        = 25,
-                        snr_threshold   = 5,
-                        abs_min_counts  = 30) {
-  ok <- !is.na(intensity)
-  rt <- rt[ok]; intensity <- intensity[ok]
-  if (length(rt) < 5L)
-    return(list(apex_rt = NA_real_, maxIntensity = NA_real_,
-                areaUnderTic = NA_real_, xicFwhm = NA_real_,
-                snr = NA_real_, baseline = NA_real_, noise = NA_real_,
-                n_scans_in_shape = 0L, detection = "no_data"))
-
-  ## centred 3-point moving average (smoothed trace for valley/noise only)
-  sm <- as.numeric(stats::filter(intensity, rep(1, 3) / 3, sides = 2))
-  sm[is.na(sm)] <- intensity[is.na(sm)]
-
-  ## (1) apex on RAW intensity inside prior ± apex_pad
-  search_idx <- which(rt >= rt_prior - apex_search_pad &
-                      rt <= rt_prior + apex_search_pad)
-  if (!length(search_idx))
-    return(list(apex_rt = NA_real_, maxIntensity = NA_real_,
-                areaUnderTic = NA_real_, xicFwhm = NA_real_,
-                snr = NA_real_, baseline = NA_real_, noise = NA_real_,
-                n_scans_in_shape = 0L, detection = "no_data"))
-  apex_local <- search_idx[which.max(intensity[search_idx])]
-  apex_rt    <- rt[apex_local]
-  apex_int   <- intensity[apex_local]
-
-  ## (2) noise + baseline from tail (|rt - apex| > tail_pad)
-  tail_idx <- which(abs(rt - apex_rt) > tail_pad)
-  if (length(tail_idx) < 10L) {
-    n <- length(rt); tail_idx <- c(seq_len(round(0.25 * n)),
-                                    (n - round(0.25 * n) + 1L):n)
-  }
-  tail_int <- intensity[tail_idx]
-  ## Use ONLY the low-intensity portion of the tail (bottom 50 %) for
-  ## noise/baseline. Otherwise other chromatographic peaks at the same
-  ## m/z window (isomers, late-eluting contaminants) get treated as
-  ## "noise" and crush the SNR of real peaks. See §7.4 guard #1.
-  tail_low <- tail_int[tail_int <= quantile(tail_int, 0.5, na.rm = TRUE)]
-  baseline <- median(tail_low, na.rm = TRUE)
-  noise_mad <- mad(tail_low, na.rm = TRUE)
-  q15 <- as.numeric(quantile(tail_low, 0.15, na.rm = TRUE))
-  q85 <- as.numeric(quantile(tail_low, 0.85, na.rm = TRUE))
-  raw_noise <- max(noise_mad, (q85 - q15) / 2, na.rm = TRUE)
-  noise_at_floor <- !is.finite(raw_noise) || raw_noise <= 0
-  noise <- max(raw_noise, 1, na.rm = TRUE)
-  snr   <- (apex_int - baseline) / noise
-
-  ## (3) valleys for peak boundaries on the smoothed trace
-  v_idx <- tryCatch(MsCoreUtils::valleys(sm), error = function(e) integer(0))
-  if (length(v_idx) >= 2L) {
-    left  <- suppressWarnings(max(v_idx[v_idx <= apex_local], na.rm = TRUE))
-    right <- suppressWarnings(min(v_idx[v_idx >= apex_local], na.rm = TRUE))
-    if (!is.finite(left))  left  <- 1L
-    if (!is.finite(right)) right <- length(rt)
-  } else {
-    left <- apex_local; right <- apex_local
-    while (left  > 1L         && sm[left  - 1L] > baseline + noise) left  <- left  - 1L
-    while (right < length(rt) && sm[right + 1L] > baseline + noise) right <- right + 1L
-  }
-  pk_rt <- rt[left:right]; pk_int <- intensity[left:right]
-  area  <- if (length(pk_rt) >= 2L)
-             sum(diff(pk_rt) * (pk_int[-1] + pk_int[-length(pk_int)]) / 2)
-           else NA_real_
-  hm    <- (apex_int - baseline) / 2 + baseline
-  above <- which(pk_int >= hm)
-  fwhm  <- if (length(above) >= 2L) diff(range(pk_rt[above])) else NA_real_
-
-  ## (4) shape sanity: at least 2 of 5 scans around apex >= 30% of apex
-  nb_lo  <- max(1L, apex_local - 2L); nb_hi <- min(length(rt), apex_local + 2L)
-  n_shape <- sum(intensity[nb_lo:nb_hi] >= 0.3 * apex_int, na.rm = TRUE)
-
-  ## (5) three-guard detection classification
-  detection <- if (apex_int <= baseline) "below_detection"
-               else if (snr < snr_threshold) "below_detection"
-               else if (n_shape < 2L) "below_detection"
-               else if (noise_at_floor && apex_int < abs_min_counts) "below_detection"
-               else "detected"
-
-  list(apex_rt = apex_rt,
-       maxIntensity = if (detection == "detected") apex_int else NA_real_,
-       areaUnderTic = if (detection == "detected") area     else NA_real_,
-       xicFwhm     = if (detection == "detected") fwhm     else NA_real_,
-       snr = snr, baseline = baseline, noise = noise,
-       n_scans_in_shape = n_shape, detection = detection)
-}
-```
-
-```{r}
-#| label: apply-picker
-#| message: false
-cd_all <- as.data.frame(chromData(chr_all))
-stopifnot(nrow(cd_all) == nrow(prior_per_row))
-
-metrics_rows <- vector("list", nrow(cd_all))
-pkData <- peaksData(chr_all)
-for (i in seq_len(nrow(cd_all))) {
-  pd <- pkData[[i]]
-  prior_i <- prior_per_row[i, ]
-  if (is.null(pd) || !nrow(pd) || is.na(prior_i$rt_prior)) {
-    metrics_rows[[i]] <- list(apex_rt = NA_real_, maxIntensity = NA_real_,
-                              areaUnderTic = NA_real_, xicFwhm = NA_real_,
-                              snr = NA_real_, baseline = NA_real_,
-                              noise = NA_real_, n_scans_in_shape = 0L,
-                              detection = "no_data")
-    next
-  }
-  metrics_rows[[i]] <- extract_one(pd[, "rtime"], pd[, "intensity"],
-                                   rt_prior        = prior_i$rt_prior,
-                                   apex_search_pad = prior_i$apex_pad)
-}
-
-metrics_df <- bind_cols(
-  cd_all |> select(mixture, lab, polarity, compound, adduct, source),
-  prior_per_row |> select(prior_kind),
-  bind_rows(lapply(metrics_rows, as.data.frame))
-)
-
-cat("Picker done — ", nrow(metrics_df), " rows\n",
-    "  detected:        ", sum(metrics_df$detection == "detected"), "\n",
-    "  below_detection: ", sum(metrics_df$detection == "below_detection"), "\n",
-    "  no_data:         ", sum(metrics_df$detection == "no_data"), "\n",
-    sep = "")
-```
-
-### 7.7 Detection summary by lab × polarity
-
-The detection fraction per lab tells us **per-lab sensitivity** for the
-annotated set — directly comparable across instruments.
-
-```{r}
-#| label: detection-summary
-metrics_df |>
-  count(lab, polarity, detection) |>
-  tidyr::pivot_wider(names_from = detection, values_from = n,
-                     values_fill = 0L) |>
-  mutate(total = detected + below_detection + no_data,
-         pct_detected = round(100 * detected / total, 1)) |>
-  knitr::kable(caption = "Detection counts by lab × polarity. pct_detected is the per-lab sensitivity for the annotated spike-in panel.")
-```
-
-```{r}
-#| label: detection-by-prior-kind
-metrics_df |>
-  count(prior_kind, source, detection) |>
-  tidyr::pivot_wider(names_from = detection, values_from = n,
-                     values_fill = 0L) |>
-  knitr::kable(caption = "Detection × (prior_kind, source). 'own' rows that survive the demotion guards should detect near 100 %; 'consensus' detection rate is the cross-lab presence statistic.")
-```
-
-```{r}
-#| label: snr-distribution
-#| fig-height: 4
-#| fig-cap: "SNR distribution for detected rows, by lab × polarity. log10 scale."
-metrics_df |>
-  filter(detection == "detected", is.finite(snr), snr > 0) |>
-  ggplot(aes(x = lab, y = snr, fill = lab)) +
-  geom_violin(scale = "width", linewidth = 0.3, alpha = 0.7) +
-  geom_boxplot(width = 0.15, outlier.size = 0.5, alpha = 0.5) +
-  scale_y_log10() +
-  facet_wrap(~ polarity, nrow = 1) +
-  scale_fill_manual(values = c(afekta = "#E64B35", cembio = "#4DBBD5",
-                                hmgu = "#00A087", icl = "#3C5488")) +
-  labs(x = NULL, y = "SNR (log10)") +
-  theme_bw() + theme(legend.position = "none")
-```
-
-### 7.8 Sample below-detection EICs — sanity check
-
-Inspect 16 EICs that the picker flagged below_detection. We expect to
-see flat-zero traces with at most a few low-count spikes. If we see
-visible peaks, the guards are too strict.
-
-```{r}
-#| label: below-detection-eics
-#| fig-height: 9
-#| fig-cap: "EICs the new picker flagged below_detection. Expected: flat noise with occasional sub-30-count spikes. A visible peak here = the guards are too tight."
-bd_idx <- which(metrics_df$detection == "below_detection")
-n_show <- min(16L, length(bd_idx))
-if (n_show > 0L) {
-  show_idx <- sample(bd_idx, n_show)
-  bd_eic <- bind_rows(lapply(show_idx, function(j) {
-    pd <- pkData[[j]]; if (is.null(pd) || !nrow(pd)) return(NULL)
-    md <- metrics_df[j, ]
-    tibble(rt = pd[, "rtime"], intensity = pd[, "intensity"],
-           panel = sprintf("mix %s | %s | %s [%s/%s]",
-                           md$mixture, md$lab, substr(md$compound, 1, 18),
-                           md$polarity, md$source))
-  }))
-  ggplot(bd_eic, aes(x = rt, y = intensity)) +
-    geom_line(colour = "#ff7f0e", linewidth = 0.4) +
-    geom_point(size = 0.6, alpha = 0.5) +
-    facet_wrap(~ panel, scales = "free", ncol = 4) +
-    labs(x = "RT (s)", y = "Intensity") +
-    theme_bw() +
-    theme(strip.text = element_text(size = 6.5),
-          axis.text  = element_text(size = 6))
-} else {
-  message("Nothing flagged below_detection — that's suspicious; inspect manually.")
-}
+write.csv(feat_rts,
+          here::here("5_downstream_analysis", "object", "feat_rts.csv"),
+          row.names = FALSE)
+cat(sprintf("feat_rts.csv -- %d rows (per-feature MS2-trigger RTs)\n",
+            nrow(feat_rts)))
 ```
 
 ## 8. Write canonical CSVs
 
-Two CSVs land at `output_dir` per the contract in
-[`CANONICAL_SCHEMAS.md`](../../../5_downstream_analysis/CANONICAL_SCHEMAS.md).
-Downstream code (`5_downstream_analysis/9_per_compound_diagnostics.qmd`,
-`8_data_level_progression.qmd`) consumes only these.
+This producer writes the **identity table** to
+`5_downstream_analysis/object/annotation_identity.csv`. The
+chromatography metrics (`annotation_chrom_metrics.csv`) are produced
+downstream in `3_rt_alignment.qmd`.
 
 ### 8.1 `annotation_identity.csv`
 
@@ -1484,7 +930,7 @@ candidate per `(mixture, lab, inchikey_2d, polarity)` — identity is
 one-per-compound, so we collapse the candidate dimension first; the
 resulting `ionMass` is the precursor m/z of that winning candidate and
 is exposed downstream as `mz_observed` (basis for the inter-lab m/z
-deviation analysis in `9_per_compound_diagnostics.qmd`).
+deviation analysis in `8_per_compound_diagnostics.qmd`).
 
 ```{r}
 #| label: build-annotation-identity
@@ -1509,7 +955,8 @@ annotation_identity <- structure_hits_all |>
          confidence_tier)
 
 write.csv(annotation_identity,
-          file.path(output_dir, "annotation_identity.csv"),
+          here::here("5_downstream_analysis", "object",
+                     "annotation_identity.csv"),
           row.names = FALSE)
 cat("annotation_identity.csv  -- ", nrow(annotation_identity), " rows\n",
     "  with COSMIC scores: ",
@@ -1518,35 +965,3 @@ cat("annotation_identity.csv  -- ", nrow(annotation_identity), " rows\n",
     sum(!is.na(annotation_identity$mz_observed)), "\n", sep = "")
 ```
 
-### 8.2 `annotation_chrom_metrics.csv`
-
-`metrics_df` from §7.6 already carries the metrics + diagnostics for
-every row. The canonical schema (see `CANONICAL_SCHEMAS.md`) keeps the
-original metric columns and adds the SNR-aware diagnostic fields. Rows
-classified `below_detection` carry **NA** for `maxIntensity`,
-`areaUnderTic`, `xicFwhm` — so the historical consumer filter
-`!is.na(maxIntensity)` still works for "real signal only" and the
-detection flag is available for explicit downstream gating.
-
-```{r}
-#| label: build-annotation-chrom-metrics
-annotation_chrom_metrics <- metrics_df |>
-  select(mixture, lab, polarity, compound, adduct, source,
-         areaUnderTic, xicFwhm, maxIntensity, apex_rt,
-         snr, baseline, noise, n_scans_in_shape,
-         prior_kind, detection)
-
-write.csv(annotation_chrom_metrics,
-          file.path(output_dir, "annotation_chrom_metrics.csv"),
-          row.names = FALSE)
-
-cat("annotation_chrom_metrics.csv  -- ",
-    nrow(annotation_chrom_metrics), " rows\n",
-    "  detected:        ",
-    sum(annotation_chrom_metrics$detection == "detected"), "\n",
-    "  below_detection: ",
-    sum(annotation_chrom_metrics$detection == "below_detection"), "\n",
-    "  no_data:         ",
-    sum(annotation_chrom_metrics$detection == "no_data"), "\n",
-    sep = "")
-```

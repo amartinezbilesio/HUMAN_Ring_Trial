@@ -1,19 +1,9 @@
-# ===========================================================================
-#  HUMAN Ring Trial — .gitignore
-#
-#  Rule of thumb: track everything a collaborator needs to render the
-#  downstream analysis (Step 5) without re-running SIRIUS or xcms. Ignore
-#  raw data, per-batch caches, and Quarto render artifacts.
-# ===========================================================================
-
-# ---- Raw vendor data (lab-specific, too large for git) --------------------
 *.mzML
 *.wiff
 *.raw
 *.d/
 *.sqlite
 
-# ---- Preprocessing intermediates (per-lab, regeneratable from raw) --------
 **/HE_mzml/
 1_preprocessing/*/HE/mzml/
 1_preprocessing/*/HE/mse/
@@ -22,49 +12,34 @@
 1_preprocessing/*/Others/mse/
 1_preprocessing/*/Others/mse2/
 
-# ---- SIRIUS per-batch / per-mixture caches (only used to skip work
-#      when re-running SIRIUS; downstream consumes only the two
-#      aggregated CSVs explicitly un-ignored below) -----------------------
-3_annotation_manual/HE/3_Sirius_curation/results_all_ms2/*_batch*_*.csv
-3_annotation_manual/HE/3_Sirius_curation/results_all_ms2/*_rt.csv
-3_annotation_manual/HE/3_Sirius_curation/results_all_ms2/sirius_full_*_mix_*.csv
-3_annotation_manual/HE/3_Sirius_curation/results_all_ms2/sirius_summary_*_mix_*.csv
-3_annotation_manual/HE/3_Sirius_curation/results_all_ms2/sirius_full_all_labs_all_mixtures.csv
-3_annotation_manual/HE/3_Sirius_curation/results_all_ms2/sirius_summary_all_labs_all_mixtures.csv
-3_annotation_manual/HE/3_Sirius_curation/results_all_ms2/extraction_counts_*.csv
-*.sirius
-
-# Canonical SIRIUS outputs consumed by Step 5 — explicitly tracked
-!3_annotation_manual/HE/3_Sirius_curation/results_all_ms2/annotation_chrom_metrics.csv
-!3_annotation_manual/HE/3_Sirius_curation/results_all_ms2/annotation_identity.csv
-
-# ---- Quarto/RMarkdown render artifacts ------------------------------------
+*.html
 *_files/
 *_cache/
 .quarto/
 **/_freeze/
 *.rmarkdown
 
-# ---- R / RStudio ----------------------------------------------------------
+*.RData
+*.rds
+
 .Rhistory
 .Rproj.user/
 *.Rproj
-.RData
 .Renviron
 
-# ---- Oversized RData / RDS (>100 MB, exceed GitHub's per-file limit) ------
-# These must be distributed out-of-band (Zenodo / lab cloud / Git LFS).
-# Listed individually so smaller RData files in object/ are still tracked.
-5_downstream_analysis/object/sp_full.RData
-5_downstream_analysis/object/sp_full_detect.RData
-5_downstream_analysis/object/sp_icl.RData
-# Regeneratable matching caches — moderate size, costly only on the first
-# render of 2_consensus_peaks.qmd. Excluded to keep the repo lighter.
-5_downstream_analysis/object/correspondence_grouped.rds
-5_downstream_analysis/object/correspondence_grouped_aligned.rds
-5_downstream_analysis/object/correspondence_grouped_raw.rds
+*.sirius
+3_annotation_manual/HE/3_Sirius_curation/results_all_ms2/*_batch[0-9]*.csv
+3_annotation_manual/HE/3_Sirius_curation/results_all_ms2/sirius_summary_*.csv
+3_annotation_manual/HE/3_Sirius_curation/results_all_ms2/sirius_full_*.csv
+3_annotation_manual/HE/3_Sirius_curation/results_all_ms2/extraction_counts_*.csv
+3_annotation_manual/HE/3_Sirius_curation/results_all_ms2/*_rt.csv
 
-# ---- Editor / OS / temp ---------------------------------------------------
+5_downstream_analysis/object/*.csv
+!5_downstream_analysis/object/annotation_identity.csv
+!5_downstream_analysis/object/feat_rts.csv
+!5_downstream_analysis/object/detected_peaks_*_HE.csv
+5_downstream_analysis/object/ms1_anchor_diagnostics/
+
 *.DS_Store
 Thumbs.db
 .nfs*
@@ -73,26 +48,21 @@ slurm-*.out
 *~
 *.zip
 
-# ---- Authentication / secrets --------------------------------------------
 /auth
 .env
 
-# ---- Internal analysis docs (kept local, not for GitHub) -----------------
 5_downstream_analysis/MANUSCRIPT_NOTES.md
 5_downstream_analysis/CANONICAL_SCHEMAS.md
 5_downstream_analysis/object/PRESENTATION_PROMPT.md
 5_downstream_analysis/object/all_renders.txt
 5_downstream_analysis/object/inspect_all_renders.R
-HUMAN_RingTrial_Presentation.zip
 
-# ---- Tool metadata --------------------------------------------------------
 .claude/
 
-# ---- Legacy / orphaned paths (kept here so they don't reappear) -----------
-/standard_mixes_prep
 /example/
 /example_lab/
 /shared_data
 /results/
 /downstream_analysis/
+/standard_mixes_prep
 redner.sh

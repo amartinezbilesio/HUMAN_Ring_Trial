@@ -119,20 +119,20 @@ deliverables:
 4.  **SIRIUS Curation (`3_Sirius_curation/sirius_annotation_all_ms2.qmd`):**
       * Per-lab × per-mixture SIRIUS pipeline (CSI:FingerID +
         COSMIC + bio-database). Inputs are the preprocessed mzML
-        files from Step 1; outputs are the **canonical CSVs** the
-        downstream analysis consumes:
+        files from Step 1; outputs are two canonical CSVs at
+        `5_downstream_analysis/object/`:
           - `annotation_identity.csv` — one row per
             `(mixture, lab, compound, polarity)` with COSMIC scores
             and confidence tier (A/B/C/D, populated downstream).
-          - `annotation_chrom_metrics.csv` — MS1 chromatogram
-            metrics (peak intensity, area, FWHM, SNR) for every
-            annotated compound × adduct, including
-            consensus-prior-extracted peaks for compounds a lab
-            missed via MS2 but other labs confirmed.
-      * Uses a **cluster-based consensus-RT algorithm** to resolve
-        the per-compound RT prior across labs / polarities, and
-        an **SNR-aware peak picker** to avoid noise-grab false
-        positives. See the QMD's preamble for current settings.
+          - `feat_rts.csv` — one row per identified feature with
+            its MS2-trigger RT, ionMass, adduct, and COSMIC. This
+            is the input to the downstream RT alignment + cluster
+            algorithm in `3_rt_alignment.qmd`.
+      * The producer no longer does EIC extraction or peak
+        picking — those moved to `3_rt_alignment.qmd` so that MS1
+        anchoring (which corrects cembio's schedule offset and
+        DDA labs' coincidental hits) runs before clustering. See
+        the QMD's preamble for SIRIUS settings.
 
 ### 🔹 4. Library Generation (`4_library_generation/`)
 
@@ -159,18 +159,27 @@ because of producer/consumer chains.
   * **`1_full_detected_objects.qmd`** — loads preprocessed `Spectra`,
     BPC, and TIC objects per lab. Producer for the Full/Detected data
     levels.
-  * **`2_consensus_peaks.qmd`** — pools per-lab xcms-detected peaks,
+  * **`4_consensus_peaks.qmd`** — pools per-lab xcms-detected peaks,
     applies NAPS-spline alignment (with raw-RT fallback for
     out-of-range peaks), and builds the cross-lab consensus feature
     table. Includes a sanity-check section mapping SIRIUS-annotated
     spike-ins to consensus features.
-  * **`3_naps_extraction.qmd`** — producer for `4_rt_alignment`. Runs
+  * **`2_naps_extraction.qmd`** — producer for `3_rt_alignment`. Runs
     the SNR-aware chromExtract on NAPS injections; writes
     `naps_chrom_metrics.csv`.
-  * **`4_rt_alignment.qmd`** — per-lab Hyman monotonic spline aligning
-    each lab's NAPS apex RTs to the cross-lab consensus, optionally
-    extended with co-identified standards as additional anchors.
-    Writes `rt_alignment_splines.RData` for the downstream consumers.
+  * **`3_rt_alignment.qmd`** — does three things in sequence:
+    (i) per-lab Hyman monotonic spline aligning each lab's NAPS
+    apex RTs to the cross-lab consensus, extended with
+    co-identified standards as additional anchors (§P2.1-§P2.8;
+    writes `rt_alignment_splines.RData`);
+    (ii) **MS1 anchoring** of every lab's MS2-trigger RTs in
+    `feat_rts.csv` to the nearest MS1 chromatographic peak at the
+    precursor m/z, via `ms1_anchor.R`'s `anchor_rts()` (§P2.9;
+    writes `feat_rts_ms1_anchored.csv` — cached, only re-runs if
+    inputs change);
+    (iii) cluster-based consensus RT + SNR-aware EIC extraction
+    over the anchored features, via `annotated_eic_pipeline.R`
+    (§P2.10; writes `annotation_chrom_metrics.csv`).
   * **`5_normalization.qmd`** — applies the splines to all detected
     peaks; computes per-(lab, sample, polarity, decile) intensity
     factors (Global / Decile / LOESS) and writes the normalized
@@ -179,14 +188,14 @@ because of producer/consumer chains.
     `(mixture, compound, polarity)` using COSMIC scores +
     cross-lab RT-SD axis; writes back into
     `annotation_identity.csv`.
-  * **`7_icc_reproducibility.qmd`** — ICC ladder (4-lab vs 3-lab
-    subsets, Strict vs Inclusive alignment quorum), pairwise lab
-    correlation, leave-one-out consensus.
-  * **`8_data_level_progression.qmd`** — variance decomposition and
-    PCA progression across the four data levels. Phase 1 (Full →
-    Detected → Annotated bulk metrics) + Phase 5 (per-consensus-peak
-    metrics).
-  * **`9_per_compound_diagnostics.qmd`** — identity / retention /
+  * **`7_reproducibility_results.qmd`** — variance decomposition + PCA
+    + UMAP progression across the four data levels (Full → Detected →
+    Consensus → Annotated). Plus pairwise reproducibility on the
+    chosen normalization winner (Raw vs Lab-median pairwise ICC,
+    per-compound Spearman ρ across lab pairs).
+    *(The full strategy-comparison ICC ladder and all-strategies
+    pairwise heatmap live in `5_normalization.qmd` §P3.5–§P3.6.)*
+  * **`8_per_compound_diagnostics.qmd`** — identity / retention /
     abundance diagnostics at the per-compound level. Includes
     explainer sections on cembio block-MS2 acquisition and hmgu DDA
     open-precursor selection.
@@ -196,35 +205,37 @@ because of producer/consumer chains.
 
 ## 🗃️ Reproducing the downstream analysis
 
-Cloning the repository gives you everything needed to **re-render** Step 5
-QMDs from `5_normalization.qmd` onward without re-running SIRIUS or
-xcms — the canonical CSVs (`annotation_chrom_metrics.csv`,
-`annotation_identity.csv`, `naps_chrom_metrics.csv`,
-`annotation_chrom_metrics_normalized.csv`, the `detected_peaks_*_HE.csv`
-xcms outputs, `rt_alignment_splines.RData`, and most of the smaller
-`*.RData` objects) are all tracked.
+Cloning the repository gives you the **source-of-truth canonical CSVs**
+the downstream QMDs consume:
 
-A few preprocessed Spectra objects exceed GitHub's 100 MB per-file
-limit and are excluded by `.gitignore`. They are needed only for
-`1_full_detected_objects.qmd` and Phase 1 of `8_data_level_progression.qmd`:
+- `annotation_chrom_metrics.csv` — output of the new MS1-anchored
+  annotation pipeline (Stage 1 + 2 + 3), re-runnable in ~10-15 min from
+  `3_rt_alignment.qmd` §P2.10.
+- `annotation_identity.csv` — SIRIUS-side identity (compound, COSMIC,
+  confidence tier). **Regenerating this requires ~1 week of SIRIUS
+  compute**, so the CSV stays tracked.
+- `naps_chrom_metrics.csv`, `annotation_chrom_metrics_normalized.csv`,
+  `detected_peaks_*_HE.csv`, `rt_alignment_*.csv`,
+  `detected_peak_counts.csv`, `normalization_winners.csv`, the
+  per-(lab, mixture) `extraction_counts_*.csv`, etc.
 
-| File | Size | Used by |
-|---|---:|---|
-| `5_downstream_analysis/object/sp_full.RData` | ~10 GB | QMD 1 + 8 Phase 1 |
-| `5_downstream_analysis/object/sp_full_detect.RData` | ~206 MB | QMD 1 + 8 Phase 1 |
-| `5_downstream_analysis/object/sp_icl.RData` | ~128 MB | QMD 1 |
-| `5_downstream_analysis/object/correspondence_grouped*.rds` | ~60-70 MB each | QMD 2 (regenerated on first render, ~5 min) |
+**What's *not* in the repo and why:**
 
-If you need to render those specific QMDs, either:
+| Pattern | Why excluded |
+|---|---|
+| `*.html` | Rendered Quarto reports — re-render from the QMDs (`quarto render <file>.qmd`). The `7_reproducibility_results.qmd` render takes ~3 min; the others are seconds. |
+| `*.RData`, `*.rds` | `Spectra` / `Chromatograms` / pipeline caches built from raw mzML. Range from a few KB up to ~10 GB (`sp_full.RData`). Most QMDs from `3_rt_alignment.qmd` onward read only the canonical CSVs and do not need these. |
+| `*.sirius`, SIRIUS per-batch CSVs, `sirius_summary_*`, `sirius_full_*` | SIRIUS internal project files and incremental caches (~26 GB total under `3_annotation_manual/.../results_all_ms2/`). The relevant aggregated info lands in the tracked `annotation_identity.csv` and `annotation_chrom_metrics.csv`. |
+| `1_preprocessing/<lab>/<study>/mzml/*.mzML` | Raw mzML files. Will be loaded directly from public databases in a future revision; for now obtain them per-lab from the original instrument data. |
 
-1. **Regenerate locally** from the upstream raw data + preprocessing
-   scripts (`1_preprocessing/`). Requires the lab's raw mzML files.
-2. **Contact the repo maintainer** ([philoulouail@gmail.com](mailto:philoulouail@gmail.com))
-   to obtain the prebuilt `sp_*.RData` files via an out-of-band share
-   (OneDrive / Zenodo).
+If you need the **prebuilt `*.RData` / `*.rds` caches** (skipping the
+mzR mzML reads — useful if you don't have the raw mzML locally or want
+to avoid intermittent mzR segfaults), contact the maintainer
+([philoulouail@gmail.com](mailto:philoulouail@gmail.com)) and the
+files will be shared out-of-band (OneDrive / Zenodo).
 
-The QMDs from `5_normalization.qmd` onward render without these large
-files — they read only the tracked canonical CSVs.
+The QMDs from `5_normalization.qmd` onward render without any
+`*.RData` / `*.rds` — they read only the tracked canonical CSVs.
 
 ## 🛠️ Usage
 
@@ -270,21 +281,25 @@ config:
 graph TD
     subgraph "Producers (Step 3)"
         SI[SIRIUS per lab per mix] --> AI[annotation_identity.csv]
-        SI --> AC[annotation_chrom_metrics.csv]
+        SI --> FR[feat_rts.csv <br> per-feature MS2-trigger RT]
     end
-    subgraph "Alignment infrastructure"
-        NAPS[NAPS injections] --> NX[3_naps_extraction]
-        NX --> RT[4_rt_alignment <br> per-lab Hyman splines]
+    subgraph "Alignment + EIC pipeline"
+        NAPS[NAPS injections] --> NX[2_naps_extraction]
+        NX --> RT[3_rt_alignment §P2.1-P2.8 <br> per-lab Hyman splines]
+        FR --> ANC[3_rt_alignment §P2.9 <br> MS1-anchor every lab's rt_sec <br> via anchor_rts in ms1_anchor.R]
+        ANC --> AEP[3_rt_alignment §P2.10 <br> cluster RT consensus <br> + SNR-aware EIC extraction]
+        RT --> AEP
+        AEP --> AC[annotation_chrom_metrics.csv]
     end
     subgraph "Data levels"
-        F[Full <br> raw TIC/BPC] --> P1[8_data_level Phase 1 <br> variance decomposition]
+        F[Full <br> raw TIC/BPC] --> P1[7_reproducibility_results Phase 1 <br> variance decomposition]
         D[Detected <br> per-lab xcms peaks] --> P1
-        D --> CP[2_consensus_peaks <br> NAPS-aligned cross-lab matching]
-        CP --> P5[8_data_level Phase 5 <br> per-peak CV + Spearman]
+        D --> CP[4_consensus_peaks <br> NAPS-aligned cross-lab matching]
+        CP --> P5[7_reproducibility_results Phase 5 <br> per-peak CV + Spearman]
         AC --> NORM[5_normalization <br> RT-local Global/Decile/LOESS]
         NORM --> TIER[6_confidence_tier <br> A/B/C/D assignment]
-        TIER --> ICC[7_icc_reproducibility <br> 4-lab vs 3-lab ICC ladder, pairwise]
-        AC --> PCD[9_per_compound_diagnostics <br> identity / RT / abundance]
+        TIER --> ICC[7_reproducibility_results <br> 4-lab vs 3-lab ICC ladder, pairwise]
+        AC --> PCD[8_per_compound_diagnostics <br> identity / RT / abundance]
         AI --> PCD
     end
     RT --> NORM

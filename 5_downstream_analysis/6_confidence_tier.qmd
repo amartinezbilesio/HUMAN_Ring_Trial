@@ -5,6 +5,7 @@ format:
         toc: true
         toc-location: right
         code-fold: true
+        embed-resources: true
 ---
 
 # Goal
@@ -26,8 +27,8 @@ based on:
    high cross-lab confidence in the identification.
 
 This column is overwritten in place in `annotation_identity.csv`.
-Downstream consumers (`9_per_compound_diagnostics.qmd`,
-`7_icc_reproducibility.qmd`) can then filter by `confidence_tier %in% c("A",
+Downstream consumers (`8_per_compound_diagnostics.qmd`,
+`7_reproducibility_results.qmd`) can then filter by `confidence_tier %in% c("A",
 "B")` to restrict to confident identifications.
 
 ## Tier definition
@@ -52,8 +53,7 @@ library(tidyr)
 library(ggplot2)
 library(here)
 
-producer_dir <- here("3_annotation_manual", "HE", "3_Sirius_curation",
-                     "results_all_ms2")
+producer_dir <- here("5_downstream_analysis", "object")
 object_dir   <- here("5_downstream_analysis", "object")
 
 # Tier thresholds. Adjust here and re-run to retune.
@@ -76,6 +76,7 @@ identity_df <- read.csv(
   file.path(producer_dir, "annotation_identity.csv"),
   stringsAsFactors = FALSE,
   colClasses = c(mixture = "character"))
+identity_df$mixture <- gsub("\\.", "_", identity_df$mixture)
 
 cat("identity_df rows:", nrow(identity_df), "\n")
 
@@ -84,6 +85,7 @@ chrom_norm <- read.csv(
   file.path(object_dir, "annotation_chrom_metrics_normalized.csv"),
   stringsAsFactors = FALSE,
   colClasses = c(mixture = "character"))
+chrom_norm$mixture <- gsub("\\.", "_", chrom_norm$mixture)
 
 cat("chrom_norm rows:", nrow(chrom_norm),
     " | with aligned_rt:", sum(!is.na(chrom_norm$aligned_rt)), "\n")
@@ -151,7 +153,9 @@ combined_axes |>
 ```{r tier-vs-axes}
 #| fig-cap: "Tier assignment in COSMIC × aligned-RT-SD space. Vertical dashed lines = COSMIC thresholds; horizontal = RT SD thresholds. Coloured by tier."
 #| fig-height: 5
-ggplot(combined_axes |> filter(!is.na(cosmic_max), !is.na(rt_sd_aligned)),
+# rt_sd_aligned == 0 (single-lab / perfect agreement) is undefined on the
+# log y-axis and needs >= 2 labs to be meaningful — drop it here.
+ggplot(combined_axes |> filter(!is.na(cosmic_max), rt_sd_aligned > 0),
        aes(x = cosmic_max, y = rt_sd_aligned, colour = tier)) +
   geom_point(size = 1.5, alpha = 0.6) +
   geom_vline(xintercept = c(cosmic_marginal, cosmic_strong),
