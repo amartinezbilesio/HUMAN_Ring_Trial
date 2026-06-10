@@ -1,0 +1,203 @@
+---
+title: "Object Creation for Lab Comparison Analysis"
+format:
+  html:
+    embed-resources: true
+---
+
+# Introduction
+
+This document creates all the data objects needed for the lab comparison analysis.
+These objects are saved to the `object/` directory and can be loaded by other
+analysis scripts.
+
+## Load libraries
+
+```{r library, include=TRUE, warning=FALSE, message=FALSE}
+library(Chromatograms)
+library(Spectra)
+library(xcms)
+library(MsIO)
+library(MsExperiment)
+library(here)
+
+base_path <- here("5_downstream_analysis")
+source(file.path(base_path, "helpers.R"))
+```
+
+```{r cores-cluster}
+# cluster parallel setting
+bpparam <- MulticoreParam(workers = parallel::detectCores() - 1)
+```
+
+# Full Data Objects
+
+## Load Full Data
+
+Note: 
+
+- the data has been filtered to include only the m/z range of 50 - 1100 Da
+  So that the raw signal is more comparable. !!!
+
+```{r load-full-data}
+if (!file.exists(file.path(base_path, "object/sp_full.RData"))) {
+  sp_afekta <- load_data(lab = "afekta", study_group = "HE")
+  sp_hmgu <- load_data(lab = "hmgu", study_group = "HE")
+  sp_icl <- load_data(lab = "icl", study_group = "HE")
+  sp_cembio <- load_data(lab = "cembio", study_group = "HE")
+  sp_full <- c(sp_afekta, sp_hmgu, sp_icl, sp_cembio)
+  sp_full <- filterMzRange(sp_full, mz = c(50, 1100))
+  sp_full <- setBackend(sp_full, MsBackendMemory())
+  sp_full <- applyProcessing(sp_full)
+  save(sp_full, file = file.path(base_path, "object/sp_full.RData"))
+  rm(sp_afekta, sp_hmgu, sp_icl, sp_cembio)
+} else {
+  load(file.path(base_path, "object/sp_full.RData"))
+}
+```
+
+## Create Base Peak Chromatogram (BPC) - Full Data
+
+```{r load-bpc-full}
+if(!file.exists(file.path(base_path, "object/bpc_full.RData"))) {
+  bpc_full <- Chromatograms(sp_full, summarize.method = "max",
+                       factorize.by= "dataOrigin",
+                       spectraVariables = c("mixture", "lab"))
+  bpc_full <- setBackend(bpc_full, ChromBackendMemory())
+  save(file = file.path(base_path, "object/bpc_full.RData"), bpc_full)
+} else {
+  load(file.path(base_path, "object/bpc_full.RData"))
+}
+```
+
+## Create Total Ion Current (TIC) - Full Data
+
+```{r load-tic-full}
+if (!file.exists(file.path(base_path, "object/tic_full.RData"))) {
+  tic_full <- Chromatograms(sp_full, summarize.method = "sum",
+                       factorize.by= "dataOrigin",
+                       spectraVariables = c("mixture", "lab"))
+  tic_full <- setBackend(tic_full, ChromBackendMemory())
+  save(file = file.path(base_path, "object/tic_full.RData"), tic_full)
+} else {
+  load(file.path(base_path, "object/tic_full.RData"))
+}
+```
+
+# Detected Signal Objects
+
+## Load Detected Signal Data
+
+```{r load-detect}
+if (!file.exists(file.path(base_path, "object/sp_full_detect.RData"))) {
+  bpparam <- MulticoreParam(8) # for the cluster
+  sp_afekta <- detect_signal(
+    lab = "afekta",
+    study_group = "HE",
+    annotated = FALSE,
+    bpparam = bpparam
+  )
+  save(sp_afekta, file = file.path(base_path, "object/sp_afekta.RData"))
+  rm(sp_afekta)
+
+  sp_hmgu <- detect_signal(
+    lab = "hmgu",
+    study_group = "HE",
+    annotated = FALSE,
+    bpparam = bpparam
+  )
+  save(sp_hmgu, file = file.path(base_path, "object/sp_hmgu.RData"))
+  rm(sp_hmgu)
+
+  sp_icl <- detect_signal(
+    lab = "icl",
+    study_group = "HE",
+    annotated = FALSE,
+    bpparam = bpparam
+  )
+  save(sp_icl, file = file.path(base_path, "object/sp_icl.RData"))
+  rm(sp_icl)
+
+  sp_cembio <- detect_signal(
+    lab = "cembio",
+    study_group = "HE",
+    annotated = FALSE,
+    bpparam = bpparam
+  )
+  save(sp_cembio, file = file.path(base_path, "object/sp_cembio.RData"))
+
+  load(file.path(base_path, "object/sp_hmgu.RData"))
+  load(file.path(base_path, "object/sp_afekta.RData"))
+  load(file.path(base_path, "object/sp_icl.RData"))
+
+  sp_full_detect <- c(sp_afekta, sp_hmgu, sp_icl, sp_cembio)
+  sp_full_detect <- filterMzRange(sp_full_detect, mz = c(100, 1100))
+  sp_full_detect <- setBackend(sp_full_detect, MsBackendMemory())
+  sp_full_detect <- applyProcessing(sp_full_detect)
+  save(
+    sp_full_detect,
+    file = file.path(base_path, "object/sp_full_detect.RData")
+  )
+  rm(sp_afekta, sp_hmgu, sp_icl, sp_cembio)
+} else {
+  load(file.path(base_path, "object/sp_full_detect.RData"))
+}
+```
+
+## Create Base Peak Chromatogram (BPC) - Detected Signal
+
+```{r load-bpc-detect}
+if (!file.exists(file.path(base_path, "object/bpc_detect.RData"))) {
+  bpc_detect <- Chromatograms(sp_full_detect, summarize.method = "max",
+                       factorize.by= "dataOrigin",
+                       spectraVariables = c("lab", "mixture"))
+  bpc_detect <- setBackend(bpc_detect, ChromBackendMemory())
+  save(file = file.path(base_path, "object/bpc_detect.RData"), bpc_detect)
+} else {
+  load(file.path(base_path, "object/bpc_detect.RData"))
+}
+```
+
+## Create Total Ion Current (TIC) - Detected Signal
+
+```{r load-tic-detect}
+if (!file.exists(file.path(base_path, "object/tic_detect.RData"))) {
+  tic_detect <- Chromatograms(sp_full_detect, summarize.method = "sum",
+                       factorize.by= "dataOrigin",
+                       spectraVariables = c("mixture", "lab"))
+  tic_detect <- setBackend(tic_detect, ChromBackendMemory())
+  save(file = file.path(base_path, "object/tic_detect.RData"), tic_detect)
+} else {
+  load(file.path(base_path, "object/tic_detect.RData"))
+}
+```
+
+
+# Annotated Signal
+
+The annotated level no longer materialises in this file. The producer
+`3_annotation_manual/HE/3_Sirius_curation/sirius_annotation_all_ms2.qmd`
+writes `5_downstream_analysis/object/annotation_chrom_metrics.csv` directly; the
+bulk annotated TIC (P4) is `sum(areaUnderTic)` per `(lab, mixture,
+polarity)` over that table, computed inline in
+`7_reproducibility_results.qmd`.
+
+# Summary
+
+Public objects (consumed by `7_reproducibility_results.qmd`,
+`4_consensus_peaks.qmd`):
+
+- `sp_full.RData` — full spectra, all labs
+- `bpc_full.RData`, `tic_full.RData` — BPC / TIC, full signal
+- `sp_full_detect.RData` — combined detected signal
+- `bpc_detect.RData`, `tic_detect.RData` — BPC / TIC, detected signal
+
+Internal resume checkpoints (per-lab; only loaded inside this file to
+recover from a partial detect_signal() build):
+`sp_afekta.RData`, `sp_hmgu.RData`, `sp_icl.RData`, `sp_cembio.RData`.
+
+The annotated level lives in the SIRIUS producer's
+`5_downstream_analysis/object/annotation_chrom_metrics.csv` — consumers derive bulk
+and per-compound annotated views from that CSV. Stale RData files from
+prior runs (`sp_full_ann`, `bpc_ann`, `tic_ann`, `eics_ann`,
+`tic_full_spectra`, `eics_detected`) can be deleted from `object/`.
