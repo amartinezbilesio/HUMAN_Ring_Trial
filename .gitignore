@@ -1,9 +1,9 @@
+# Raw MS data
 *.mzML
 *.wiff
 *.raw
 *.d/
 *.sqlite
-
 **/HE_mzml/
 1_preprocessing/*/HE/mzml/
 1_preprocessing/*/HE/mse/
@@ -12,34 +12,48 @@
 1_preprocessing/*/Others/mse/
 1_preprocessing/*/Others/mse2/
 
+# Rendered output, caches, R session
 *.html
 *_files/
 *_cache/
 .quarto/
 **/_freeze/
 *.rmarkdown
-
 *.RData
 *.rds
-
 .Rhistory
 .Rproj.user/
 *.Rproj
 .Renviron
 
+# SIRIUS projects and per-run outputs (regenerated locally)
 *.sirius
-3_annotation_manual/HE/3_Sirius_curation/results_all_ms2/*_batch[0-9]*.csv
-3_annotation_manual/HE/3_Sirius_curation/results_all_ms2/sirius_summary_*.csv
-3_annotation_manual/HE/3_Sirius_curation/results_all_ms2/sirius_full_*.csv
-3_annotation_manual/HE/3_Sirius_curation/results_all_ms2/extraction_counts_*.csv
-3_annotation_manual/HE/3_Sirius_curation/results_all_ms2/*_rt.csv
+3_annotation_manual/HE/3_Sirius_curation/results_all_ms2/
+3_annotation_manual/HE/3_Sirius_curation/results_all_ms2_pg/
+3_annotation_manual/HE/3_Sirius_curation/results_consensus_all/
 
-5_downstream_analysis/object/*.csv
-!5_downstream_analysis/object/annotation_identity.csv
-!5_downstream_analysis/object/feat_rts.csv
-!5_downstream_analysis/object/detected_peaks_*_HE.csv
-5_downstream_analysis/object/ms1_anchor_diagnostics/
+# Superseded SIRIUS annotations (kept local only; the repo keeps the newer
+# precursor-grouping all-MS2 qmd, sirius_annotation_all_ms2_pg.qmd)
+3_annotation_manual/HE/3_Sirius_curation/sirius_annotation_consensus.qmd
+3_annotation_manual/HE/3_Sirius_curation/sirius_annotation_all_ms2.qmd
 
+# All-MS2 / precursor-grouping downstream (superseded by the manual track; local only)
+5_downstream_analysis/
+5_downstream_analysis_pg/
+
+# Manual downstream object/ — every file here is a regenerable intermediate
+# (the builders 1/2/4 + 3's spline-fit + build_manual_annotation.R produce them).
+# Track nothing in it; keep the empty folder via .gitkeep.
+5_downstream_analysis_manual/object/*
+!5_downstream_analysis_manual/object/.gitkeep
+
+# No markdown in the repo except the top-level README
+*.md
+!/README.md
+**/all_renders.txt
+**/inspect_all_renders.R
+
+# OS, editor, misc
 *.DS_Store
 Thumbs.db
 .nfs*
@@ -47,22 +61,16 @@ slurm-*.out
 *.bak
 *~
 *.zip
-
 /auth
 .env
-
-5_downstream_analysis/MANUSCRIPT_NOTES.md
-5_downstream_analysis/CANONICAL_SCHEMAS.md
-5_downstream_analysis/object/PRESENTATION_PROMPT.md
-5_downstream_analysis/object/all_renders.txt
-5_downstream_analysis/object/inspect_all_renders.R
-
 .claude/
+redner.sh
 
+# Legacy / scratch directories
 /example/
 /example_lab/
 /shared_data
 /results/
 /downstream_analysis/
 /standard_mixes_prep
-redner.sh
+3_annotation_manual/HE/3_Sirius_curation/run_sirius_cluster.R

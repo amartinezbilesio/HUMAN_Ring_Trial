@@ -1,0 +1,872 @@
+---
+title: "RT-local normalization — producer (Phase 3)"
+format:
+    html:
+        toc: true
+        toc-location: right
+        code-fold: true
+        embed-resources: true
+---
+
+# Goal — producer
+
+Estimate the per-`(lab, injection, RT-decile)` response profile from
+the **Detected Signal** (xcms output: ~1M peaks across the 4 labs),
+apply that response correction back to the **Annotated Signal**
+(canonical `annotation_chrom_metrics.csv` from the SIRIUS producer),
+write the normalized annotated table to disk for downstream analysis.
+
+This file is **both producer and evaluator**: §P3.1–§P3.3 build the
+factor maps, §P3.4 picks the winning strategy per data level (writes
+`normalization_winners.csv`), and §P3.5–§P3.6 are the full
+strategy-comparison evidence (ICC ladder, variance decomposition,
+pairwise ICC heatmap). The headline **reproducibility results** on
+the chosen winner (Raw vs Lab-median pairwise + per-compound
+Spearman) live in `7_reproducibility_results.qmd`.
+
+Pipeline:
+
+1. Load detected peaks, apply the P2 alignment splines.
+2. Build three factor maps: `factor_global` (per-injection global
+   scale), `factor_decile` (per-injection × RT-decile), `factor_loess`
+   (smooth f(aligned_rt) per injection).
+3. Apply each factor to the annotated peaks; write the result.
+
+Inputs:
+
+- `5_downstream_analysis/object/detected_peaks_{lab}_HE.csv` — per-lab
+  `(rtmin, rtmax, mzmin, mzmax, rt, mz, sample, into, intb, maxo,
+  polarity, mixture, chrom_peak_id)`.
+- `5_downstream_analysis/object/rt_alignment_splines.RData` — per
+  `(lab, polarity)` splines from P2 (`3_rt_alignment.qmd`).
+- `5_downstream_analysis/object/rt_alignment_anchors.csv` — anchor
+  table (for clamping out-of-range peaks).
+- `5_downstream_analysis/object/annotation_chrom_metrics.csv`
+  — the canonical annotated peak set we normalize.
+
+Outputs:
+
+- `5_downstream_analysis/object/annotation_chrom_metrics_normalized.csv`
+  — annotated rows + `aligned_rt, decile, factor_global,
+  factor_decile, factor_loess, maxIntensity_{global,decile,loess},
+  areaUnderTic_{global,decile,loess}`.
+- `5_downstream_analysis/object/detected_peak_counts.csv` — small
+  `(lab, polarity, sample, n_peaks)` summary used by the consumer's
+  diagnostic.
+
+## Setup
+
+```{r setup}
+#| message: false
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(here)
+
+labs           <- c("afekta", "cembio", "hmgu", "icl")
+producer_dir   <- here("5_downstream_analysis_manual", "object")
+object_dir     <- here("5_downstream_analysis_manual", "object")
+
+# Number of RT bins (deciles → 10). Computed per polarity on the
+# pooled aligned_rt distribution so bins are cross-lab comparable.
+n_rt_bins <- 10L
+
+# Palette for strategy comparison.
+# "Aligned" is added as a neutral grey to isolate the contribution of the
+# alignment step alone (no intensity factor) from the normalization on top.
+# "Lab-median" is the global Annotated-Normalized formulation
+# (per-(lab, polarity) median of the bulk distribution), kept side by
+# side with the per-injection-decile-based "Global" so the reader can
+# see which target works better.
+strategy_palette <- c(Raw          = "#E64B35",
+                      Aligned      = "#999999",
+                      `Lab-median` = "#3B7C92",
+                      Global       = "#4DBBD5",
+                      Decile       = "#70AD47",
+                      LOESS        = "#4472C4")
+```
+
+# P3.1 Load detected peaks (per-lab, per-injection)
+
+**Data level: Detected Signal** — only used here to estimate the
+response profile (P3.3). It is *not* the level on which P3.5 ICC is
+computed.
+
+Read the four per-lab CSVs, add `lab`, concatenate. Each row is one
+detected peak; the `(lab, sample, polarity)` triple identifies one
+injection (`sample` indexes 1..19 within each polarity per lab).
+
+```{r load-detected-peaks}
+read_lab_peaks <- function(lab) {
+  read.csv(file.path(object_dir, sprintf("detected_peaks_%s_HE.csv", lab)),
+           stringsAsFactors = FALSE,
+           colClasses = c(mixture = "character")) |>
+    mutate(lab = lab, .before = 1L,
+           mixture = gsub("\\.", "_", mixture))
+}
+
+peaks <- bind_rows(lapply(labs, read_lab_peaks))
+
+# Polarity column comes through as character ("pos" / "neg") — same as
+# the chromExtract / annotation pipelines.
+cat("Detected peaks loaded:\n")
+peaks |> count(lab, polarity) |>
+  pivot_wider(names_from = polarity, values_from = n) |>
+  knitr::kable(caption = "Peaks per (lab, polarity).")
+
+cat("\nInjections (lab × polarity × sample) detected:\n")
+peaks |> distinct(lab, polarity, sample) |>
+  count(lab, polarity) |>
+  pivot_wider(names_from = polarity, values_from = n) |>
+  knitr::kable(caption = "Distinct injections per (lab, polarity).")
+```
+
+# P3.2 Apply P2 alignment to detected peak `rt`
+
+Load the per-`(lab, polarity)` Hyman splines from P2 and apply them to
+each peak's `rt`, with the same anchor-range clamp used in
+`3_rt_alignment.qmd`. Peaks outside the anchor range get
+`aligned_rt = NA` and are dropped from the factor-fitting step (they'd
+be extrapolated otherwise).
+
+```{r apply-alignment}
+load(file.path(object_dir, "rt_alignment_splines.RData"))   # `splines`
+anchors_for_range <- read.csv(
+  file.path(object_dir, "rt_alignment_anchors.csv"),
+  stringsAsFactors = FALSE)
+
+apply_splines <- function(df, splines_map, anchors_for_range, rt_col = "rt") {
+  df$key        <- paste(df$lab, df$polarity, sep = "_")
+  df$aligned_rt <- NA_real_
+  for (key_i in unique(df$key)) {
+    f <- splines_map[[key_i]]
+    if (is.null(f)) next
+    anchor_range <- anchors_for_range |>
+      filter(paste(lab, polarity, sep = "_") == key_i) |>
+      pull(rt_local) |> range(na.rm = TRUE)
+    idx       <- which(df$key == key_i)
+    rt_lab    <- df[[rt_col]][idx]
+    in_range  <- !is.na(rt_lab) &
+                 rt_lab >= anchor_range[1] &
+                 rt_lab <= anchor_range[2]
+    df$aligned_rt[idx[in_range]] <- as.numeric(f(rt_lab[in_range]))
+  }
+  df$key <- NULL
+  df
+}
+
+peaks <- apply_splines(peaks, splines, anchors_for_range, rt_col = "rt")
+
+cat("Peaks with aligned_rt (in-range):", sum(!is.na(peaks$aligned_rt)),
+    " / ", nrow(peaks), "\n")
+cat("Out-of-range (NA aligned_rt) per lab / polarity:\n")
+peaks |> filter(is.na(aligned_rt)) |>
+  count(lab, polarity) |>
+  pivot_wider(names_from = polarity, values_from = n, values_fill = 0L) |>
+  knitr::kable()
+```
+
+# P3.3 Compute normalization factors
+
+We define **three factor maps** (Raw is implicit = 1 everywhere) that
+each take a peak's `(lab, sample, polarity, aligned_rt)` and return a
+multiplicative correction.
+
+`Global` — per `(lab, polarity)`. Single number per lab × polarity =
+median peak intensity / cross-lab consensus median intensity. Removes
+overall sensitivity offset.
+
+`Decile` — per `(lab, sample, polarity, decile)`. RT-binned median.
+Removes both per-injection variability and RT-local sensitivity
+biases.
+
+`LOESS` — per `(lab, sample, polarity)`, smooth `f(aligned_rt)`. Same
+spirit as `Decile` but continuous in RT — avoids bin-edge jumps.
+
+We compute factors using `into` (peak area) as the response metric;
+`maxo` is carried through unchanged for consistency with the existing
+annotated-level bulk metric in `7_reproducibility_results.qmd`.
+
+```{r factor-decile-build}
+# Per-polarity aligned_rt deciles. Computed on the pooled distribution
+# across all labs / samples so the bin edges are comparable.
+peak_rt <- peaks |> filter(!is.na(aligned_rt), is.finite(into), into > 0)
+
+# Bin edges per polarity (named list).
+decile_breaks <- lapply(split(peak_rt$aligned_rt, peak_rt$polarity),
+                        quantile,
+                        probs   = seq(0, 1, length.out = n_rt_bins + 1L),
+                        na.rm   = TRUE)
+
+# Vectorized decile assignment — cut() per polarity, indexed back to
+# the parent table. ~1M peaks; rowwise() would be unusable.
+peak_rt$decile <- NA_integer_
+for (pol in names(decile_breaks)) {
+  idx <- which(peak_rt$polarity == pol)
+  peak_rt$decile[idx] <- as.integer(cut(peak_rt$aligned_rt[idx],
+                                        breaks         = decile_breaks[[pol]],
+                                        labels         = FALSE,
+                                        include.lowest = TRUE))
+}
+
+# Per (lab, sample, polarity, decile) lab response
+lab_decile_response <- peak_rt |>
+  group_by(lab, sample, polarity, decile) |>
+  summarise(lab_median_into = median(into, na.rm = TRUE),
+            n_peaks         = n(),
+            .groups = "drop")
+
+# Cross-lab consensus per (sample, polarity, decile)
+consensus_decile <- lab_decile_response |>
+  group_by(sample, polarity, decile) |>
+  summarise(consensus_into = median(lab_median_into, na.rm = TRUE),
+            n_labs         = n_distinct(lab),
+            .groups = "drop") |>
+  filter(n_labs >= 2L)
+
+# Decile factor = consensus / lab. Multiply lab values by factor to land on consensus.
+factor_decile_tbl <- lab_decile_response |>
+  inner_join(consensus_decile |> select(sample, polarity, decile, consensus_into),
+             by = c("sample", "polarity", "decile")) |>
+  mutate(factor_decile = consensus_into / lab_median_into)
+
+cat("Decile factor table — rows per (lab, polarity):\n")
+factor_decile_tbl |> count(lab, polarity) |>
+  pivot_wider(names_from = polarity, values_from = n) |>
+  knitr::kable()
+```
+
+```{r factor-global-build}
+# Global = collapse the decile factor by taking median across deciles
+# per (lab, sample, polarity). This is the "one number per injection"
+# version of the same correction.
+factor_global_tbl <- factor_decile_tbl |>
+  group_by(lab, sample, polarity) |>
+  summarise(factor_global = median(factor_decile, na.rm = TRUE),
+            .groups = "drop")
+```
+
+```{r factor-loess-build}
+# LOESS — per (lab, sample, polarity), fit a smooth log10(factor) vs
+# aligned_rt curve from the decile-midpoint factors. P3.4 evaluates
+# this surface at each annotated peak's aligned_rt.
+#
+# Each polarity's decile midpoints are computed once from decile_breaks
+# (list of break vectors, named by polarity).
+decile_midpoints <- bind_rows(lapply(names(decile_breaks), function(pol) {
+  br <- decile_breaks[[pol]]
+  tibble(polarity   = pol,
+         decile     = seq_len(n_rt_bins),
+         aligned_rt = (br[-1] + br[-length(br)]) / 2)
+}))
+
+factor_decile_with_rt <- factor_decile_tbl |>
+  left_join(decile_midpoints, by = c("polarity", "decile"))
+
+fit_loess_one <- function(df) {
+  if (nrow(df) < 5L) return(NULL)
+  tryCatch(
+    loess(log10(factor_decile) ~ aligned_rt,
+          data       = df,
+          span       = 0.75,
+          degree     = 1,
+          na.action  = na.exclude),
+    error = function(e) NULL)
+}
+
+loess_fits <- factor_decile_with_rt |>
+  group_by(lab, sample, polarity) |>
+  group_modify(~ tibble(fit = list(fit_loess_one(.x)))) |>
+  ungroup()
+
+cat("LOESS fits successful:",
+    sum(!vapply(loess_fits$fit, is.null, logical(1))),
+    " /", nrow(loess_fits), "\n")
+```
+
+# P3.4 Apply factors to `annotation_chrom_metrics.csv`
+
+**Data level: Annotated Signal.** From here on we operate on the
+canonical annotated peak table (SIRIUS producer output). The
+Detected-Signal factors built in P3.3 are looked up by
+`(lab, sample, polarity, aligned-RT decile)` for each annotated peak.
+
+All mixture IDs are now normalized to underscore form (`"1_1"`,
+`"2_10"`) on read in every QMD, so the join to recover `sample` is a
+plain `(lab, polarity, mixture)` match. The defensive `gsub` is kept
+in case any input csv is still in dot form.
+
+```{r load-annotation}
+ann_chrom <- read.csv(
+  file.path(producer_dir, "annotation_chrom_metrics.csv"),
+  stringsAsFactors = FALSE,
+  colClasses = c(mixture = "character"))
+ann_chrom$mixture <- gsub("\\.", "_", ann_chrom$mixture)
+
+# SIRIUS-confirmed only. Restrict the annotated peaks to compounds SIRIUS
+# structurally confirmed (best_structure_rank not NA) in >=1 lab, so the whole
+# downstream (this QMD's normalization + ICC strategy comparison, and QMD 7's
+# Annotated level) runs on the confirmed set — matching QMD 8. The untargeted
+# normalization factors above are fit on ALL detected peaks (unchanged); only the
+# annotated-signal analysis is scoped here.
+.confirmed <- read.csv(file.path(producer_dir, "annotation_identity.csv"),
+                       stringsAsFactors = FALSE, colClasses = c(mixture = "character")) |>
+  filter(!is.na(best_structure_rank)) |>
+  mutate(mixture = gsub("\\.", "_", mixture)) |>
+  distinct(mixture, compound)
+ann_chrom <- ann_chrom |> semi_join(.confirmed, by = c("mixture", "compound"))
+cat("ann_chrom restricted to SIRIUS-confirmed:", nrow(.confirmed), "compounds,",
+    nrow(ann_chrom), "rows\n")
+
+# Mixture-to-sample lookup from the detected peaks. Each (lab, polarity)
+# has a deterministic mixture → sample mapping.
+mixture_to_sample <- peaks |>
+  distinct(lab, polarity, sample, mixture) |>
+  rename(mixture_us = mixture)
+
+ann_chrom <- ann_chrom |>
+  mutate(mixture_us = mixture) |>
+  left_join(mixture_to_sample,
+            by = c("lab", "polarity", "mixture_us")) |>
+  select(-mixture_us)
+
+cat("annotation rows with sample resolved:",
+    sum(!is.na(ann_chrom$sample)), " /", nrow(ann_chrom), "\n")
+```
+
+```{r align-annotation}
+ann_chrom <- apply_splines(ann_chrom, splines, anchors_for_range,
+                           rt_col = "apex_rt")
+
+# Decile per polarity, using the same bin edges as the factor build.
+ann_chrom$decile <- NA_integer_
+for (pol in names(decile_breaks)) {
+  idx <- which(ann_chrom$polarity == pol &
+               !is.na(ann_chrom$aligned_rt))
+  ann_chrom$decile[idx] <- as.integer(cut(ann_chrom$aligned_rt[idx],
+                                          breaks         = decile_breaks[[pol]],
+                                          labels         = FALSE,
+                                          include.lowest = TRUE))
+}
+
+cat("annotation rows with aligned_rt:",
+    sum(!is.na(ann_chrom$aligned_rt)), " /", nrow(ann_chrom), "\n")
+cat("annotation rows with decile assigned:",
+    sum(!is.na(ann_chrom$decile)),    " /", nrow(ann_chrom), "\n")
+```
+
+```{r join-factors}
+ann_chrom <- ann_chrom |>
+  left_join(factor_global_tbl,
+            by = c("lab", "sample", "polarity")) |>
+  left_join(factor_decile_tbl |>
+              select(lab, sample, polarity, decile, factor_decile),
+            by = c("lab", "sample", "polarity", "decile"))
+
+# Evaluate LOESS factor at each annotated peak's aligned_rt.
+ann_chrom$factor_loess <- NA_real_
+for (i in seq_len(nrow(loess_fits))) {
+  fit <- loess_fits$fit[[i]]
+  if (is.null(fit)) next
+  idx <- which(ann_chrom$lab      == loess_fits$lab[i]     &
+               ann_chrom$sample   == loess_fits$sample[i]  &
+               ann_chrom$polarity == loess_fits$polarity[i] &
+               !is.na(ann_chrom$aligned_rt))
+  if (!length(idx)) next
+  pred <- suppressWarnings(
+    predict(fit, newdata = data.frame(aligned_rt = ann_chrom$aligned_rt[idx])))
+  # LOESS was fit on log10(factor) — convert back to linear.
+  ann_chrom$factor_loess[idx] <- 10 ^ pred
+}
+
+cat("annotation rows with each factor:",
+    "\n  global:", sum(!is.na(ann_chrom$factor_global)),
+    "\n  decile:", sum(!is.na(ann_chrom$factor_decile)),
+    "\n  loess :", sum(!is.na(ann_chrom$factor_loess)),
+    " /", nrow(ann_chrom), "\n")
+```
+
+```{r apply-and-export}
+# Scale both abundance metrics by each factor. We carry both forward
+# because they answer different questions:
+#   - `maxIntensity`   — scan-rate robust (good when scan rates differ ~15x
+#                         across labs)
+#   - `areaUnderTic`   — standard TIC-style integral (matches the bulk
+#                         metric in 7_reproducibility_results.qmd)
+ann_chrom <- ann_chrom |>
+  mutate(maxIntensity_global = maxIntensity * factor_global,
+         maxIntensity_decile = maxIntensity * factor_decile,
+         maxIntensity_loess  = maxIntensity * factor_loess,
+         areaUnderTic_global = areaUnderTic * factor_global,
+         areaUnderTic_decile = areaUnderTic * factor_decile,
+         areaUnderTic_loess  = areaUnderTic * factor_loess)
+
+write.csv(ann_chrom,
+          file.path(object_dir, "annotation_chrom_metrics_normalized.csv"),
+          row.names = FALSE)
+
+cat("Wrote: ",
+    file.path(object_dir, "annotation_chrom_metrics_normalized.csv"),
+    "\n  rows: ", nrow(ann_chrom), "\n", sep = "")
+```
+
+```{r write-peak-counts}
+# Small companion CSV used by `7_reproducibility_results.qmd`'s detected-peak-count
+# diagnostic. Keeps the consumer from having to re-read ~189 MB of
+# detected-peak CSVs just to count rows per injection.
+peak_counts <- peaks |>
+  count(lab, polarity, sample, name = "n_peaks")
+
+write.csv(peak_counts,
+          file.path(object_dir, "detected_peak_counts.csv"),
+          row.names = FALSE)
+
+cat("Wrote: ",
+    file.path(object_dir, "detected_peak_counts.csv"),
+    "\n  rows: ", nrow(peak_counts), "\n", sep = "")
+```
+
+# P3.4 Evaluate normalizations — pick a winner per data level
+
+The downstream QMDs should use **one** normalization per data level, not
+a buffet of options. This section evaluates each candidate strategy on
+the **Annotated Signal** (where the bulk of downstream analyses sit)
+and writes the chosen winner to `normalization_winners.csv`. Full /
+Detected / Consensus stay raw — there's no per-injection global factor
+worth applying at those levels (mixture-content differences dominate).
+
+## P3.4.1 RT-bin variance diagnostic (independent of whether we use it)
+
+Even if we end up not picking a per-bin normalization, the *spread of
+per-injection responses across RT bins* tells us whether response
+non-linearity along the gradient is large enough to matter. If
+within-injection bin-to-bin spread is small (every bin agrees with the
+injection-global factor), a global per-lab factor is sufficient.
+
+```{r rt-bin-variance}
+#| fig-cap: "Within-injection bin spread: for each (lab, sample, polarity), the SD of the per-decile log10 factor across the 10 RT bins. Large = response varies a lot along the gradient (a per-bin or LOESS factor would help); small = a global per-injection factor is sufficient."
+#| fig-height: 4
+bin_variance <- factor_decile_tbl |>
+  dplyr::filter(is.finite(factor_decile), factor_decile > 0) |>
+  group_by(lab, sample, polarity) |>
+  summarise(log_factor_sd = sd(log10(factor_decile)),
+            n_deciles_used = n(),
+            .groups = "drop") |>
+  dplyr::filter(n_deciles_used >= 3L)
+
+ggplot(bin_variance, aes(x = lab, y = log_factor_sd, fill = lab)) +
+  geom_violin(scale = "width", alpha = 0.7) +
+  geom_boxplot(width = 0.15, outlier.size = 0.5, alpha = 0.9) +
+  facet_wrap(~ polarity) +
+  labs(title = "Within-injection RT-bin variance",
+       subtitle = "log10 SD of per-decile factor across the 10 bins — how much does response vary along the gradient?",
+       x = NULL, y = "SD(log10 decile factor)") +
+  theme_bw() +
+  theme(legend.position = "none")
+
+# Median bin-SD per lab as a quick summary.
+knitr::kable(
+  bin_variance |>
+    group_by(lab, polarity) |>
+    summarise(median_bin_sd = round(median(log_factor_sd, na.rm = TRUE), 3),
+              p75_bin_sd    = round(quantile(log_factor_sd, 0.75, na.rm = TRUE), 3),
+              .groups       = "drop"),
+  caption = "Median and p75 of within-injection bin-to-bin SD per lab. ≪0.1 means a global factor is enough; ≥0.3 means a per-bin factor is materially better.")
+```
+
+## P3.4.2 Strategy comparison — annotated bulk ICC per strategy
+
+Compute the cross-lab bulk ICC (variance-component ratio defined in
+QMD 7 §Definitions) for each `(strategy × polarity)` on the Annotated
+Signal, using the same Strict compound set QMD 7 uses for its ICC
+ladder. Declare the strategy with the highest ICC per polarity as the
+winner.
+
+```{r normalization-winner-eval}
+#| fig-cap: "Bulk ICC of the Annotated Signal under each candidate normalization. Higher = labs agree more within each mixture relative to between-mixture spread. The Lab-median + Decile + LOESS candidates use the factor maps built above; Raw is `maxIntensity`; Aligned is Raw on the alignment-restricted compound set (isolating the alignment contribution from any intensity correction)."
+#| fig-height: 4
+
+# Lab-median strategy: divide each (lab, polarity)'s rows by that lab's
+# bulk median (computed on the same compound set) — the canonical
+# "Annotated-Normalized" strategy used by QMD 7.
+compute_lab_median_factor <- function(df) {
+  df |>
+    group_by(lab, polarity) |>
+    mutate(value_lab_median = median(maxIntensity, na.rm = TRUE),
+           maxIntensity_labmed =
+             maxIntensity / value_lab_median) |>
+    ungroup()
+}
+
+# Strict compound set: present (well-detected) in all 4 labs for that polarity.
+strict_set <- ann_chrom |>
+  filter(!is.na(maxIntensity), maxIntensity > 0) |>
+  distinct(mixture, compound, lab, polarity) |>
+  count(mixture, compound, polarity) |>
+  filter(n == 4L) |>
+  select(mixture, compound, polarity)
+
+strict_chrom <- ann_chrom |>
+  semi_join(strict_set, by = c("mixture", "compound", "polarity")) |>
+  filter(!is.na(maxIntensity), maxIntensity > 0)
+
+strict_chrom <- compute_lab_median_factor(strict_chrom)
+
+bulk_per_strat <- bind_rows(
+  strict_chrom |> mutate(value = maxIntensity,            strategy = "Raw"),
+  strict_chrom |> mutate(value = maxIntensity_labmed,     strategy = "Lab-median"),
+  strict_chrom |> mutate(value = maxIntensity_global,     strategy = "Global"),
+  strict_chrom |> mutate(value = maxIntensity_decile,     strategy = "Decile"),
+  strict_chrom |> mutate(value = maxIntensity_loess,      strategy = "LOESS")) |>
+  filter(!is.na(value), value > 0) |>
+  group_by(lab, mixture, polarity, strategy) |>
+  summarise(bulk = sum(value), .groups = "drop")
+
+icc_one <- function(df) {
+  df$logv  <- log2(df$bulk)
+  between <- var(tapply(df$logv, df$mixture, mean, na.rm = TRUE), na.rm = TRUE)
+  within  <- mean(tapply(df$logv, df$mixture, var, na.rm = TRUE), na.rm = TRUE)
+  if (!is.finite(between + within) || (between + within) == 0) return(NA_real_)
+  between / (between + within)
+}
+icc_strat <- bulk_per_strat |>
+  group_by(polarity, strategy) |>
+  group_modify(~ tibble(ICC = icc_one(.x))) |>
+  ungroup() |>
+  mutate(strategy = factor(strategy,
+                            levels = c("Raw", "Lab-median",
+                                       "Global", "Decile", "LOESS")))
+
+ggplot(icc_strat, aes(x = strategy, y = ICC, fill = strategy)) +
+  geom_col(width = 0.7, alpha = 0.85) +
+  geom_text(aes(label = sprintf("%.2f", ICC)), vjust = -0.4, size = 3.4) +
+  scale_fill_manual(values = strategy_palette) +
+  facet_wrap(~ polarity) +
+  labs(title = "Strategy comparison on Annotated Signal (Strict set)",
+       subtitle = "Higher = better cross-lab agreement after normalization",
+       x = NULL, y = "Bulk ICC") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  coord_cartesian(ylim = c(0, 1.05))
+
+# Pick the winner per polarity and write to disk.
+winners <- icc_strat |>
+  group_by(polarity) |>
+  slice_max(ICC, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  transmute(data_level = "Annotated Signal", polarity,
+            winner_strategy = as.character(strategy),
+            ICC = round(ICC, 3))
+
+# Full / Detected / Consensus winners — by design "Raw" (no normalization
+# applied at these levels; per-injection global factor is dominated by
+# mixture-content differences, not lab response).
+winners <- bind_rows(
+  tidyr::expand_grid(data_level = c("Full Signal", "Detected Signal",
+                                     "Consensus Signal"),
+                     polarity   = c("pos", "neg")) |>
+    mutate(winner_strategy = "Raw", ICC = NA_real_),
+  winners)
+
+write.csv(winners,
+          file.path(object_dir, "normalization_winners.csv"),
+          row.names = FALSE)
+knitr::kable(winners, caption = "Chosen normalization per data level × polarity.")
+```
+
+# P3.5 Full ICC ladder — every strategy × metric × compound-set policy
+
+The §P3.4 evaluation above looks at `maxIntensity` on the Strict set
+only — enough to declare the winner. This section is the **full
+ladder**: both abundance metrics (`maxIntensity` and `areaUnderTic`)
+across two compound-set policies, with all five normalization
+strategies. The plots below are the canonical reproducibility-by-
+normalization evidence for the deck.
+
+```{r p35-setup-subsets}
+#| message: false
+source(here("5_downstream_analysis_manual", "helpers.R"))
+
+strategy_palette <- c(Raw          = "#E64B35",
+                      Aligned      = "#999999",
+                      `Lab-median` = "#3B7C92",
+                      Global       = "#4DBBD5",
+                      Decile       = "#70AD47",
+                      LOESS        = "#4472C4")
+strategy_names <- c("Raw", "Aligned", "Lab-median",
+                    "Global", "Decile", "LOESS")
+metric_names   <- c("maxIntensity", "areaUnderTic")
+
+# Well-detected set = (mixture, compound, polarity) tuples with a
+# positive maxIntensity in all 4 labs (matches Annotated Signal in
+# QMD 8 §1.2).
+well_detected <- ann_chrom |>
+  filter(!is.na(maxIntensity), maxIntensity > 0) |>
+  distinct(mixture, lab, compound, polarity) |>
+  group_by(mixture, compound, polarity) |>
+  filter(n_distinct(lab) == 4L) |>
+  ungroup() |>
+  distinct(mixture, compound, polarity)
+
+# Dominant peak per (lab, mixture, polarity, compound) — collapse
+# adducts / sources to one value before summing.
+ann_well <- ann_chrom |>
+  inner_join(well_detected, by = c("mixture", "compound", "polarity")) |>
+  group_by(lab, mixture, polarity, compound) |>
+  slice_max(maxIntensity, n = 1, with_ties = FALSE) |>
+  ungroup()
+
+# Strict subset = also require aligned_rt for all 4 labs.
+well_aligned <- ann_well |>
+  filter(!is.na(aligned_rt)) |>
+  count(mixture, compound, polarity, name = "n_labs_aligned") |>
+  filter(n_labs_aligned == 4L) |>
+  select(mixture, compound, polarity)
+ann_well_aligned <- ann_well |>
+  inner_join(well_aligned, by = c("mixture", "compound", "polarity"))
+
+cat("Well-detected (mixture, compound, polarity) tuples:",
+    nrow(well_detected), "\n")
+cat("Strict subset (all 4 labs aligned):", nrow(well_aligned), "\n")
+```
+
+```{r p35-bulk-icc-strategies}
+make_bulk_for <- function(metric_col, mode = c("strict", "inclusive")) {
+  mode       <- match.arg(mode)
+  global_col <- paste0(metric_col, "_global")
+  decile_col <- paste0(metric_col, "_decile")
+  loess_col  <- paste0(metric_col, "_loess")
+
+  factor_set <- if (mode == "strict") ann_well_aligned else ann_well
+  set_label  <- if (mode == "strict")
+                  sprintf("Strict (4/4 aligned, n = %d)", nrow(well_aligned))
+                else
+                  sprintf("Inclusive (all well-detected, n = %d)",
+                          nrow(well_detected))
+
+  bulk_raw <- factor_set |>
+    group_by(lab, mixture, polarity) |>
+    summarise(bulk = sum(.data[[metric_col]], na.rm = TRUE),
+              .groups = "drop") |>
+    mutate(strategy = "Raw")
+
+  bulk_aligned <- if (mode == "strict") {
+    ann_well_aligned |>
+      group_by(lab, mixture, polarity) |>
+      summarise(bulk = sum(.data[[metric_col]], na.rm = TRUE),
+                .groups = "drop") |>
+      mutate(strategy = "Aligned")
+  } else NULL
+
+  bulk_norm <- factor_set |>
+    mutate(int_global = .data[[global_col]],
+           int_decile = coalesce(.data[[decile_col]], .data[[global_col]]),
+           int_loess  = coalesce(.data[[loess_col]],  .data[[global_col]])) |>
+    group_by(lab, mixture, polarity) |>
+    summarise(Global = sum(int_global, na.rm = TRUE),
+              Decile = sum(int_decile, na.rm = TRUE),
+              LOESS  = sum(int_loess,  na.rm = TRUE),
+              .groups = "drop") |>
+    pivot_longer(c(Global, Decile, LOESS),
+                 names_to = "strategy", values_to = "bulk")
+
+  bind_rows(bulk_raw, bulk_aligned, bulk_norm) |>
+    mutate(metric = metric_col, alignment_set = set_label)
+}
+
+bulk_all <- bind_rows(
+  make_bulk_for("maxIntensity", "strict"),
+  make_bulk_for("areaUnderTic", "strict"),
+  make_bulk_for("maxIntensity", "inclusive"),
+  make_bulk_for("areaUnderTic", "inclusive"))
+
+# Lab-median strategy = each (lab, polarity) bulk divided by that pair's
+# median across mixtures. Computed from the Raw bulk distribution itself.
+lab_med_per_set <- bulk_all |>
+  filter(strategy == "Raw") |>
+  group_by(alignment_set, metric, lab, polarity) |>
+  summarise(med_bulk = median(bulk, na.rm = TRUE), .groups = "drop")
+
+bulk_labmed <- bulk_all |>
+  filter(strategy == "Raw") |>
+  left_join(lab_med_per_set,
+            by = c("alignment_set", "metric", "lab", "polarity")) |>
+  mutate(bulk = bulk / med_bulk, strategy = "Lab-median") |>
+  select(-med_bulk)
+bulk_all <- bind_rows(bulk_all, bulk_labmed)
+
+# ICC per (metric, polarity, strategy, alignment_set).
+icc_all <- bind_rows(lapply(metric_names, function(m) {
+  bind_rows(lapply(unique(bulk_all$alignment_set), function(aset) {
+    bind_rows(lapply(c("pos", "neg"), function(pol_str) {
+      pol_name <- if (pol_str == "pos") "Positive" else "Negative"
+      bind_rows(lapply(strategy_names, function(s) {
+        df <- bulk_all |> filter(metric == m, polarity == pol_str,
+                                  alignment_set == aset, strategy == s)
+        if (!nrow(df) || all(is.na(df$bulk))) return(NULL)
+        res <- compute_icc(df, "bulk")
+        res$strategy      <- s
+        res$polarity      <- pol_name
+        res$metric        <- m
+        res$alignment_set <- aset
+        res
+      }))
+    }))
+  }))
+}))
+
+icc_all |>
+  transmute(alignment_set, metric, polarity, strategy,
+            ICC = round(ICC, 3)) |>
+  arrange(alignment_set, metric, polarity,
+          factor(strategy, levels = strategy_names)) |>
+  knitr::kable(caption = "Annotated-Signal bulk ICC per (alignment_set × metric × polarity × strategy).")
+```
+
+```{r p35-icc-bar-plot}
+#| fig-cap: "Reproducibility (ICC) by normalization strategy. One panel per (compound-set policy × metric × polarity). Bars left-to-right show Raw → Aligned → Lab-median → Global → Decile → LOESS. Taller = more reproducible. Dashed red = ICC 0.5 (moderate-reproducibility landmark). Lab-median consistently wins."
+#| fig-height: 12
+icc_all |>
+  mutate(strategy = factor(strategy, levels = strategy_names)) |>
+  ggplot(aes(x = strategy, y = ICC, fill = strategy)) +
+  geom_col(alpha = 0.85) +
+  geom_text(aes(label = sprintf("%.3f", ICC)),
+            vjust = -0.4, size = 3) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", colour = "red") +
+  facet_grid(alignment_set + metric ~ polarity, switch = "y") +
+  scale_fill_manual(values = strategy_palette) +
+  ylim(NA, 1) +
+  labs(x = NULL, y = "ICC (cross-lab reproducibility)",
+       title = "Reproducibility (ICC) by normalization strategy",
+       subtitle = "Higher = labs agree more within each mixture relative to between-mixture spread. Red = ICC 0.5.") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 30, hjust = 1),
+        strip.text.y.left = element_text(size = 8))
+```
+
+```{r p35-variance-decomp-plot}
+#| fig-cap: "Variance decomposition under each normalization strategy: how does total log2-bulk variance split into Between-mixture (the biological signal we want) vs Within-mixture (lab disagreement on the same mixture)? Bigger blue / smaller red = higher ICC."
+#| fig-height: 12
+icc_all |>
+  mutate(strategy = factor(strategy, levels = strategy_names)) |>
+  select(metric, polarity, strategy, alignment_set,
+         Between_mixture_var, Within_mixture_var) |>
+  pivot_longer(c(Between_mixture_var, Within_mixture_var),
+               names_to = "source", values_to = "variance") |>
+  mutate(source = recode(source,
+                         Between_mixture_var = "Between mixtures (signal)",
+                         Within_mixture_var  = "Within mixtures (lab noise)")) |>
+  ggplot(aes(x = strategy, y = variance, fill = source)) +
+  geom_col(position = "stack", alpha = 0.85) +
+  facet_grid(alignment_set + metric ~ polarity,
+             scales = "free_y", switch = "y") +
+  scale_fill_manual(values = c(`Between mixtures (signal)`   = "#619CFF",
+                               `Within mixtures (lab noise)` = "#F8766D")) +
+  labs(x = NULL, y = "Variance (log2)", fill = NULL,
+       title = "Variance decomposition — biology vs cross-lab disagreement",
+       subtitle = "Between = mixture-to-mixture biology | Within = labs disagreeing on the same mixture") +
+  theme_bw() +
+  theme(legend.position = "top",
+        axis.text.x = element_text(angle = 30, hjust = 1),
+        strip.text.y.left = element_text(size = 8))
+```
+
+# P3.6 Pairwise ICC across all 6 lab pairs
+
+The all-labs ICC pools 4 labs into one number. The pairwise version
+scores **each pair on its own**: brighter blue = the pair agrees
+within each mixture as tightly as the mixtures differ. The
+**same-platform pair** (afekta + cembio, both Agilent, marked ★) is
+the ceiling reference — what reproducibility is achievable when
+platform is held constant. Cross-vendor pairs approaching the ★ tile =
+harmonized LC + good normalization is closing the platform gap.
+
+**Reading the numbers (labels are ICC to 3 decimals).** No pair reaches a
+true 1.0 — the highest is the same-platform afekta + cembio pair (≈ 0.996
+for negative-mode `areaUnderTic` under lab-median normalization); at two
+decimals that rounds to `1.00`, which overstates it, so we print three.
+Two things keep this honest. (1) This is a **bulk** ICC on the *summed*
+signal per mixture — agreement on a 117-compound total is easier to
+reproduce than any single compound, so it runs higher than the
+per-compound Spearman in QMD 7 (the stricter view). Same vendor + the same
+lab-median centering makes two Agilent labs' per-mixture totals nearly
+proportional, which is why ≈ 0.99 is plausible, not anomalous. (2) The
+**all-4-labs ICC (§P3.5) sits *below* every pairwise ICC** — expected, not
+a bug: ICC(1) pools the four labs as exchangeable replicates, so the two
+cross-platform labs (hmgu / Sciex, icl / Waters) inflate the
+within-mixture variance for *every* mixture at once, collapsing the pooled
+value below even the worst pair. The pairwise view reveals the structure
+(same-platform high, cross-vendor low); the pooled number is the
+conservative "do all four mutually agree" summary.
+
+```{r p36-pairwise-icc}
+strict_label <- sprintf("Strict (4/4 aligned, n = %d)", nrow(well_aligned))
+lab_pairs <- list(
+  c("afekta", "cembio"), c("afekta", "hmgu"), c("afekta", "icl"),
+  c("cembio", "hmgu"),   c("cembio", "icl"),  c("hmgu",   "icl"))
+agilent_labs <- c("afekta", "cembio")
+
+icc_pairs <- bind_rows(lapply(lab_pairs, function(p) {
+  pair_label <- paste(sort(p), collapse = " + ")
+  bulk_pair  <- bulk_all |> filter(lab %in% p)
+  bind_rows(lapply(metric_names, function(m) {
+    bind_rows(lapply(unique(bulk_pair$alignment_set), function(aset) {
+      bind_rows(lapply(c("pos", "neg"), function(pol_str) {
+        pol_name <- if (pol_str == "pos") "Positive" else "Negative"
+        bind_rows(lapply(strategy_names, function(s) {
+          df <- bulk_pair |> filter(metric == m, polarity == pol_str,
+                                    alignment_set == aset, strategy == s)
+          if (!nrow(df) || all(is.na(df$bulk))) return(NULL)
+          res <- compute_icc(df, "bulk")
+          res$strategy      <- s
+          res$polarity      <- pol_name
+          res$metric        <- m
+          res$alignment_set <- aset
+          res$pair          <- pair_label
+          res$same_platform <- all(p %in% agilent_labs)
+          res
+        }))
+      }))
+    }))
+  }))
+}))
+```
+
+```{r p36-pairwise-heatmap}
+#| fig-cap: "Pairwise ICC, all normalization strategies. ★ = same-platform Agilent pair (afekta + cembio), the ceiling reference. Brighter blue = the pair agrees within each mixture as tightly as the mixtures differ."
+#| fig-height: 9
+icc_pairs |>
+  filter(alignment_set == strict_label) |>
+  mutate(pair = factor(pair, levels = sapply(lab_pairs,
+                                              \(p) paste(sort(p), collapse = " + "))),
+         strategy = factor(strategy, levels = strategy_names),
+         pair_label = ifelse(same_platform,
+                             paste(as.character(pair), "★"),
+                             as.character(pair))) |>
+  ggplot(aes(x = strategy, y = reorder(pair_label, ICC), fill = ICC)) +
+  geom_tile(colour = "white", linewidth = 0.3) +
+  geom_text(aes(label = sprintf("%.3f", ICC)), size = 2.5) +
+  facet_grid(metric ~ polarity) +
+  scale_fill_gradient2(low = "white", mid = "#FDC086", high = "#1F77B4",
+                       midpoint = 0.5, limits = c(0, 1), name = "ICC") +
+  labs(x = "Strategy", y = "Lab pair (★ = same platform)",
+       title = "Pairwise ICC by normalization strategy",
+       subtitle = sprintf("Strict subset (n = %d)", nrow(well_aligned))) +
+  theme_bw() +
+  theme(legend.position = "right",
+        axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+# Next step
+
+The normalized annotated peaks (with **every** candidate factor for
+audit) live in `annotation_chrom_metrics_normalized.csv`; the **chosen
+winner per data level × polarity** is in `normalization_winners.csv`.
+Downstream QMDs should default to the winner and treat the other
+strategies as comparison material only.
+
+For the **headline reproducibility numbers on the chosen winner**
+(Raw vs Lab-median pairwise ICC, per-compound Spearman ρ across lab
+pairs, variance decomposition + PCA + UMAP at the data-level
+progression), see `7_reproducibility_results.qmd`.

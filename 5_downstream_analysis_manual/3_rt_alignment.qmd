@@ -1,0 +1,280 @@
+---
+title: "RT alignment + EIC extraction — manual curation"
+format:
+    html:
+        toc: true
+        toc-location: right
+        code-fold: true
+        embed-resources: true
+---
+
+# Goal
+
+Apply the cross-lab **NAPS RT alignment** and extract **SNR-aware EICs** over the
+manually-curated peaks, producing `annotation_chrom_metrics.csv` — the input the
+downstream steps (`5_normalization` → `8_per_compound_diagnostics` →
+`7_reproducibility_results`) consume.
+
+This mirrors `5_downstream_analysis/3_rt_alignment.qmd` (§P2.2–§P2.5 diagnostics
++ §P2.10 EIC) with **two deliberate differences**: (1) **MS1 anchoring is
+skipped** — the curated `rtmed` is already the chromatographic apex and there is
+no SIRIUS project to anchor to; (2) we reuse the **NAPS-only splines** (the
+cross-lab RT calibration is annotation-independent; the same `splines` the SIRIUS
+track fit). We also write an **`aligned_rt`** column into
+`annotation_chrom_metrics.csv` so every downstream RT plot uses the
+cross-lab-comparable aligned RT rather than each lab's local clock.
+
+## Setup
+
+```{r setup}
+#| message: false
+library(ggplot2); library(here); library(scales)
+source(here("5_downstream_analysis_manual", "annotated_eic_pipeline.R"))  # run_annotated_eic_pipeline, apply_fwd
+# Sourcing the pipeline attaches xcms/S4Vectors, which mask dplyr/tidyr verbs
+# (rename, first, filter, …). A plain library() is a no-op for an already-attached
+# package — it will NOT re-order the search path — so detach + re-attach dplyr/tidyr
+# to force them to the FRONT, ahead of S4Vectors. apply_fwd /
+# run_annotated_eic_pipeline remain available as global functions.
+suppressWarnings(suppressMessages({
+  for (p in c("tidyr", "dplyr")) {
+    try(detach(paste0("package:", p), character.only = TRUE, unload = FALSE), silent = TRUE)
+    library(p, character.only = TRUE)
+  }
+}))
+obj  <- here("5_downstream_analysis_manual", "object")
+orig <- here("5_downstream_analysis_manual", "object")
+labs <- c("afekta", "cembio", "hmgu", "icl")
+```
+
+## 1. NAPS data + fit alignment splines
+
+```{r fit-splines}
+# NAPS replicate apex RTs (exact-mass standards; annotation-independent, from
+# 2_naps_extraction.qmd). One row per (lab, polarity, anchor, replicate).
+naps_long <- read.csv(file.path(orig, "naps_chrom_metrics.csv"), stringsAsFactors = FALSE) |>
+  filter(!is.na(apex_rt)) |>
+  rename(rt_sec = apex_rt)
+
+# Per-lab median apex RT per anchor + cross-lab consensus (median across labs).
+# Also reused by the §3 drift plot.
+per_lab_median <- naps_long |>
+  group_by(lab, polarity, anchor_n) |>
+  summarise(rt_med = median(rt_sec, na.rm = TRUE), n_rep = sum(!is.na(rt_sec)), .groups = "drop") |>
+  filter(n_rep >= 1L)
+consensus_rt <- per_lab_median |>
+  group_by(polarity, anchor_n) |>
+  summarise(consensus_rt = median(rt_med, na.rm = TRUE), n_labs = n_distinct(lab), .groups = "drop") |>
+  filter(n_labs >= 2L)
+
+# Anchor table (lab apex RT -> consensus RT). NAPS-only, annotation-independent,
+# so the splines are fit here from naps_chrom_metrics — no precomputed file needed.
+anchor_table <- per_lab_median |>
+  inner_join(consensus_rt |> select(polarity, anchor_n, consensus_rt),
+             by = c("polarity", "anchor_n")) |>
+  transmute(lab, polarity, anchor_n, rt_local = rt_med, consensus_rt)
+
+# Per-(lab, polarity) Hyman monotonic spline. splinefun(method = "hyman") needs
+# (rt_local, consensus_rt) monotone in both: dedupe x, enforce monotone y via
+# isoreg (PAV), dedupe y, then hyman -> monoH.FC -> linear approxfun fallback.
+fit_one_spline <- function(df) {
+  df <- df |> filter(is.finite(rt_local), is.finite(consensus_rt))
+  if (nrow(df) < 4L) return(NULL)
+  df <- df |> group_by(rt_local) |>
+    summarise(consensus_rt = median(consensus_rt), .groups = "drop") |> arrange(rt_local)
+  df$consensus_rt <- isoreg(df$rt_local, df$consensus_rt)$yf
+  df <- df |> group_by(consensus_rt) |>
+    summarise(rt_local = mean(rt_local), .groups = "drop") |> arrange(rt_local)
+  if (nrow(df) < 4L) return(NULL)
+  tryCatch(splinefun(df$rt_local, df$consensus_rt, method = "hyman"),
+    error = function(e1) tryCatch(
+      splinefun(df$rt_local, df$consensus_rt, method = "monoH.FC"),
+      error = function(e2) approxfun(df$rt_local, df$consensus_rt, method = "linear", rule = 2)))
+}
+.grps <- anchor_table |> group_by(lab, polarity) |> group_split()
+names(.grps) <- vapply(.grps, function(d) paste(d$lab[1], d$polarity[1], sep = "_"), character(1))
+splines <- lapply(.grps, fit_one_spline)
+
+# Persist for the consensus builder (4_consensus_peaks.qmd) + audit.
+save(splines, file = file.path(obj, "rt_alignment_splines.RData"))
+write.csv(anchor_table, file.path(obj, "rt_alignment_anchors.csv"), row.names = FALSE)
+cat("fitted spline keys:", paste(names(splines), collapse = ", "), "\n")
+```
+
+## 2. Within-lab NAPS precision — the floor (§P2.2)
+
+Per `(lab, polarity, anchor)`, SD of apex RT across replicates is the within-lab
+precision; its median is the **floor** — the best cross-lab agreement physically
+achievable. After alignment, cross-lab SD should approach (not beat) it.
+
+```{r within-lab-sd}
+within_lab_sd <- naps_long |>
+  group_by(lab, polarity, anchor_n) |>
+  summarise(n_rep = n(), rt_sd = sd(rt_sec, na.rm = TRUE), .groups = "drop") |>
+  filter(n_rep >= 2L, !is.na(rt_sd))
+within_lab_sd |>
+  group_by(lab, polarity) |>
+  summarise(n_anchors = n(), median_sd = round(median(rt_sd), 3),
+            p95_sd = round(quantile(rt_sd, 0.95), 3), .groups = "drop") |>
+  knitr::kable(caption = "Within-lab NAPS replicate SD (seconds).")
+```
+
+```{r within-lab-sd-plot}
+#| fig-height: 4
+#| fig-cap: "Per-anchor within-lab replicate SD (s, log). Median per (lab, polarity) = the precision floor."
+ggplot(within_lab_sd |> filter(rt_sd > 0), aes(x = lab, y = rt_sd, fill = polarity)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(aes(group = polarity),
+              position = position_jitterdodge(jitter.width = 0.1, dodge.width = 0.8),
+              alpha = 0.5, size = 0.8) +
+  scale_y_log10() +
+  labs(x = NULL, y = "Within-lab replicate SD (s, log)", fill = "Polarity",
+       title = "Within-lab NAPS replicate precision") +
+  theme_bw() + theme(legend.position = "top", axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+## 3. Per-lab NAPS RT vs consensus — the drift (§P2.3)
+
+Each lab's per-anchor median RT vs the cross-lab consensus. On the diagonal = no
+drift; systematic offset = per-lab gradient drift the splines remove.
+
+```{r consensus-plot}
+#| fig-height: 4
+#| fig-cap: "Each point = one (lab, NAPS anchor): y = lab-local median apex RT, x = cross-lab consensus RT. Dashed diagonal = elutes where the consortium does; offset = per-lab drift."
+# per_lab_median + consensus_rt are computed in §1 (the spline fit).
+per_lab_median |>
+  inner_join(consensus_rt, by = c("polarity", "anchor_n")) |>
+  ggplot(aes(x = consensus_rt, y = rt_med, colour = lab)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_point(size = 2, alpha = 0.85) +
+  facet_wrap(~ polarity, scales = "free") +
+  labs(x = "Consensus RT (s)", y = "Lab-local median RT (s)", colour = "Lab",
+       title = "Per-lab NAPS RT vs consensus") +
+  theme_bw() + theme(legend.position = "top")
+```
+
+## 4. Per-lab monotonic spline alignment (§P2.4)
+
+```{r spline-curves-plot}
+#| fig-height: 6
+#| fig-cap: "Per-lab spline alignment curves. x = local apex RT (s); y = consensus/aligned RT (s). Dashed diagonal = identity. Points = NAPS anchors the splines were fit to."
+plot_grid <- bind_rows(lapply(names(splines), function(key) {
+  parts <- strsplit(key, "_")[[1]]; lab_i <- parts[1]; pol_i <- parts[2]
+  rng <- anchor_table |> filter(lab == lab_i, polarity == pol_i) |> pull(rt_local) |> range(na.rm = TRUE)
+  if (any(!is.finite(rng))) return(NULL)
+  rt_seq <- seq(rng[1], rng[2], length.out = 400)
+  data.frame(lab = lab_i, polarity = pol_i, rt_local = rt_seq, rt_aligned = splines[[key]](rt_seq))
+}))
+ggplot(plot_grid, aes(x = rt_local, y = rt_aligned, colour = lab)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_line(linewidth = 0.9) +
+  geom_point(data = anchor_table, aes(x = rt_local, y = consensus_rt, colour = lab),
+             size = 1.5, alpha = 0.6, inherit.aes = FALSE) +
+  facet_wrap(~ polarity, scales = "free") +
+  labs(x = "Local apex RT (s)", y = "Consensus / aligned RT (s)", colour = "Lab",
+       title = "Per-lab monotonic spline alignment",
+       subtitle = "Lines = spline; points = anchors (NAPS)") +
+  theme_bw() + theme(legend.position = "top")
+```
+
+## 5. EIC extraction over the curated peaks (§P2.10) + write `aligned_rt`
+
+```{r run-eic}
+#| message: false
+feat <- read.csv(file.path(obj, "feat_rts.csv"), stringsAsFactors = FALSE,
+                 colClasses = c(mixture = "character"))
+mixtures <- sort(unique(feat$mixture))
+res <- run_annotated_eic_pipeline(
+  feat_rts_path = file.path(obj, "feat_rts.csv"),
+  identity_path = file.path(obj, "annotation_identity.csv"),
+  splines = splines, anchor_table = anchor_table,
+  output_path = file.path(obj, "annotation_chrom_metrics.csv"),
+  labs = labs, mixtures = mixtures, pad_wide = 30)
+
+# Add aligned_rt (each lab's apex RT mapped onto the consensus axis) so all
+# downstream RT plots use the cross-lab-comparable aligned RT, then re-write.
+m <- res$annotation_chrom_metrics |>
+  group_by(lab, polarity) |>
+  mutate(aligned_rt = apply_fwd(apex_rt, dplyr::first(lab), dplyr::first(polarity),
+                                splines, anchor_table)) |>
+  ungroup()
+write.csv(m, file.path(obj, "annotation_chrom_metrics.csv"), row.names = FALSE)
+cat("annotation_chrom_metrics.csv rows:", nrow(m), "| with aligned_rt:", sum(!is.na(m$aligned_rt)), "\n")
+knitr::kable(as.data.frame.matrix(table(m$lab, m$detection)),
+             caption = "EIC detection outcome per lab.")
+```
+
+## 6. Cross-lab apex-RT residual: before vs after alignment (§P2.5)
+
+Per `(mixture, compound)` detected in ≥2 labs: SD of raw `apex_rt` (Before) vs SD
+of `aligned_rt` (After). After alignment the spread should drop toward the
+within-lab floor.
+
+```{r residual-df}
+# QC residual restricted to SIRIUS-confirmed compounds (best_structure_rank not
+# NA), matching the rest of the downstream. The written annotation_chrom_metrics
+# (§5) stays the full canonical EIC output; only this QC plot is scoped.
+.confirmed <- read.csv(file.path(obj, "annotation_identity.csv"),
+                       stringsAsFactors = FALSE, colClasses = c(mixture = "character")) |>
+  filter(!is.na(best_structure_rank)) |>
+  mutate(mixture = gsub("\\.", "_", mixture)) |>
+  distinct(mixture, compound)
+chrom_aligned <- m |>
+  semi_join(.confirmed, by = c("mixture", "compound")) |>
+  filter(detection == "detected", !is.na(apex_rt), !is.na(aligned_rt)) |>
+  group_by(mixture, compound, polarity, lab) |>
+  slice_max(maxIntensity, n = 1, with_ties = FALSE) |> ungroup()
+residual_df <- chrom_aligned |>
+  group_by(mixture, compound, polarity) |>
+  summarise(n_labs = n_distinct(lab), rt_consensus = median(aligned_rt, na.rm = TRUE),
+            sd_raw = sd(apex_rt, na.rm = TRUE), sd_aligned = sd(aligned_rt, na.rm = TRUE),
+            .groups = "drop") |>
+  filter(n_labs >= 2L, !is.na(sd_raw), !is.na(sd_aligned))
+floor_sd <- median(within_lab_sd$rt_sd, na.rm = TRUE)
+residual_df |>
+  summarise(n = n(), median_sd_raw = round(median(sd_raw), 2),
+            median_sd_aligned = round(median(sd_aligned), 2),
+            p95_sd_raw = round(quantile(sd_raw, 0.95), 2),
+            p95_sd_aligned = round(quantile(sd_aligned, 0.95), 2)) |>
+  knitr::kable(caption = "Cross-lab apex-RT SD (seconds) before vs after alignment.")
+```
+
+```{r residual-vs-floor}
+#| fig-height: 5
+#| fig-cap: "Distribution of cross-lab apex-RT SD before (grey) vs after (blue) alignment. Red line = median within-lab NAPS floor."
+residual_long <- residual_df |>
+  select(mixture, compound, polarity, sd_raw, sd_aligned) |>
+  pivot_longer(c(sd_raw, sd_aligned), names_to = "stage", values_to = "sd_s") |>
+  mutate(stage = recode(stage, sd_raw = "Before", sd_aligned = "After"),
+         stage = factor(stage, levels = c("Before", "After")))
+ggplot(residual_long |> filter(sd_s > 0), aes(x = sd_s, fill = stage)) +
+  geom_histogram(bins = 60, alpha = 0.7, position = "identity") +
+  geom_vline(xintercept = floor_sd, colour = "red", linetype = "dashed") +
+  annotate("text", x = floor_sd, y = Inf, label = sprintf("within-lab floor = %.2f s", floor_sd),
+           hjust = -0.05, vjust = 1.4, colour = "red", size = 3) +
+  scale_fill_manual(values = c(Before = "grey60", After = "#4DBBD5")) +
+  scale_x_log10(labels = scales::label_number(accuracy = 0.1)) +
+  facet_wrap(~ polarity) +
+  labs(x = "Cross-lab apex-RT SD (s, log)", y = "Count", fill = NULL,
+       title = "Cross-lab RT residual before vs after per-lab alignment") +
+  theme_bw() + theme(legend.position = "top")
+```
+
+```{r residual-by-rt-region}
+#| fig-height: 4
+#| fig-cap: "Cross-lab SD vs consensus apex RT, before (grey) and after (blue). x = where the peak elutes on the consensus axis. Wider band at early RT = the NAPS-sparse polar region."
+residual_df |>
+  pivot_longer(c(sd_raw, sd_aligned), names_to = "stage", values_to = "sd_s") |>
+  mutate(stage = recode(stage, sd_raw = "Before", sd_aligned = "After"),
+         stage = factor(stage, levels = c("Before", "After"))) |>
+  filter(sd_s > 0) |>
+  ggplot(aes(x = rt_consensus, y = sd_s, colour = stage)) +
+  geom_point(alpha = 0.5, size = 1) +
+  geom_smooth(method = "loess", formula = y ~ x, se = FALSE, linewidth = 0.8) +
+  geom_hline(yintercept = floor_sd, colour = "red", linetype = "dashed") +
+  scale_colour_manual(values = c(Before = "grey50", After = "#4DBBD5")) +
+  scale_y_log10() +
+  facet_wrap(~ polarity) +
+  labs(x = "Consensus apex RT (s)", y = "Cross-lab SD (s, log)", colour = NULL,
+       title = "Residual SD vs consensus RT") +
+  theme_bw() + theme(legend.position = "top")
+```
