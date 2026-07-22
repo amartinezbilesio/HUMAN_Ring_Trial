@@ -638,4 +638,4 @@ kable(cbind(`order` = seq_len(nrow(ord)), ord), format = "html", row.names = FAL
 Sorted by acquisition time the true mixture column reads `2_1, 2_2, 2_3 ... 2_10`, perfectly
 sequential. The instrument ran the mixtures in the correct order and only the vial labels were
 permuted: the second injection was labelled `2.10` instead of `2.2`, pushing every later label
-down by one. `build_spectral_library.R` already applies the corrected map.
+down by one. `build_spectral_library_provenance.R` already applies the corrected map.
