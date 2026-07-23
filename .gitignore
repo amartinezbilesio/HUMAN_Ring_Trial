@@ -28,14 +28,11 @@
 
 # SIRIUS projects and per-run outputs (regenerated locally)
 *.sirius
-3_annotation_manual/HE/3_Sirius_curation/results_all_ms2/
-3_annotation_manual/HE/3_Sirius_curation/results_all_ms2_pg/
-3_annotation_manual/HE/3_Sirius_curation/results_consensus_all/
-
-# Superseded SIRIUS annotations (kept local only; the repo keeps the newer
-# precursor-grouping all-MS2 qmd, sirius_annotation_all_ms2_pg.qmd)
-3_annotation_manual/HE/3_Sirius_curation/sirius_annotation_consensus.qmd
-3_annotation_manual/HE/3_Sirius_curation/sirius_annotation_all_ms2.qmd
+2_annotation_auto/sirius_all_ms2/results/
+# semi-auto SIRIUS per-run output
+3_annotation_manual/HE/3_Sirius_curation/results/
+# orphaned render of a removed qmd
+3_annotation_manual/HE/3_Sirius_curation/sirius_annotation_all_ms2.html
 
 # All-MS2 / precursor-grouping downstream (superseded by the manual track; local only)
 5_downstream_analysis/
@@ -73,4 +70,5 @@ redner.sh
 /results/
 /downstream_analysis/
 /standard_mixes_prep
-3_annotation_manual/HE/3_Sirius_curation/run_sirius_cluster.R
+# Cluster runner: contains a hardcoded SIRIUS password -> never commit (moved 2026-07-16)
+2_annotation_auto/sirius_all_ms2/run_sirius_cluster.R
