@@ -23,6 +23,8 @@ method_of <- function(pass, lab) {
   if (pass == "richest") return("richest-scan")
   switch(lab, afekta = "richest-per-CE", cembio = "all-scans", icl = "all-scans", hmgu = "richest-scan")
 }
+## `pass` column label: the second run is stored under results/richest but is reported as "secondary"
+pass_label <- function(p) if (p == "richest") "secondary" else p
 ## hmgu group-2 vial relabel: file label -> true mixture (cyclic, nothing lost)
 true_mix <- function(lab, mx) {
   if (lab != "hmgu") return(mx)
@@ -50,7 +52,7 @@ for (pass in c("primary", "richest")) for (lab in LABS) {
     fprov <- file.path(RES, pass, sprintf("provenance_%s_mix_%s.csv", lab, mx))
     if (!file.exists(ffull)) next                        # that pass simply wasn't run -> not a gap
     if (!file.exists(fprov)) {                           # annotated but provenance missing -> flag it
-      gaps[[length(gaps) + 1L]] <- data.frame(pass = pass, lab = lab, mixture = mx,
+      gaps[[length(gaps) + 1L]] <- data.frame(pass = pass_label(pass), lab = lab, mixture = mx,
         issue = "provenance missing - rerun runner with provenance_only <- TRUE", stringsAsFactors = FALSE); next
     }
     d <- read.csv(ffull, stringsAsFactors = FALSE, check.names = FALSE)
@@ -72,7 +74,7 @@ for (pass in c("primary", "richest")) for (lab in LABS) {
       lab = lab, file_mixture = mx, true_mixture = tm, mislabeled = (tm != mx),
       compound = j$compound, target_InChIKey = j$target_InChIKey, inchikey_2d = j$k2,
       sirius_structure = j$structureName, molecular_formula = j$molecularFormula, adduct = j$adduct,
-      method = method_of(pass, lab), pass = pass,
+      method = method_of(pass, lab), pass = pass_label(pass),
       feature_id = j$xcms_fts, file = j$file, scan_index = j$scan_index,
       acquisition_num = j$acquisition_num, rt_sec = j$rt_sec,
       # precursor_mz_raw = the true experimental precursor of THIS scan (what a library needs);
