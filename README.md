@@ -5,37 +5,45 @@ This repository contains the analysis for the **Ring Trial study**, part of the
 
 ## 📖 Study Overview
 
-The goal of this study is to understand the sources of variability between
-different LC-MS setups used in metabolomics. We compare multiple LC-MS methods
-across the participating laboratories (Afekta, Cembio, HMGU, ICL).
+**The goal of this branch is to build a spectral library** from the MetaSci
+standard mixtures. Because each mixture's composition is known ahead of time, the
+spike-in panel is annotated **fully automatically** — every MS2-bearing feature
+is scored with SIRIUS, with no manual curation — and the confirmed annotations,
+with their acquisition provenance, become the input the spectral library is
+assembled from.
 
-**Experimental design:**
+It is part of the wider **Ring Trial study** (HUMAN Doctoral Network), which
+compares LC-MS setups across the participating laboratories (Afekta, Cembio,
+HMGU, ICL) to understand where cross-lab variability comes from. The library
+built here is the reference underpinning that comparison.
 
-1. **Lab-specific method** — each lab analyses the mixtures with its standard,
-   everyday LC-MS protocol.
-2. **HUMAN reference method** — all labs analyse the same mixtures with a
-   standardized method (common column and gradient).
-3. **Samples** — mixtures from the MetaSci metabolite standard library, so the
+**Data:**
+
+1. **Samples** — mixtures from the MetaSci metabolite standard library, so the
    ground-truth composition of each mixture is known.
+2. **HUMAN reference method** — all labs analyse the same mixtures with a
+   standardized method (common column and gradient); the **HE** class covered
+   here uses this method.
+3. **Lab-specific method** — each lab also runs its everyday protocol (used
+   elsewhere in the study).
 
-> **This branch holds the fully automatic annotation.** It takes the
+> **This branch is the fully automatic library-building track.** It runs from the
 > preprocessed data straight to a SIRIUS annotation of every MS2-bearing feature
 > and the spectral-library provenance that annotation produces, with **no manual
 > curation**. The **semi-automated (expert-curated) annotation** and the
 > **cross-lab reproducibility analysis** built on it live on the
 > `semi-automated-and-downstream` branch, which carries its own README.
 >
-> Coverage is currently the **HE** chemical class (standardized reference
-> method); the other classes (FE, Others) follow the same pipeline and are being
-> added.
+> Coverage is currently the **HE** chemical class; the other classes (FE, Others)
+> follow the same pipeline and are being added.
 
 -----
 
 ## 📂 Project Structure & Workflow
 
-Three numbered folders, run in order: preprocess the raw scans, annotate every
-MS2 feature with SIRIUS, then turn the annotations into a spectral-library
-provenance table.
+Three numbered folders, run in order, ending in the library: preprocess the raw
+scans, annotate every MS2 feature with SIRIUS, then assemble the confirmed
+annotations and their provenance into the spectral-library input.
 
 ```mermaid
 ---
@@ -137,12 +145,14 @@ cross-lab consensus and no manual curation.*
 
 ### 🔹 3. Library Generation (`3_library_generation/`)
 
-*Goal: turn the SIRIUS annotations into the spectral-library provenance.*
+*Goal: turn the SIRIUS annotations into the spectral library — the deliverable of
+this branch.*
 
   * **`build_spectral_library_provenance.R`** reads the `results/` annotation
     CSVs and writes **`spectral_library_provenance.xlsx`** — the per-compound
-    provenance table (lab, mixture, pass, ranks, scores) that feeds spectral
-    library building.
+    provenance table (lab, mixture, pass, ranks, scores) that ties every library
+    entry back to the exact acquisition it came from. This provenance table is the
+    input the spectral library is assembled from.
 
 -----
 
