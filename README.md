@@ -1,7 +1,7 @@
 # HUMAN Ring Trial
 
-This repository contains the analysis for the **Ring Trial study**, part of
-the **HUMAN Doctoral Network's** main research efforts.
+This repository contains the analysis for the **Ring Trial study**, part of the
+**HUMAN Doctoral Network's** main research efforts.
 
 ## 📖 Study Overview
 
@@ -18,13 +18,24 @@ across the participating laboratories (Afekta, Cembio, HMGU, ICL).
 3. **Samples** — mixtures from the MetaSci metabolite standard library, so the
    ground-truth composition of each mixture is known.
 
+> **This branch holds the fully automatic annotation.** It takes the
+> preprocessed data straight to a SIRIUS annotation of every MS2-bearing feature
+> and the spectral-library provenance that annotation produces, with **no manual
+> curation**. The **semi-automated (expert-curated) annotation** and the
+> **cross-lab reproducibility analysis** built on it live on the
+> `semi-automated-and-downstream` branch, which carries its own README.
+>
+> Coverage is currently the **HE** chemical class (standardized reference
+> method); the other classes (FE, Others) follow the same pipeline and are being
+> added.
+
 -----
 
 ## 📂 Project Structure & Workflow
 
-The analysis is organized as numbered folders, run in order. The end product is
-the **manually-curated annotation** of the spike-in panel and a **cross-lab
-reproducibility analysis** built on it.
+Three numbered folders, run in order: preprocess the raw scans, annotate every
+MS2 feature with SIRIUS, then turn the annotations into a spectral-library
+provenance table.
 
 ```mermaid
 ---
@@ -33,180 +44,143 @@ config:
 ---
 graph LR
     subgraph "1. Preprocessing"
-        A[Raw files] --> B{XCMS<br>peak picking};
-        B --> C{NAPS<br>alignment};
+        A[Raw mzML] --> B{XCMS<br>peak picking};
+        B --> C[Spectra +<br>MS2 scans];
     end
-    subgraph "2. Auto annotation"
-        C --> D{MS1 + isotope<br>matching};
-        D --> E{MS2<br>GNPS match};
+    subgraph "2. All-MS2 SIRIUS annotation"
+        C --> G{Group MS2<br>20 ppm / 15 s};
+        G --> P[Primary pass<br>per-lab representative];
+        G --> S[Secondary pass<br>single richest scan];
+        P --> U{Union};
+        S --> U;
+        U --> R[sirius_full_*.csv<br>ranked candidates];
     end
-    subgraph "3. Manual curation + annotation"
-        E --> F[Lab reports<br>1_manual_curation];
-        F --> G{Consensus<br>2_combine_annotation};
-        G --> SI[SIRIUS scoring of<br>curated peaks<br>3_Sirius_curation];
-    end
-    subgraph "4. Library generation"
-        G --> I[Library CSV];
-        G --> J[MGF spectra];
-    end
-    subgraph "5. Downstream analysis (manual curation)"
-        SI --> BLD[build_manual_annotation.R];
-        BLD --> RT[RT alignment + EIC];
-        RT --> NORM[Normalization];
-        NORM --> DIAG[Per-compound diagnostics<br>+ confidence tiers];
-        DIAG --> REP[Reproducibility results];
+    subgraph "3. Library generation"
+        R --> LIB[spectral_library_provenance.xlsx];
     end
 
     style C fill:#ccf,stroke:#333,stroke-width:2px
-    style G fill:#cfc,stroke:#333,stroke-width:2px
-    style REP fill:#ffc,stroke:#333,stroke-width:2px
+    style U fill:#cfc,stroke:#333,stroke-width:2px
+    style LIB fill:#ffc,stroke:#333,stroke-width:2px
 ```
 
 ### 🔹 1. Preprocessing (`1_preprocessing/`)
 
-*Goal: convert raw data into processed xcms objects.*
+*Goal: convert raw data into processed `xcms` / `Spectra` objects.*
 
   * `generic_preprocessing.qmd` — template preprocessing script; `setup.R` loads
-    packages and definitions.
-  * `standards.xlsx` & `NAPS_info.xlsx` — MetaSci panel and NAPS anchor details.
-  * **Lab folders** (`afekta`, `cembio`, `hmgu`, `icl`) each contain a
-    `HE` (human-extract / standardized method) subfolder with the lab-specific
-    `preprocessing_script.qmd`, sequence tables, `naps.csv`, and the xcms
-    objects. Raw mzML and the heavy xcms objects are not tracked (see below).
+    packages and shared definitions.
+  * `standards.xlsx` & `NAPS_info.xlsx` — the MetaSci panel (per-mixture spike-in
+    composition, InChIKeys, neutral masses) and NAPS anchor details.
+  * **Lab folders** (`afekta`, `cembio`, `hmgu`, `icl`) each contain an `HE`
+    subfolder (standardized reference method) with the lab-specific
+    `preprocessing_script.qmd`, the `seq_pos.xlsx` / `seq_neg.xlsx` sequence
+    tables, and `naps.csv`. Raw mzML and the heavy `Spectra` objects are not
+    tracked (see below).
 
-### 🔹 2. Automatic Annotation (`2_annotation_auto/`)
+### 🔹 2. All-MS2 SIRIUS Annotation (`2_annotation/sirius_all_ms2/`)
 
-*Goal: generate initial evidence for metabolite identification.*
+*Goal: annotate **every MS2-bearing feature** from every lab with SIRIUS, with no
+cross-lab consensus and no manual curation.*
 
-Uses the preprocessed objects to match MS1 adducts, isotopes, and MS2 spectra
-against libraries, producing the per-lab evidence tables consumed in Step 3.
+  * **`sirius_annotation_all_ms2_pg.qmd`** — the annotation producer. Every lab
+    shares one **grouping** step: MS2 scans are merged by precursor m/z within
+    20 ppm, then split wherever the retention-time gap exceeds 15 s, giving one
+    feature per real precursor peak (representative precursor = the feature's
+    median m/z). Each feature is annotated **twice** and the runs are combined:
 
-### 🔹 3. Manual Curation & Annotation (`3_annotation_manual/`)
+    | pass | which scans SIRIUS sees |
+    |---|---|
+    | **primary** | per-lab representative (see table) |
+    | **secondary** | the single richest scan, identical for every lab (the common baseline) |
 
-*Goal: turn the automatic evidence into an expert-verified, cross-lab panel
-annotation.*
+    A compound counts as recovered if **either** pass finds it; neither is a
+    superset of the other. Per-lab primary strategies and pre-steps:
 
-1. **Manual curation (`1_manual_curation/`)** — labs review the automatic
-   evidence (`lab_report/`); `fixed_lab_report/` standardizes formatting.
-2. **Combine annotation (`2_combine_annotation/`)** — `compare_lab_sheet.R`
-   merges the per-lab corrections into `all_lab_annotations.xlsx` and
-   `consensus_lab_annotations.xlsx`. Labs review flagged compounds and
-   re-integrate missing ones.
-3. **SIRIUS scoring of the curated peaks (`3_Sirius_curation/`)** —
-   `sirius_annotation.qmd` runs SIRIUS (formula ID + structure DB + COSMIC) on
-   the **manually-curated peaks** — i.e. SIRIUS only *scores* peaks experts
-   already identified; the identity is human-assigned. Per-lab output:
-   `*_lab_annotations_sirius_curated.xlsx` (curated `compound`, `adduct`,
-   `chrom_peak_id`, `rtmed`, per-adduct m/z, `into`, `best_structurePerIdRank`,
-   `best_ConfidenceScoreExact`). `curated_annotation_all_labs.qmd` consolidates
-   them. This expert-verified set (all four labs) is the basis for the
-   downstream reproducibility analysis.
+    | lab | primary representative | MS1 isotope pattern | pre-step |
+    |---|---|---|---|
+    | **afekta** | richest scan **per collision energy** (~3 spectra) | yes | none |
+    | **cembio** | **all scans** (cap 40) | yes, from its **separate MS1 injection** | attach isotope pattern (see below) |
+    | **icl** | **all scans** (cap 40) | yes | re-derive precursor m/z with `estimatePrecursorMz()` (Waters mzML value is unreliable) |
+    | **hmgu** | single richest scan | yes | precursor-abundance filter (`prec_thr` 300, max across the feature's scans) |
 
-### 🔹 4. Library Generation (`4_library_generation/`)
+    *cembio's MS1* is the one non-obvious case: its MS2 injection carries no
+    usable isotope pattern, but a **separate MS1 injection** (55 days apart, so no
+    RT correspondence assumed) supplies one, searched per-feature in its own RT
+    window and kept only if the M+1 peak is genuinely present.
 
-*Goal: produce the final spectral libraries.*
+    SIRIUS runs via **RuSirius**; per-lab, per-mixture output is
+    `results/<pass>/sirius_full_<lab>_mix_<mix>.csv` (ranked structure candidates
+    with CSI:FingerID / COSMIC scores). `results/` is **not tracked**.
 
-`lib_gen_HE.qmd` (run per lab) writes `ring_trial_library_HE.csv` (library
-table) and `std_spectra_HE.mgf` (MS/MS spectra).
+  * **`run_cluster_standalone.R`** — a self-contained runner for the annotation
+    on a cluster: it auto-discovers the `<lab>/<class>/` data next to itself,
+    tolerates upper/lower-case lab directories, and reads the SIRIUS password from
+    the `SIRIUS_PASSWORD` environment variable (never hard-coded).
 
-### 🔹 5. Downstream Analysis (`5_downstream_analysis_manual/`)
+  * **`results_summary.qmd`** — the recovery report: how many of each mixture's
+    20 spike-in standards SIRIUS recovers **at any rank**, per lab and per pass,
+    against the semi-automated curated workflow as a reference. It also documents
+    the cembio MS1 rescue and the hmgu group-2 vial mislabel. It **renders on a
+    fresh clone** from committed data only (see below).
 
-*Goal: quantify cross-lab reproducibility of the **SIRIUS-confirmed,
-manually-curated** spike-in panel, and produce the ring-trial comparison numbers
-(variance decomposition, ICC ladder, pairwise agreement, per-compound
-diagnostics).*
+  * **`reference/*_lab_annotations_sirius_curated.xlsx`** — the semi-automated
+    curated annotations, kept here **only** as the comparison baseline for
+    `results_summary.qmd` (the curation workflow itself lives on the other
+    branch).
 
-This track is **self-contained**: it bundles its own copy of the shared helper
-code (`helpers.R`, `annotated_eic_pipeline.R`) **and the annotation-independent
-builders** that produce its inputs, so it does not depend on any other analysis
-folder. Render order matters (producer → consumer):
+  * **`build_render_bundle.R`** + **`recovery_bundle.csv`**, **`hmgu_grid.csv`**,
+    **`hmgu_injorder.csv`** — the reproducible builder and the small committed
+    CSVs that let `results_summary.qmd` render without the (untracked) `results/`
+    CSVs or the raw mzML. Rerun the builder whenever the annotation results
+    change.
 
-  * **Builders (annotation-independent infrastructure):**
-      * **`1_full_detected_objects.qmd`** — builds the Full/Detected signal
-        objects (`bpc_*` / `tic_*`) from the preprocessed `Spectra`.
-      * **`2_naps_extraction.qmd`** — SNR-aware chromExtract on the NAPS anchor
-        injections → `object/naps_chrom_metrics.csv`.
-      * **`4_consensus_peaks.qmd`** — NAPS-aligned cross-lab matching of the
-        per-lab xcms peaks → `object/peak_metrics_detected_all4labs.csv`
-        (+ `ct_all_samples`, `tic_consensus`).
-    These read the heavy preprocessed objects (raw mzML, the 9.7 GB `sp_*.RData`),
-    which are local-only; their small outputs are tracked so the analysis below
-    runs without them.
-  * **`build_manual_annotation.R`** — converts the curated
-    `*_lab_annotations_sirius_curated.xlsx` into the two canonical inputs:
-    `object/feat_rts.csv` (per feature) and `object/annotation_identity.csv`
-    (per compound: COSMIC, structure rank, adducts).
-  * **`3_rt_alignment.qmd`** — **fits** the per-`(lab, polarity)` NAPS monotonic
-    splines from `naps_chrom_metrics.csv` (writing `rt_alignment_splines.RData` +
-    `rt_alignment_anchors.csv`), maps each lab's apex RT onto a cross-lab
-    consensus axis, then re-extracts an SNR-aware EIC over every curated peak →
-    `object/annotation_chrom_metrics.csv` (with the cross-lab-comparable
-    `aligned_rt`). MS1 anchoring is skipped — the curated `rtmed` is already the
-    chromatographic apex. Also reports the alignment QC (within-lab floor,
-    NAPS-vs-consensus drift, before/after cross-lab RT spread).
-  * **`5_normalization.qmd`** — fits per-`(lab, sample, polarity, decile)`
-    intensity factors (Global / Decile / LOESS) on the detected peaks, applies
-    them to the annotated peaks, and compares normalization strategies by bulk
-    ICC (incl. the pairwise-ICC heatmap).
-  * **`8_per_compound_diagnostics.qmd`** — identity / retention / abundance
-    diagnostics per compound, and assigns the **A/B/C/D confidence tiers**
-    (max COSMIC across labs × cross-lab aligned-RT SD). The whole QMD is
-    restricted to **SIRIUS-confirmed** compounds (`best_structure_rank` not NA).
-  * **`7_reproducibility_results.qmd`** — the headline reproducibility report:
-    variance decomposition and an ICC ladder across the data-level progression
-    (Full → Detected → Consensus → **Annotated (MS2)** → **Annotated + MS1**),
-    plus pairwise ICC and per-compound Spearman ρ across lab pairs. The two
-    annotated levels separate the MS2-only signal (`source = "own"`) from the
-    MS2 + MS1-rescue signal (`source = "own"` + `"consensus"`).
+### 🔹 3. Library Generation (`3_library_generation/`)
+
+*Goal: turn the SIRIUS annotations into the spectral-library provenance.*
+
+  * **`build_spectral_library_provenance.R`** reads the `results/` annotation
+    CSVs and writes **`spectral_library_provenance.xlsx`** — the per-compound
+    provenance table (lab, mixture, pass, ranks, scores) that feeds spectral
+    library building.
 
 -----
 
+## ▶️ Reproducing the results summary
+
+`results_summary.qmd` reads **only committed data** — `1_preprocessing/standards.xlsx`,
+the four `2_annotation/sirius_all_ms2/reference/*.xlsx`, and the three
+`recovery_bundle.csv` / `hmgu_grid.csv` / `hmgu_injorder.csv` next to it — so a
+fresh clone can render it with `readxl` + `knitr` + `ggplot2` (no Bioconductor
+stack, no raw data):
+
+```bash
+quarto render 2_annotation/sirius_all_ms2/results_summary.qmd
+```
+
+To regenerate those three CSVs from a local `results/` tree (and the hmgu mzML):
+
+```bash
+Rscript 2_annotation/sirius_all_ms2/build_render_bundle.R
+```
+
 ## 🗃️ What is (and isn't) in the repository
 
-The repository tracks the **analysis code** plus the **curated annotation** and
-the **small canonical CSVs** the downstream QMDs consume. Large intermediates,
-raw data, and machine-built caches are kept local (regenerated, or shared
-out-of-band).
-
-**Tracked:** all `.qmd` / `.R` analysis code; the curated SIRIUS annotation
-(`*_lab_annotations_sirius_curated.xlsx`); and only the `object/` CSVs that are
-**expensive to compute or cannot be regenerated within the track** —
-`annotation_chrom_metrics.csv` (the SNR-aware EIC output, ~15 min + raw mzML),
-plus the external precomputed inputs `naps_chrom_metrics.csv`,
-`peak_metrics_detected_all4labs.csv`, and `rt_alignment_anchors.csv`.
+**Tracked:** all `.qmd` / `.R` analysis code; the panel metadata
+(`standards.xlsx`, `NAPS_info.xlsx`) and per-lab sequence tables; the
+semi-automated curated reference xlsx; the small render-bundle CSVs; and the
+`spectral_library_provenance.xlsx` output.
 
 **Not tracked (local only):**
 
 | Pattern | Why excluded |
 |---|---|
 | `*.mzML`, `*.raw`, `*.wiff`, `*.d/` | Raw instrument data — obtain per-lab from the original acquisitions. |
-| `*.html`, `*_cache/`, `.quarto/` | Rendered reports / caches — re-render from the QMDs (`quarto render <file>.qmd`). |
-| `*.RData`, `*.rds` | `Spectra` / `Chromatograms` / pipeline caches built from raw mzML (incl. the NAPS splines and the Full/Detected/Consensus signal objects). |
-| `*.sirius`, `results_all_ms2/`, `results_consensus_all/` | SIRIUS project files and per-run caches — the aggregated result lands in the tracked curated xlsx. |
-| `detected_peaks_*_HE.csv`, `ct_all_samples.csv` | Large per-lab peak tables / consensus sample matrix (tens of MB each). |
-| `feat_rts.csv`, `annotation_identity.csv`, `*_normalized.csv`, `detected_peak_counts.csv`, `normalization_winners.csv` | Easy-to-recompute intermediates — `build_manual_annotation.R` regenerates the first two from the curated xlsx in seconds; the others are produced by re-running `5_normalization.qmd` / the diagnostics. |
+| `2_annotation/sirius_all_ms2/results/` | Per-lab SIRIUS annotation CSVs and `.sirius` project files — the panel-relevant summary is committed as the render bundle, and the full table lands in `spectral_library_provenance.xlsx`. |
+| `*.html`, `*_cache/`, `.quarto/` | Rendered reports / caches — re-render from the QMDs. |
+| `*.RData`, `*.rds` | `Spectra` objects and pipeline caches built from the raw mzML. |
+| `run_sirius_cluster.R` | Local cluster runner that would hold the SIRIUS password — kept out of the repo; use `run_cluster_standalone.R` with `SIRIUS_PASSWORD` instead. |
 
-Because the heavy intermediates (the `.RData` NAPS splines and Full/Detected/
-Consensus objects, and the large peak tables) are local-only, a fresh clone has
-the full analysis **code** and the small canonical CSVs, but re-rendering the
-complete chain from scratch requires those intermediates (regenerated locally
-from the raw data, or shared on request).
-
-## 📊 Comparison Logic
-
-The downstream analysis quantifies cross-lab reproducibility across a
-**data-level progression**, from raw chromatograms through the SIRIUS-confirmed
-panel. Each level answers a different question; together they show where
-cross-lab variance comes from and how much identity-anchoring recovers.
-
-| Level | What | Output |
-|---|---|---|
-| **Full** | All MS1 ions, no peak detection | `bpc_full` / `tic_full` (local) |
-| **Detected** | Per-injection xcms peaks | `detected_peaks_{lab}_HE.csv` (local) |
-| **Consensus** | Cross-lab matched features (NAPS-aligned) | `peak_metrics_detected_all4labs.csv` |
-| **Annotated (MS2)** | SIRIUS-confirmed panel, MS2-identified peaks only | `annotation_chrom_metrics_normalized.csv` |
-| **Annotated + MS1** | Same panel, adding MS1-rescued peaks at the consensus RT | `annotation_chrom_metrics_normalized.csv` |
-
-Lab effect dominates the raw (Full) level and drops sharply by the Annotated
-levels — the ring trial's headline finding that identity-anchored analysis
-substantially recovers cross-lab comparability.
+A fresh clone has the full analysis **code**, the panel metadata, and everything
+needed to render `results_summary.qmd`; re-running the SIRIUS annotation itself
+requires the raw mzML (local, or shared on request) and a SIRIUS login.
