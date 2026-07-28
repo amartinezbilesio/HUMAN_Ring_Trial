@@ -32,9 +32,11 @@ execute:
 
 ```{r setup}
 suppressWarnings(suppressMessages({ library(readxl); library(knitr) }))
-## This report renders from COMMITTED data only: standards.xlsx, reference/*.xlsx, and the three
-## *_bundle/hmgu_*.csv next to this file (built by build_render_bundle.R). It reads no results/ CSVs
-## and no raw mzML, so a fresh clone can render it. Rerun build_render_bundle.R when results change.
+## The recovery report renders from COMMITTED data only: standards.xlsx, reference/*.xlsx, and
+## recovery_bundle.csv next to this file (built by build_render_bundle.R from the gitignored
+## results/ CSVs). The one exception is the hmgu vial-mislabel section, which recomputes its
+## evidence directly from the raw hmgu mzML for reproducibility and is skipped if that mzML is
+## absent. Rerun build_render_bundle.R when the annotation results change.
 meta <- as.data.frame(read_xlsx(here::here("1_preprocessing", "standards.xlsx"),
                                 skip = 1, .name_repair = "minimal"), check.names = FALSE)
 meta$M   <- suppressWarnings(as.numeric(meta$M))
@@ -551,27 +553,69 @@ file was triggered on that mass with a real spectrum behind it. Compounds shared
 panels are dropped, so each count belongs to one mixture only.
 
 ```{r hmgu_raw}
-## file x panel counts of raw-MS2 mass triggers, precomputed by build_render_bundle.R from the hmgu
-## mzML (that heavy read is not repeated here). best = the panel each file scores highest against.
-mixes <- sprintf("2_%d", 1:10)
-grid <- read.csv(file.path(BND, "hmgu_grid.csv"), stringsAsFactors = FALSE, check.names = FALSE)
-grid$file <- factor(grid$file, levels = mixes); grid$panel <- factor(grid$panel, levels = mixes)
-best <- do.call(rbind, lapply(split(grid, grid$file), function(g) g[which.max(g$n), ]))
+## Computed directly from the hmgu mzML so it is reproducible, not a committed table. Needs
+## 1_preprocessing/hmgu/HE/mzml; if absent (e.g. a bare clone) the figure and injection-order table
+## below are skipped. grid = file x panel mass-trigger counts, best = the panel each file scores
+## highest against, acqv = each file's acquisition timestamp from the mzML header.
+sp_path  <- here::here("1_preprocessing", "hmgu", "HE")
+mzml_dir <- file.path(sp_path, "mzml")
+mixes    <- sprintf("2_%d", 1:10)
+have_hmgu <- dir.exists(mzml_dir) && length(list.files(mzml_dir, "mzML$")) > 0L
+if (have_hmgu) {
+  suppressPackageStartupMessages(library(Spectra))
+  seq <- rbind(as.data.frame(read_xlsx(file.path(sp_path, "seq_pos.xlsx"))),
+               as.data.frame(read_xlsx(file.path(sp_path, "seq_neg.xlsx"))))
+  seq$filename <- paste0(seq$`Data File`, ".mzML")
+  seq <- seq[seq$filename %in% list.files(mzml_dir), ]
+  seq$label <- chartr(".", "_", sub("target$", "", sub(".*_", "", sub("_MS2$", "", seq$`Data File`))))
+  pr <- 1.007276
+  adducts <- c(pr, 22.989218, 18.033823, 38.963158, -pr, 34.969402, 44.998201)
+  panel_masses <- function(mx) {
+    mm <- meta[meta$mix == mx & !is.na(meta$InChIKey), ]; e2 <- substr(mm$InChIKey, 1, 14)
+    dup <- e2[duplicated(e2) | duplicated(e2, fromLast = TRUE)]; keep <- !(e2 %in% dup)
+    as.numeric(mm$M[keep][!duplicated(e2[keep])])
+  }
+  load_ms2 <- function(label) {
+    fs <- seq$filename[seq$label == label]
+    s <- setBackend(Spectra(file.path(mzml_dir, fs), backend = MsBackendMzR()), MsBackendMemory())
+    m <- s[s$msLevel == 2L]; m <- m[!is.na(m$precursorMz)]
+    list(prec = m$precursorMz,
+         bpk = vapply(peaksData(m), function(pp) if (nrow(pp)) max(pp[, "intensity"]) else 0, numeric(1)))
+  }
+  strong <- function(d, M) any(vapply(M + adducts, function(a) {
+    hit <- which(abs(d$prec - a) <= a * 15 / 1e6); length(hit) > 0 && max(d$bpk[hit]) > 1e4 }, logical(1)))
+  panels <- setNames(lapply(mixes, panel_masses), mixes)
+  grid <- expand.grid(file = mixes, panel = mixes, stringsAsFactors = FALSE); grid$n <- NA_integer_
+  acqv <- setNames(rep(NA_character_, length(mixes)), mixes)
+  for (fl in mixes) {
+    d <- load_ms2(fl)
+    for (pn in mixes)
+      grid$n[grid$file == fl & grid$panel == pn] <- sum(vapply(panels[[pn]], function(M) strong(d, M), logical(1)))
+    f1 <- file.path(mzml_dir, seq$filename[seq$label == fl & grepl("_pos_", seq$filename)][1])
+    con <- file(f1, "r"); txt <- readLines(con, n = 500, warn = FALSE); close(con)
+    ts <- regmatches(txt, regexpr('startTimeStamp="[^"]+"', txt)); ts <- ts[nzchar(ts)]
+    acqv[fl] <- if (length(ts)) sub('startTimeStamp="([^"]+)"', "\\1", ts[1]) else NA_character_
+  }
+  grid$file <- factor(grid$file, levels = mixes); grid$panel <- factor(grid$panel, levels = mixes)
+  best <- do.call(rbind, lapply(split(grid, grid$file), function(g) g[which.max(g$n), ]))
+}
 ```
 
 ```{r heatmap, fig.width=7, fig.height=6}
-suppressMessages(library(ggplot2))
-ggplot(grid, aes(panel, file, fill = n)) +
-  geom_tile(color = "grey90") +
-  geom_text(aes(label = n), size = 3) +
-  geom_tile(data = best, fill = NA, color = "red", linewidth = 1) +
-  scale_fill_gradient(low = "white", high = "#2166AC", name = "expected\ncompounds\nfound") +
-  scale_y_discrete(limits = rev(mixes)) +
-  labs(x = "panel it was scored against", y = "raw file, as named",
-       title = "Red box marks the mixture each file really contains",
-       subtitle = "Correct labels would put every red box on the diagonal") +
-  theme_minimal(base_size = 12) +
-  theme(panel.grid = element_blank(), plot.title = element_text(face = "bold"))
+if (have_hmgu) {
+  suppressMessages(library(ggplot2))
+  print(ggplot(grid, aes(panel, file, fill = n)) +
+    geom_tile(color = "grey90") +
+    geom_text(aes(label = n), size = 3) +
+    geom_tile(data = best, fill = NA, color = "red", linewidth = 1) +
+    scale_fill_gradient(low = "white", high = "#2166AC", name = "expected\ncompounds\nfound") +
+    scale_y_discrete(limits = rev(mixes)) +
+    labs(x = "panel it was scored against", y = "raw file, as named",
+         title = "Red box marks the mixture each file really contains",
+         subtitle = "Correct labels would put every red box on the diagonal") +
+    theme_minimal(base_size = 12) +
+    theme(panel.grid = element_blank(), plot.title = element_text(face = "bold")))
+} else cat("hmgu mzML not present locally; raw-MS2 evidence figure skipped.\n")
 ```
 
 The red boxes sit one step off the diagonal: `2_1` is correct, `2_2` to `2_9` each hold the next
@@ -582,13 +626,16 @@ mixture, and `2_10` wraps back to `2_2`.
 Acquisition timestamps read from the mzML headers, sorted by real time.
 
 ```{r injorder}
-## acquisition timestamps read from the mzML headers by build_render_bundle.R, with the true mixture
-## it carries (from the raw-MS2 grid above). Sorting by time recovers the real injection order.
-ord <- read.csv(file.path(BND, "hmgu_injorder.csv"), stringsAsFactors = FALSE, check.names = FALSE)
-names(ord)[names(ord) == "true_mixture"] <- "true mixture"
-ord <- ord[order(ord$acquired), ]
-kable(cbind(`order` = seq_len(nrow(ord)), ord), format = "html", row.names = FALSE,
-      table.attr = 'class="rt"')
+## the acquisition timestamps (acqv) and true mixture (best, from the raw-MS2 grid above) come
+## straight from the mzML in the chunk above. Sorting by time recovers the real injection order.
+if (have_hmgu) {
+  ord <- data.frame(file = mixes, acquired = acqv[mixes],
+                    `true mixture` = as.character(best$panel[match(mixes, best$file)]),
+                    check.names = FALSE)
+  ord <- ord[order(ord$acquired), ]
+  kable(cbind(`order` = seq_len(nrow(ord)), ord), format = "html", row.names = FALSE,
+        table.attr = 'class="rt"')
+}
 ```
 
 Sorted by acquisition time the true mixture column reads `2_1, 2_2, 2_3 ... 2_10`, perfectly

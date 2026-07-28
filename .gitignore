@@ -70,5 +70,4 @@ redner.sh
 /results/
 /downstream_analysis/
 /standard_mixes_prep
-# Cluster runner: contains a hardcoded SIRIUS password -> never commit (moved 2026-07-16)
 2_annotation/sirius_all_ms2/run_sirius_cluster.R

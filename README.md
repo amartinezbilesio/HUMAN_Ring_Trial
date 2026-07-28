@@ -137,11 +137,12 @@ cross-lab consensus and no manual curation.*
     `results_summary.qmd` (the curation workflow itself lives on the other
     branch).
 
-  * **`build_render_bundle.R`** + **`recovery_bundle.csv`**, **`hmgu_grid.csv`**,
-    **`hmgu_injorder.csv`** — the reproducible builder and the small committed
-    CSVs that let `results_summary.qmd` render without the (untracked) `results/`
-    CSVs or the raw mzML. Rerun the builder whenever the annotation results
-    change.
+  * **`build_render_bundle.R`** + **`recovery_bundle.csv`** — the reproducible
+    builder and the small committed CSV that let `results_summary.qmd` render its
+    recovery tables without the (untracked) `results/` CSVs. Rerun the builder
+    whenever the annotation results change. (The hmgu vial-mislabel figures are
+    recomputed by the qmd directly from the raw hmgu mzML, so they are not
+    precomputed here and are skipped if that mzML is absent.)
 
 ### 🔹 3. Library Generation (`3_library_generation/`)
 
@@ -158,11 +159,12 @@ this branch.*
 
 ## ▶️ Reproducing the results summary
 
-`results_summary.qmd` reads **only committed data** — `1_preprocessing/standards.xlsx`,
-the four `2_annotation/sirius_all_ms2/reference/*.xlsx`, and the three
-`recovery_bundle.csv` / `hmgu_grid.csv` / `hmgu_injorder.csv` next to it — so a
-fresh clone can render it with `readxl` + `knitr` + `ggplot2` (no Bioconductor
-stack, no raw data):
+The recovery tables read **only committed data** — `1_preprocessing/standards.xlsx`,
+the four `2_annotation/sirius_all_ms2/reference/*.xlsx`, and `recovery_bundle.csv`
+next to it — so a fresh clone renders them with `readxl` + `knitr` + `ggplot2`. The
+hmgu vial-mislabel section additionally recomputes its evidence from the raw hmgu
+mzML (needs the `Spectra` stack); it is skipped, and the rest still renders, if
+that mzML is not present:
 
 ```bash
 quarto render 2_annotation/sirius_all_ms2/results_summary.qmd
