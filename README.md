@@ -27,6 +27,26 @@ built here is the reference underpinning that comparison.
 3. **Lab-specific method** — each lab also runs its everyday protocol (used
    elsewhere in the study).
 
+### At a glance
+
+| | |
+|---|---|
+| Laboratories | **4** — Afekta, Cembio, HMGU, ICL |
+| Standard mixtures | **83** |
+| Distinct compounds | **1,242** (skeleton) · 1,293 with stereochemistry |
+| Panel size per mixture | 2–20 (median 15) |
+| Chemical classes | HE, FE, Others (5 exposome panels) |
+| Acquisition | HUMAN reference method (reverse-phase, all labs) + lab-specific (afekta: in-house RP, HILIC) |
+
+| Chemical class | Mixtures | Compounds\* |
+|---|---|---|
+| **HE** — Human Endosome | 19 | 347 |
+| **FE** — Food Exposome | 28 | 432 |
+| **Others** — Chemical / Plant / Eukaryotic / Microbiota Exposome | 36 | 488 |
+| **Total** | **83** | **1,242 distinct** |
+
+<sub>\*Some standards recur across classes, so the per-class counts overlap and sum to more than the 1,242 distinct total.</sub>
+
 > **This branch is the fully automatic library-building track.** It runs from the
 > preprocessed data straight to a SIRIUS annotation of every MS2-bearing feature
 > and the spectral-library provenance that annotation produces, with **no manual
