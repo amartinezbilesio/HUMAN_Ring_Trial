@@ -28,7 +28,7 @@
 
 # SIRIUS projects and per-run outputs (regenerated locally)
 *.sirius
-2_annotation_auto/sirius_all_ms2/results/
+2_annotation/sirius_all_ms2/results/
 # semi-auto SIRIUS per-run output
 3_annotation_manual/HE/3_Sirius_curation/results/
 # orphaned render of a removed qmd
@@ -70,5 +70,4 @@ redner.sh
 /results/
 /downstream_analysis/
 /standard_mixes_prep
-# Cluster runner: contains a hardcoded SIRIUS password -> never commit (moved 2026-07-16)
-2_annotation_auto/sirius_all_ms2/run_sirius_cluster.R
+2_annotation/sirius_all_ms2/run_sirius_cluster.R
