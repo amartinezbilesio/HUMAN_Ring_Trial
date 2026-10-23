@@ -29,8 +29,10 @@
 # SIRIUS projects and per-run outputs (regenerated locally)
 *.sirius
 2_annotation/sirius_all_ms2/results/
+
 # semi-auto SIRIUS per-run output
 3_annotation_manual/HE/3_Sirius_curation/results/
+
 # orphaned render of a removed qmd
 3_annotation_manual/HE/3_Sirius_curation/sirius_annotation_all_ms2.html
 
@@ -44,9 +46,15 @@
 5_downstream_analysis_manual/object/*
 !5_downstream_analysis_manual/object/.gitkeep
 
+# Library generation outputs / local files
+3_library_generation/CompDb/
+3_library_generation/MassBank/
+3_library_generation/ring_trial_library_building_files/
+
 # No markdown in the repo except the top-level README
 *.md
 !/README.md
+!/DESCRIPTION.md
 **/all_renders.txt
 **/inspect_all_renders.R
 
@@ -71,3 +79,7 @@ redner.sh
 /downstream_analysis/
 /standard_mixes_prep
 2_annotation/sirius_all_ms2/run_sirius_cluster.R
+
+# renv
+renv/library/
+renv/staging/
