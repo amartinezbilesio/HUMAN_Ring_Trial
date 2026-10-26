@@ -757,14 +757,14 @@ rm(i, prov, sp, example)
 ```
 
 ###############################################################
-# 14. Build the compound annotation table (one of the tables that `createCompDb()` expects)
+# 14. Rebuild the provenance table in the correct order and with identifiers
 ###############################################################
 
 ```{r}
 
-# Create the provenance annotations table, a copy of the provenance table with the correct order (provenance_split) and the corresponding compound_id (internal identifier for CompDb)
+# Rebuild the provenance table in the correct order (provenance_split), with the corresponding compound_id and spectrum_id (internal identifiers for CompDb)
 
-provenance_annotations <-
+provenance <-
     dplyr::bind_rows(provenance_split) |>
     dplyr::mutate(
         compound_id =
@@ -778,11 +778,18 @@ provenance_annotations <-
             seq_len(n())
     )
 
+# Check whether ‘provenance’ is correctly aligned with ‘ring_trial_spectra’
+
+all(
+    provenance$acquisitionNum ==
+        acquisitionNum(ring_trial_spectra)
+)
+
 # Check that all spectra with exactly the same InChIKey are assigned the same compound_id
 
 compound_id_check <-
-    provenance_annotations |>
-    distinct(
+    provenance |>
+    dplyr::distinct(
         inchikey,
         compound_id
     )
@@ -790,27 +797,36 @@ compound_id_check <-
 compound_id_check
 
 compound_id_check <-
-    provenance_annotations |>
-    distinct(
+    provenance |>
+    dplyr::distinct(
         compound_id,
         inchikey
     ) |>
-    count(compound_id) |>
-    filter(n > 1)
+    dplyr::count(compound_id) |>
+    dplyr::filter(n > 1)
 
 stopifnot(nrow(compound_id_check) == 0)
 
-# Check whether ‘provenance_annotations’ is correctly aligned with ‘ring_trial_spectra’
+```
 
-all(
-    provenance_annotations$acquisitionNum ==
-        acquisitionNum(ring_trial_spectra)
-)
+```{r}
 
-# Create the compound annotations table (Compound-level) with the correct order (provenance_split) and the corresponding compound_id (internal identifier for CompDb), containing a single row per compound
+# Remove unnecessary values/objects previously created
+
+rm(compound_id_check)
+
+```
+
+###############################################################
+# 15. Build the compound annotation table (one of the tables that `createCompDb()` expects)
+###############################################################
+
+```{r}
+
+# Create the compound annotations table (Compound-level) in the correct order (provenance_split) and with the corresponding compound_id (internal identifier for CompDb), containing a single row per compound
 
 compound_annotations <-
-    provenance_annotations |>
+    provenance |>
     dplyr::select(
         compound_id,
         name,
@@ -832,16 +848,8 @@ head(compound_annotations)
 
 ```
 
-```{r}
-
-# Remove unnecessary values/objects previously created
-
-rm(compound_id_check)
-
-```
-
 ###############################################################
-# 15. Build the MS/MS spectra table (one of the tables that `createCompDb()` expects)
+# 16. Build the MS/MS spectra table (one of the tables that `createCompDb()` expects)
 ###############################################################
 
 ```{r}
@@ -851,89 +859,89 @@ rm(compound_id_check)
 msms_spectra <-
     data.frame(
         compound_id =
-            provenance_annotations$compound_id,
+            provenance$compound_id,
         spectrum_id =
-            provenance_annotations$spectrum_id,
+            provenance$spectrum_id,
         lab =
-            provenance_annotations$lab,
+            provenance$lab,
         file_mixture =
-            provenance_annotations$file_mixture,
+            provenance$file_mixture,
         true_mixture =
-            provenance_annotations$true_mixture,
+            provenance$true_mixture,
         mislabeled =
-            provenance_annotations$mislabeled,
+            provenance$mislabeled,
         adduct =
-            provenance_annotations$adduct,
+            provenance$adduct,
         method =
-            provenance_annotations$method,
+            provenance$method,
         pass =
-            provenance_annotations$pass,
+            provenance$pass,
         feature_id =
-            provenance_annotations$feature_id,
+            provenance$feature_id,
         file =
-            provenance_annotations$file,
+            provenance$file,
         precursor_mz_raw =
-            provenance_annotations$precursor_mz_raw,
+            provenance$precursor_mz_raw,
         precursor_mz_med =
-            provenance_annotations$precursor_mz_med,
+            provenance$precursor_mz_med,
         n_peaks =
-            provenance_annotations$n_peaks,
+            provenance$n_peaks,
         csi_score =
-            provenance_annotations$csi_score,
+            provenance$csi_score,
         details =
-            provenance_annotations$details,
+            provenance$details,
         instrument_type =
-            provenance_annotations$instrument_type,
+            provenance$instrument_type,
         instrument =
-            provenance_annotations$instrument,
+            provenance$instrument,
         column =
-            provenance_annotations$column,
+            provenance$column,
         mobile_phase_A =
-            provenance_annotations$mobile_phase_A,
+            provenance$mobile_phase_A,
         mobile_phase_B =
-            provenance_annotations$mobile_phase_B,        
+            provenance$mobile_phase_B,        
         H2O =
-            provenance_annotations$H2O,
+            provenance$H2O,
         ACN =
-            provenance_annotations$ACN,
+            provenance$ACN,
         formic_acid =
-            provenance_annotations$formic_acid,    
+            provenance$formic_acid,    
         duration_min =
-            provenance_annotations$duration_min,
+            provenance$duration_min,
         inj_vol_uL_pos =
-            provenance_annotations$inj_vol_uL_pos,
+            provenance$inj_vol_uL_pos,
         inj_vol_uL_neg =
-            provenance_annotations$inj_vol_uL_neg,        
+            provenance$inj_vol_uL_neg,        
         MS_instrument =
-            provenance_annotations$MS_instrument,
+            provenance$MS_instrument,
         source =
-            provenance_annotations$source,
+            provenance$source,
         mass_range =
-            provenance_annotations$mass_range,        
+            provenance$mass_range,        
         DDA_DIA =
-            provenance_annotations$DDA_DIA,
+            provenance$DDA_DIA,
         fragmentation =
-            provenance_annotations$fragmentation,
+            provenance$fragmentation,
         number_of_injections =
-            provenance_annotations$number_of_injections,        
+            provenance$number_of_injections,        
         total_scan_rate_MS1_MS2 =
-            provenance_annotations$total_scan_rate_MS1_MS2,
+            provenance$total_scan_rate_MS1_MS2,
         total_scan_rate_MS1_seg_pos =
-            provenance_annotations$total_scan_rate_MS1_seg_pos,
+            provenance$total_scan_rate_MS1_seg_pos,
         total_scan_rate_MS1_seg_neg =
-            provenance_annotations$total_scan_rate_MS1_seg_neg,
+            provenance$total_scan_rate_MS1_seg_neg,
         total_scan_rate_MS2_seg =
-            provenance_annotations$total_scan_rate_MS2_seg,        
+            provenance$total_scan_rate_MS2_seg,        
         inclusion_list =
-            provenance_annotations$inclusion_list,        
+            provenance$inclusion_list,        
         MTBLS_ID =
-            provenance_annotations$MTBLS_ID,
+            provenance$MTBLS_ID,
         MTBLS_assay_name =
-            provenance_annotations$MTBLS_assay_name,
+            provenance$MTBLS_assay_name,
         MTBLS_public_status =
-            provenance_annotations$MTBLS_public_status,
+            provenance$MTBLS_public_status,
         MTBLS_access_link =
-            provenance_annotations$MTBLS_access_link,
+            provenance$MTBLS_access_link,
         ms_level =
             msLevel(ring_trial_spectra),
         scanIndex =
@@ -951,7 +959,7 @@ msms_spectra <-
         centroided =
             centroided(ring_trial_spectra),
         predicted =
-            provenance_annotations$predicted,
+            provenance$predicted,
         precursor_mz =
             precursorMz(ring_trial_spectra),
         collision_energy =
@@ -993,7 +1001,7 @@ str(msms_spectra)
 ```
 
 ###############################################################
-# 16. Validate input tables (compound and MS/MS spectra tables)
+# 17. Validate input tables (compound and MS/MS spectra tables)
 ###############################################################
 
 ```{r}
@@ -1018,7 +1026,7 @@ stopifnot(
 )
 
 stopifnot(
-    provenance_annotations$compound_id ==
+    provenance$compound_id ==
         msms_spectra$compound_id
 )
 
@@ -1102,7 +1110,7 @@ rm(empty_spectra)
 ```
 
 ###############################################################
-# 17. Create metadata
+# 18. Create metadata
 ###############################################################
 
 ```{r}
@@ -1120,7 +1128,7 @@ metadata
 ```
 
 ###############################################################
-# 18. Create CompDb output directory
+# 19. Create CompDb output directory
 ###############################################################
 
 ```{r}
@@ -1149,7 +1157,7 @@ if(file.exists(compdb_file))
 ```
 
 ###############################################################
-# 19. Create the CompDb database
+# 20. Create the CompDb database
 ###############################################################
 
 ```{r}
@@ -1169,7 +1177,7 @@ cat(compdb_file, "\n")
 ```
 
 ###############################################################
-# 20. Load the CompDb database
+# 21. Load the CompDb database
 ###############################################################
 
 ```{r}
@@ -1181,7 +1189,7 @@ ring_trial_db
 ```
 
 ###############################################################
-# 21. Validate the CompDb
+# 22. Validate the CompDb
 ###############################################################
 
 ```{r}
@@ -1287,58 +1295,283 @@ length(ring_trial_spectra)
 ```
 
 ###############################################################
-# 22. Validate spectral integrity
+# 23. Validate spectral integrity
 ###############################################################
 
 ```{r}
 
-original <- ring_trial_spectra[12]
-retrieved <- ring_trial_library[12]
+###############################################################
+# 23.1. Basic checks
+###############################################################
 
-# Compare masses
+# Obtain spectrum_id identifiers from original data and retrieved data
 
-identical(
-    mz(original)[[1]],
-    mz(retrieved)[[1]]
+original_ids <-
+    as.character(
+        msms_spectra$spectrum_id
+    )
+
+retrieved_ids <-
+    as.character(
+        spectraData(
+            ring_trial_library,
+            columns = "spectrum_id"
+        )$spectrum_id
+    )
+
+# Validate spectrum_id identifiers
+
+stopifnot(
+    length(original_ids) == length(retrieved_ids)
 )
 
-# Compare intensities
-
-identical(
-    intensity(original)[[1]],
-    intensity(retrieved)[[1]]
-
+cat(
+    "Number of original spectra:",
+    length(original_ids),
+    "\n"
 )
 
-# Compare precursor
+cat(
+    "Number of retrieved spectra:",
+    length(retrieved_ids),
+    "\n"
+)
 
-precursorMz(original)
-precursorMz(retrieved)
+cat(
+    "Number of unique original spectrum_id identifiers:",
+    length(unique(original_ids)),
+    "\n"
+)
 
-# Compare collision energy
+cat(
+    "Number of unique retrieved spectrum_id identifiers:",
+    length(unique(retrieved_ids)),
+    "\n"
+)
 
-collisionEnergy(original)
-collisionEnergy(retrieved)
+# Check that spectrum_id identifiers are unique in both objects
+
+stopifnot(
+    !anyDuplicated(original_ids)
+)
+
+stopifnot(
+    !anyDuplicated(retrieved_ids)
+)
+
+# Check that the same spectrum_id identifiers are present
+
+stopifnot(
+    setequal(
+        original_ids,
+        retrieved_ids
+    )
+)
+
+cat(
+    "The same spectrum_id identifiers are present in both objects.\n"
+)
 
 ```
 
 ```{r}
 
+###############################################################
+# 23.2. Validate one specific spectrum
+###############################################################
+
+# Build spectrum_id tables
+
+original_index <-
+    setNames(
+        seq_along(original_ids),
+        original_ids
+    )
+
+retrieved_index <-
+    setNames(
+        seq_along(retrieved_ids),
+        retrieved_ids
+    )
+
+# Test specific spectrum_id
+
+sid <- "100"
+
+original_idx <-
+    original_index[[sid]]
+
+retrieved_idx <-
+    retrieved_index[[sid]]
+
+cat(
+    "Testing spectrum_id:",
+    sid,
+    "\n"
+)
+
+cat(
+    "Original position:",
+    original_idx,
+    "\n"
+)
+
+cat(
+    "Retrieved position:",
+    retrieved_idx,
+    "\n"
+)
+
+cat(
+    "Original acquisitionNum:",
+    acquisitionNum(ring_trial_spectra)[original_idx],
+    "\n"
+)
+
+cat(
+    "Retrieved acquisitionNum:",
+    acquisitionNum(ring_trial_library)[retrieved_idx],
+    "\n"
+)
+
+cat(
+    "Original compound_id:",
+    msms_spectra$compound_id[original_idx],
+    "\n"
+)
+
+cat(
+    "Retrieved compound_id:",
+    spectraData(
+        ring_trial_library,
+        columns = "compound_id"
+    )$compound_id[retrieved_idx],
+    "\n"
+)
+
+# Extract the same spectrum from both objects
+
+original <-
+    ring_trial_spectra[original_idx]
+
+retrieved <-
+    ring_trial_library[retrieved_idx]
+
+# Compare m/z
+
+mz_identical <-
+    isTRUE(
+        all.equal(
+            mz(original)[[1]],
+            mz(retrieved)[[1]]
+        )
+    )
+
+cat(
+    "m/z identical:",
+    mz_identical,
+    "\n"
+)
+
+# Compare intensities
+
+intensity_identical <-
+    isTRUE(
+        all.equal(
+            intensity(original)[[1]],
+            intensity(retrieved)[[1]]
+        )
+    )
+
+cat(
+    "Intensity identical:",
+    intensity_identical,
+    "\n"
+)
+
+# Compare precursor m/z
+
+precursor_identical <-
+    isTRUE(
+        all.equal(
+            precursorMz(original),
+            precursorMz(retrieved)
+        )
+    )
+
+cat(
+    "Precursor m/z identical:",
+    precursor_identical,
+    "\n"
+)
+
+# Compare collision energy
+
+collision_energy_identical <-
+    isTRUE(
+        all.equal(
+            collisionEnergy(original),
+            collisionEnergy(retrieved)
+        )
+    )
+
+cat(
+    "Collision energy identical:",
+    collision_energy_identical,
+    "\n"
+)
+
+# Compare number of peaks
+
+number_peaks_identical <-
+    isTRUE(
+        all.equal(
+            length(mz(original)[[1]]),
+            length(mz(retrieved)[[1]])
+        )
+    )
+
+cat(
+    "Number of peaks identical:",
+    number_peaks_identical,
+    "\n"
+)
+
+```
+
+```{r}
+
+###############################################################
+# 23.3. Validate a random set of 20 spectra
+###############################################################
+
+# Random test of 20 spectra
+
 set.seed(123)
 
-test_idx <-
+test_ids <-
     sample(
-        seq_along(ring_trial_spectra),
+        original_ids,
         20
     )
 
-for(i in test_idx){
+for (sid in test_ids) {
 
+    original_idx <-
+        original_index[[sid]]
+
+    retrieved_idx <-
+        retrieved_index[[sid]]
+    
+    original <- ring_trial_spectra[original_idx]
+
+    retrieved <- ring_trial_library[retrieved_idx]
+    
     stopifnot(
         isTRUE(
             all.equal(
-                mz(ring_trial_spectra[i])[[1]],
-                mz(ring_trial_library[i])[[1]]
+                mz(original)[[1]],
+                mz(retrieved)[[1]]
             )
         )
     )
@@ -1346,12 +1579,34 @@ for(i in test_idx){
     stopifnot(
         isTRUE(
             all.equal(
-                intensity(ring_trial_spectra[i])[[1]],
-                intensity(ring_trial_library[i])[[1]]
+                intensity(original)[[1]],
+                intensity(retrieved)[[1]]
+            )
+        )
+    )
+
+    stopifnot(
+        isTRUE(
+            all.equal(
+                precursorMz(original),
+                precursorMz(retrieved)
+            )
+        )
+    )
+
+    stopifnot(
+        isTRUE(
+            all.equal(
+                collisionEnergy(original),
+                collisionEnergy(retrieved)
             )
         )
     )
 }
+
+cat(
+    "Random spectral integrity test passed for 20 spectra.\n"
+)
 
 ```
 
@@ -1359,12 +1614,12 @@ for(i in test_idx){
 
 # Remove unnecessary values/objects previously created
 
-rm(original, retrieved, test_idx, i)
+rm(original_ids, retrieved_ids, original_index, retrieved_index, mz_identical, intensity_identical, precursor_identical, collision_energy_identical, number_peaks_identical, test_ids, sid, original_idx, retrieved_idx, original, retrieved)
 
 ```
 
 ###############################################################
-# 23. Example queries
+# 24. Example queries
 ###############################################################
 
 ```{r}
@@ -1404,7 +1659,7 @@ Spectra(
 ```
 
 ###############################################################
-# 24. Plot an MS/MS spectrum
+# 25. Plot an MS/MS spectrum
 ###############################################################
 
 ```{r}
@@ -1423,7 +1678,7 @@ plotSpectra(
 ```
 
 ###############################################################
-# 25. Pairwise comparison
+# 26. Pairwise comparison
 ###############################################################
 
 ```{r}
@@ -1450,7 +1705,7 @@ rm(example, comparison)
 ```
 
 ###############################################################
-# 26. Future developments
+# 27. Future developments
 ###############################################################
 
 The workflow presented here establishes the basic infrastructure for the HUMAN
@@ -1471,7 +1726,7 @@ Future versions of the library may include:
 - periodic versioning of the library.
 
 ###############################################################
-# 27. To do list
+# 28. To do list
 ###############################################################
 
 # Agregar
