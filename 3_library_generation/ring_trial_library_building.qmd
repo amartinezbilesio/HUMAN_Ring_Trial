@@ -2611,6 +2611,8 @@ head(
 
 ```{r}
 
+# Remove unnecessary values/objects previously created
+
 rm(massbank_title_components)
 
 ```
@@ -2783,25 +2785,8 @@ stopifnot(
 
 # 27.13 Peak count (peak data)
 
-massbank_library$pknum <- lengths(
-    mz(massbank_library)
-)
-
-# Validate "pknum"
-
-stopifnot(
-    all(
-        massbank_library$pknum ==
-            lengths(intensity(massbank_library))
-    )
-)
-
-stopifnot(
-    all(
-        massbank_library$pknum ==
-            massbank_library$n_peaks
-    )
-)
+massbank_library$pknum <-
+    massbank_library$n_peaks
 
 ```
 
@@ -2809,32 +2794,63 @@ stopifnot(
 
 # 27.14 Splash
 
-massbank_splash <- massbank_library$splash
+# install.packages("remotes")
+# 
+# remotes::install_github(
+#     "berlinguyinca/spectra-hash",
+#     subdir = "splashR"
+# )
+# 
+# "splashR" %in% installed.packages()[, "Package"]
+#
+library(splashR)
+#
+# ls("package:splashR")
+# 
+# args(splashR::getSplash)
+
+# Extract peak lists
+
+mz_list <- mz(massbank_library)
+intensity_list <- intensity(massbank_library)
+
+# Calculate all "splash" values
+
+system.time({
+    massbank_splash <- vapply(
+        seq_along(mz_list),
+        function(i) {
+            peaks <- cbind(
+                mz = mz_list[[i]],
+                intensity = intensity_list[[i]]
+            )
+
+            splashR::getSplash(peaks)
+        },
+        character(1)
+    )
+})
+
+print(massbank_splash)
+
+# Assign "splash" values to massbank_library
+
+massbank_library$splash <- massbank_splash
+
+# Validate "splash"
+
+sum(is.na(massbank_splash)) # number of missing "splash" values
+sum(!is.na(massbank_splash) & !nzchar(massbank_splash)) # number of empty strings
 
 stopifnot(
+    length(massbank_splash) == length(massbank_library),
     !anyNA(massbank_splash),
     all(nzchar(massbank_splash))
-)
+) # validate length, absence of ‘NA’ and empty strings
 
-sum(is.na(massbank_library$splash))
+# Duplicated "splash" values can be legitimate when the same fragmentation spectrum is represented more than once; report duplicates for review rather than automatically deleting records
 
-sum(
-    massbank_library$splash == "",
-    na.rm = TRUE
-)
-
-anyDuplicated(
-    massbank_library$splash
-)
-
-stopifnot(
-    all(
-        !is.na(massbank_library$splash),
-        massbank_library$splash != ""
-    )
-)
-
-# Duplicate "splash" values can be legitimate when the same fragmentation spectrum is represented more than once; report duplicates for review rather than automatically deleting records
+sum(duplicated(massbank_splash))
 
 massbank_duplicate_splash <- unique(
     massbank_splash[
@@ -2842,13 +2858,16 @@ massbank_duplicate_splash <- unique(
     ]
 )
 
+length(massbank_duplicate_splash)
 print(massbank_duplicate_splash)
 
 ```
 
 ```{r}
 
-rm(massbank_splash, massbank_duplicate_splash)
+# Remove unnecessary values/objects previously created
+
+rm(mz_list, intensity_list, massbank_splash, massbank_duplicate_splash)
 
 ```
 
@@ -2977,12 +2996,21 @@ scan_setting_vars <- c(
     "total_scan_rate_MS2_seg"
 )
 
+# Extract the necessary columns
+scan_data <- lapply(
+    scan_setting_vars,
+    function(v) as.character(massbank_library[[v]])
+)
+
+names(scan_data) <- scan_setting_vars
+
+# Build values by spectrum
 massbank_library$ms_scan_setting <- vapply(
     seq_along(massbank_library),
     function(i) {
         values <- vapply(
-            scan_setting_vars,
-            function(v) as.character(massbank_library[[v]][i]),
+            scan_data,
+            function(x) x[i],
             character(1)
         )
 
@@ -2993,7 +3021,7 @@ massbank_library$ms_scan_setting <- vapply(
         }
 
         paste(
-            paste0(scan_setting_vars[keep], ": ", values[keep]),
+            paste0(names(scan_data)[keep], ": ", values[keep]),
             collapse = "; "
         )
     },
@@ -3004,7 +3032,9 @@ massbank_library$ms_scan_setting <- vapply(
 
 ```{r}
 
-rm(scan_setting_vars)
+# Remove unnecessary values/objects previously created
+
+rm(scan_setting_vars, scan_data)
 
 ```
 
@@ -3027,14 +3057,6 @@ massbank_mapping <- c(
     authors = "AUTHORS:",
 
     license = "LICENSE:",
-
-    copyright = "COPYRIGHT:",
-
-    publication = "PUBLICATION:",
-
-    project = "PROJECT:",
-
-    comment = "COMMENT:",
 
 
     # ---------------------------------------------------------
@@ -3144,6 +3166,8 @@ print(massbank_mapping)
 
 ```{r}
 
+# Remove unnecessary values/objects previously created
+
 rm(missing_mapping_variables, massbank_supported_mapping)
 
 ```
@@ -3160,10 +3184,6 @@ massbank_qc <-
             "date",
             "authors",
             "license",
-            "copyright",
-            "publication",
-            "project",
-            "comment",
             "name",
             "massbank_compound_class",
             "formula",
@@ -3199,10 +3219,6 @@ massbank_qc <-
             sum(is.na(massbank_library$date)),
             sum(is.na(massbank_library$authors)),
             sum(is.na(massbank_library$license)),
-            sum(is.na(massbank_library$copyright)),
-            sum(is.na(massbank_library$publication)),
-            sum(is.na(massbank_library$project)),
-            sum(is.na(massbank_library$comment)),
             sum(is.na(massbank_library$name)),
             sum(is.na(massbank_library$massbank_compound_class)),
             sum(is.na(massbank_library$formula)),
@@ -3316,6 +3332,8 @@ print(massbank_optional_qc)
 
 ```{r}
 
+# Remove unnecessary values/objects previously created
+
 rm(massbank_qc, massbank_required, massbank_optional, massbank_optional_qc)
 
 ```
@@ -3418,6 +3436,8 @@ if (!all(massbank_tag_qc$present)) {
 ```
 
 ```{r}
+
+# Remove unnecessary values/objects previously created
 
 rm(massbank_test, massbank_test_file, massbank_test_lines, massbank_expected_tags, massbank_tag_qc)
 
