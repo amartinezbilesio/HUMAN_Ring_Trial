@@ -1292,8 +1292,8 @@ length(ring_trial_spectra)
 
 ```{r}
 
-original <- ring_trial_spectra[1]
-retrieved <- ring_trial_library[1]
+original <- ring_trial_spectra[12]
+retrieved <- ring_trial_library[12]
 
 # Compare masses
 
@@ -1324,9 +1324,42 @@ collisionEnergy(retrieved)
 
 ```{r}
 
+set.seed(123)
+
+test_idx <-
+    sample(
+        seq_along(ring_trial_spectra),
+        20
+    )
+
+for(i in test_idx){
+
+    stopifnot(
+        isTRUE(
+            all.equal(
+                mz(ring_trial_spectra[i])[[1]],
+                mz(ring_trial_library[i])[[1]]
+            )
+        )
+    )
+
+    stopifnot(
+        isTRUE(
+            all.equal(
+                intensity(ring_trial_spectra[i])[[1]],
+                intensity(ring_trial_library[i])[[1]]
+            )
+        )
+    )
+}
+
+```
+
+```{r}
+
 # Remove unnecessary values/objects previously created
 
-rm(original, retrieved)
+rm(original, retrieved, test_idx, i)
 
 ```
 
