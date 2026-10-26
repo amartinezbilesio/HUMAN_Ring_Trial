@@ -1,0 +1,831 @@
+---
+title: "Building the HUMAN Ring Trial spectral library"
+author: "Andres Martinez Bilesio"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+editor: source
+execute:
+  warning: true
+  message: true
+---
+
+###############################################################
+# 1. Introduction
+###############################################################
+
+The purpose of this document is to build the reference spectral library of the
+HUMAN Metabolomics Ring Trial using exclusively the Bioconductor
+RforMassSpectrometry ecosystem.
+
+The final library will be stored as a `CompDb` SQLite database containing
+
+- compound annotations,
+- MS/MS spectra,
+- acquisition metadata,
+- laboratory-specific metadata.
+
+The resulting database constitutes the master representation of the Ring Trial
+spectral library and can later be exported to external formats such as MSP or
+MassBank.
+
+The workflow implemented in this document follows the strategy proposed in the
+official `CompoundDb` vignette while adapting it to the specific needs of the
+Ring Trial.
+
+###############################################################
+# 2. Required packages
+###############################################################
+
+```{r}
+
+library(CompoundDb)
+
+library(Spectra)
+
+library(AnnotationFilter)
+
+library(readxl)
+
+library(RSQLite)
+
+library(dplyr)
+
+library(stringr)
+
+library(purrr)
+
+library(tibble)
+
+```
+
+###############################################################
+# 3. Project structure
+###############################################################
+
+```{r}
+
+# Project directories
+
+project_dir <-
+    "C:/Users/amart/Desktop/HUMAN Ring Trial/HUMAN_Ring_Trial-main (copia para GitHub)/HUMAN_Ring_Trial"
+
+library_dir <-
+    file.path(project_dir,
+              "3_library_generation")
+
+provenance_file <-
+    file.path(
+        library_dir,
+        "spectral_library_provenance.xlsx"
+    )
+
+# mzML directories
+
+mzml_dirs <- list(
+
+    AFEKTA =
+        "C:/Users/amart/Desktop/HUMAN Data/3. Ring Trial/AFEKTA/Afekta/Hackathon_results/human_ring_trial/HE_mzml",
+
+    CEMBIO_POS =
+        "C:/Users/amart/Desktop/HUMAN Data/3. Ring Trial/CEMBIO/RT_MS2_POS_mzml",
+
+    CEMBIO_NEG =
+        "C:/Users/amart/Desktop/HUMAN Data/3. Ring Trial/CEMBIO/RT_MS2_NEG_mzml",
+
+    HMGU =
+        "C:/Users/amart/Desktop/HUMAN Data/3. Ring Trial/HMGU/mzml_ringtrial/mzml_ringtrial/HE_mzml"
+
+)
+
+```
+
+###############################################################
+# 4. Read provenance table
+###############################################################
+
+```{r}
+
+provenance <-
+    read_excel(provenance_file)
+
+provenance
+glimpse(provenance)
+
+```
+
+###############################################################
+# 5. Required columns
+###############################################################
+
+```{r}
+
+required_columns <- c(
+    "lab",
+    "file_mixture",
+    "true_mixture",
+    "compound",
+    "target_InChIKey",
+    "inchikey_2d",
+    "sirius_structure",
+    "molecular_formula",
+    "adduct",
+    "method",
+    "pass",
+    "feature_id",
+    "file",
+    "scan_index",
+    "acquisition_num",
+    "rt_sec",
+    "precursor_mz_raw",
+    "precursor_mz_med",
+    "collision_energy",
+    "n_peaks",
+    "polarity",
+    "csi_score"
+)
+
+```
+
+###############################################################
+# 6. Quality control
+###############################################################
+
+```{r}
+
+missing_columns <-
+    setdiff(
+        required_columns,
+        colnames(provenance)
+    )
+
+if(length(missing_columns) > 0){
+    stop(
+        paste(
+            "Missing columns:",
+            paste(
+                missing_columns,
+                collapse=", "
+            )
+        )
+    )
+}
+
+nrow(provenance)
+length(unique(provenance$compound))
+table(provenance$lab)
+table(provenance$polarity)
+table(provenance$method)
+table(provenance$true_mixture)
+table(provenance$collision_energy)
+length(unique(provenance$scan_index))
+
+```
+
+###############################################################
+# 7. Locate mzML files
+###############################################################
+
+```{r}
+
+find_mzml_file <-
+function(lab,
+         mzml_name,
+         polarity,
+         mzml_dirs){
+    if(lab == "afekta"){
+        directory <- mzml_dirs$AFEKTA
+    }
+    else if(lab == "hmgu"){
+        directory <- mzml_dirs$HMGU
+    }
+    else if(lab == "cembio"){
+        directory <-
+            ifelse(
+                polarity == "pos",
+                mzml_dirs$CEMBIO_POS,
+                mzml_dirs$CEMBIO_NEG
+            )
+    }
+    else{
+        stop(
+            paste(
+                "Unknown laboratory:",
+                lab
+            )
+        )
+    }
+    candidate <-
+        file.path(
+            directory,
+            paste0(
+                mzml_name
+            )
+        )
+    if(!file.exists(candidate)){
+        stop(
+            paste(
+                "File not found:",
+                candidate
+            )
+        )
+    }
+    candidate
+}
+
+```
+
+```{r}
+
+# Absolute mzML path
+
+provenance$file <- gsub(
+    "Human_Endosome",
+    "Human Endosome",
+    provenance$file
+)
+
+provenance <- provenance |>
+    dplyr::filter(lab != "icl")
+
+provenance$mzml_path <-
+    purrr::pmap_chr(
+        list(
+            provenance$lab,
+            provenance$file,
+            provenance$polarity
+        ),
+        find_mzml_file,
+        mzml_dirs = mzml_dirs
+    )
+
+head(provenance$mzml_path)
+
+```
+
+###############################################################
+# 8. Split provenance table by mzML file
+###############################################################
+
+```{r}
+
+provenance_split <-
+    split(
+        provenance,
+        provenance$mzml_path
+    )
+
+length(provenance_split)
+
+```
+
+###############################################################
+# 9. Read mzML
+###############################################################
+
+```{r}
+
+read_mzml <- function(file){
+    Spectra(
+        file,
+        backend = MsBackendMzR()
+    )
+}
+
+```
+
+###############################################################
+# 10. Extract required scans
+###############################################################
+
+```{r}
+
+extract_required_spectra <-
+function(sp, provenance_subset) {
+    scan_numbers <- provenance_subset$acquisition_num
+    idx <- match(
+        scan_numbers,
+        acquisitionNum(sp)
+    )
+    if (anyNA(idx)) {
+        missing_scans <- scan_numbers[is.na(idx)]
+        mzml_file <- unique(provenance_subset$file)
+        stop(
+            "In file ", mzml_file,
+            " the following acquisition numbers were not found: ",
+            paste(missing_scans, collapse = ", ")
+        )
+    }
+    sp <- sp[idx]
+    sp
+}
+
+```
+
+###############################################################
+# 11. Read all mzML files
+###############################################################
+
+```{r}
+
+spectra_list <- vector(
+    "list",
+    length(provenance_split)
+)
+
+names(spectra_list) <-
+    names(provenance_split)
+
+# Read spectra
+
+for(i in seq_along(provenance_split)){
+    message(
+        "Reading ",
+        basename(
+            names(provenance_split)[i]
+        )
+    )
+    prov <-
+        provenance_split[[i]]
+    sp <-
+        read_mzml(
+            unique(
+                prov$mzml_path
+            )
+        )
+    sp <-
+        extract_required_spectra(
+            sp,
+            prov
+        )
+    spectra_list[[i]] <- sp
+}
+
+```
+
+```{r}
+
+# Check that all mzML files have been read
+
+length(spectra_list)
+sapply(
+    spectra_list,
+    length
+)
+
+
+```
+
+###############################################################
+# 12. Combine all spectra
+###############################################################
+
+```{r}
+
+ring_trial_spectra <- concatenateSpectra(spectra_list)
+
+```
+
+```{r}
+
+# Checking
+ring_trial_spectra
+
+spectraVariables(ring_trial_spectra)
+length(ring_trial_spectra)
+peaksData(ring_trial_spectra)
+mz(ring_trial_spectra)
+intensity(ring_trial_spectra)
+
+example <- ring_trial_spectra[1]
+mz(example)[[1]]
+intensity(example)[[1]]
+
+methods("peaksData")
+showMethods("peaksData")
+
+```
+
+###############################################################
+# 13. Build the compound annotation table
+###############################################################
+
+```{r}
+
+# Create a copy of the compound table (provenance)
+compound_table <- provenance
+
+# Add the compound_id, internal identifier for CompDb
+compound_table$compound_id <- seq_len(nrow(compound_table))
+
+# Reorganize the columns in the compound table
+compound_table <-
+    compound_table |>
+    dplyr::select(
+        compound_id,
+        compound,
+        molecular_formula,
+        target_InChIKey,
+        inchikey_2d,
+        sirius_structure,
+        everything()
+    )
+
+compound_table <- compound_table |>
+    dplyr::rename(
+        name = compound,
+        formula = molecular_formula,
+        inchikey = target_InChIKey
+    )
+
+compound_table$inchi <- NA_character_
+
+compound_table$exactmass <- NA_real_
+
+compound_table$synonyms <- compound_table$sirius_structure
+
+compound_table$compound_id <- as.character(compound_table$compound_id)
+
+# Reorganize and check
+required <- c(
+    "compound_id",
+    "name",
+    "inchi",
+    "inchikey",
+    "formula",
+    "exactmass",
+    "synonyms"
+)
+
+setdiff(required, colnames(compound_table))
+
+head(compound_table)
+
+```
+
+###############################################################
+# 14. Build the MS/MS table (the table that `createCompDb()` expects)
+###############################################################
+
+```{r}
+
+# Adding basic columns
+msms_spectra <-
+    data.frame(
+        compound_id =
+            compound_table$compound_id,
+        precursor_mz =
+            compound_table$precursor_mz_med,
+        collision_energy =
+            compound_table$collision_energy,
+        polarity =
+            compound_table$polarity,
+        stringsAsFactors = FALSE
+    )
+
+# Adding mz
+msms_spectra$mz <-
+    as.list(
+        mz(ring_trial_spectra)
+    )
+
+# Adding intensities
+msms_spectra$intensity <-
+    as.list(
+        intensity(ring_trial_spectra)
+    )
+
+# Check
+str(msms_spectra)
+
+# Corrections
+msms_spectra <- msms_spectra |>
+    dplyr::mutate(
+        spectrum_id = dplyr::row_number(),
+        compound_id = as.character(compound_id),
+        polarity = dplyr::case_when(
+            polarity %in% c("+", "positive", "Positive", "pos") ~ 1L,
+            polarity %in% c("-", "negative", "Negative", "neg") ~ 0L,
+            TRUE ~ NA_integer_
+        )
+    )
+
+# Check
+str(msms_spectra)
+
+```
+
+###############################################################
+# 15. Validate input tables (compound and MS/MS spectra tables)
+###############################################################
+
+```{r}
+
+# Number of compounds
+cat("Number of compound entries:",
+    nrow(compound_table),
+    "\n")
+
+# Number of MS/MS spectra
+cat("Number of MS/MS spectra:",
+    nrow(msms_spectra),
+    "\n")
+
+# Mapping
+stopifnot(
+    nrow(msms_spectra) ==
+        length(ring_trial_spectra)
+)
+
+stopifnot(
+    identical(
+        compound_table$compound_id,
+        msms_spectra$compound_id
+    )
+)
+
+# Peak consistency
+stopifnot(
+    length(msms_spectra$mz) ==
+        length(msms_spectra$intensity)
+)
+
+stopifnot(
+    all(
+        lengths(msms_spectra$mz) ==
+        lengths(msms_spectra$intensity)
+    )
+)
+
+# Empty spectra (the output should be 0)
+empty_spectra <-
+    which(
+        lengths(msms_spectra$mz) == 0
+    )
+
+length(empty_spectra)
+
+# Missing precursor m/z
+sum(
+    is.na(
+        msms_spectra$precursor_mz
+    )
+)
+
+# Missing collision energy
+sum(
+    is.na(
+        msms_spectra$collision_energy
+    )
+)
+
+# Missing polarity
+sum(
+    is.na(
+        msms_spectra$polarity
+    )
+)
+
+```
+
+###############################################################
+# 16. Create metadata
+###############################################################
+
+```{r}
+
+metadata <- make_metadata(
+    source = "HUMAN Ring Trial",
+    source_version = "MetaSci Library (Human Metabolites) - 0.1",
+    source_date = format(Sys.Date()),
+    organism = "Hsapiens",
+    url = "https://github.com/philouail/HUMAN_Ring_Trial"
+)
+
+metadata
+
+```
+
+###############################################################
+# 17. Create output directory
+###############################################################
+
+```{r}
+
+output_dir <-
+    file.path(
+        library_dir,
+        "CompDb"
+    )
+
+if(!dir.exists(output_dir))
+    dir.create(
+        output_dir,
+        recursive = TRUE
+    )
+
+db_file <-
+    file.path(
+        output_dir,
+        "RingTrial.sqlite"
+    )
+
+if(file.exists(db_file))
+    file.remove(db_file)
+
+```
+
+###############################################################
+# 18. Create the CompDb database
+###############################################################
+
+```{r}
+
+db_file <-
+    createCompDb(
+        x = compound_table,
+        msms_spectra = msms_spectra,
+        metadata = metadata,
+        path = output_dir,
+        dbFile = "RingTrial.sqlite"
+    )
+
+cat("Database written to:\n")
+cat(db_file, "\n")
+
+```
+
+###############################################################
+# 19. Load the CompDb database
+###############################################################
+
+```{r}
+
+ring_trial_db <- CompDb(db_file)
+
+ring_trial_db
+
+```
+
+###############################################################
+# 20. Validate the CompDb
+###############################################################
+
+```{r}
+
+# Metadata
+metadata(ring_trial_db)
+
+# Available variables
+compoundVariables(ring_trial_db)
+
+# Number of compounds
+compounds(ring_trial_db) |>
+    nrow()
+
+nrow(compound_table) # should be the same
+
+# Does the database contain MS/MS spectra?
+hasMsMsSpectra(ring_trial_db) # should be TRUE
+
+# Load the spectra
+library(Spectra)
+
+ring_trial_library <-
+    Spectra(ring_trial_db)
+
+ring_trial_library
+
+# Number of spectra
+length(ring_trial_library)
+
+length(ring_trial_spectra) # should be the same
+
+# Available spectrum variables
+spectraVariables(ring_trial_library) # to check what information has been stored in the CompDb.
+
+```
+
+###############################################################
+# 21. Validate spectral integrity
+###############################################################
+
+```{r}
+
+original <- ring_trial_spectra[1]
+retrieved <- ring_trial_library[1]
+
+# Compare masses
+identical(
+    mz(original)[[1]],
+    mz(retrieved)[[1]]
+)
+
+# Compare intensities
+identical(
+    intensity(original)[[1]],
+    intensity(retrieved)[[1]]
+
+)
+
+# Compare precursor
+precursorMz(original)
+precursorMz(retrieved)
+
+# Compare collision energy
+collisionEnergy(original)
+collisionEnergy(retrieved)
+
+```
+
+###############################################################
+# 22. Example queries
+###############################################################
+
+```{r}
+
+# Search for a compound
+Spectra(
+    ring_trial_db,
+    filter =
+        ~ name == "5-hydroxy-L-tryptophan"
+)
+
+```
+
+###############################################################
+# 23. Plot an MS/MS spectrum
+###############################################################
+
+```{r}
+
+example <-
+    Spectra(
+        ring_trial_db,
+        filter =
+            ~ name == "5-hydroxy-L-tryptophan"
+    )[1]
+
+plotSpectra(
+    example
+)
+
+```
+
+###############################################################
+# 24. Pairwise comparison
+###############################################################
+
+```{r}
+
+# As the entire library is stored as a Spectra object, we can use the functions from the Spectra package directly.
+
+comparison <-
+    compareSpectra(
+        example,
+        ring_trial_library,
+        ppm = 20
+    )
+
+comparison
+
+```
+
+###############################################################
+# 25. Save the CompDb
+###############################################################
+
+```{r}
+
+# Although `createCompDb()` already generates the SQLite file, we can explicitly state what the final result of the workflow is.
+
+cat(
+    "Final library saved as:\n",
+    db_file,
+    "\n"
+)
+
+```
+
+###############################################################
+# 26. Future developments
+###############################################################
+
+The workflow presented here establishes the basic infrastructure for the HUMAN
+Ring Trial spectral library.
+
+Future versions of the library may include:
+
+- additional participating laboratories (e.g. ICL);
+- all Ring Trial mixtures beyond the Human Endosome subset;
+- additional compound annotations (SMILES, PubChem CID, HMDB, ChEBI);
+- instrument metadata;
+- chromatographic conditions;
+- retention indices;
+- spectral quality metrics;
+- automatic export to MSP;
+- automatic export to MassBank;
+- automatic export to GNPS;
+- periodic versioning of the library.
