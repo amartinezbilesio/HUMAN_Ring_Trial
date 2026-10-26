@@ -1,5 +1,5 @@
 ---
-title: "Building the HUMAN Ring Trial spectral library"
+title: "Building the HUMAN Ring Trial MS/MS spectral library"
 author: "Andres Martinez Bilesio"
 format:
   html:
@@ -85,20 +85,92 @@ provenance_file <-
 # mzML directories
 
 mzml_dirs <- list(
-
     AFEKTA =
         "C:/Users/amart/Desktop/HUMAN Data/3. Ring Trial/AFEKTA/Afekta/Hackathon_results/human_ring_trial/HE_mzml",
-
     CEMBIO_POS =
         "C:/Users/amart/Desktop/HUMAN Data/3. Ring Trial/CEMBIO/RT_MS2_POS_mzml",
-
     CEMBIO_NEG =
         "C:/Users/amart/Desktop/HUMAN Data/3. Ring Trial/CEMBIO/RT_MS2_NEG_mzml",
-
     HMGU =
         "C:/Users/amart/Desktop/HUMAN Data/3. Ring Trial/HMGU/mzml_ringtrial/mzml_ringtrial/HE_mzml"
-
 )
+
+```
+
+```{r}
+
+# # Project directories
+# 
+# project_dir <- here::here()
+# 
+# library_dir <- file.path(
+#     project_dir,
+#     "3_library_generation"
+# )
+# 
+# provenance_file <- file.path(
+#     library_dir,
+#     "spectral_library_provenance.xlsx"
+# )
+# 
+# # mzML directories
+# 
+# data_dir <- "PATH/TO/METASCI_DATA"
+# 
+# if (!dir.exists(data_dir)) {
+#     stop(
+#         paste0(
+#             "The data directory does not exist:\n",
+#             data_dir,
+#             "\n\n",
+#             "Please configure 'data_dir'"
+#         )
+#     )
+# }
+# 
+# mzml_dirs <- list(
+#     AFEKTA =
+#         file.path(
+#             data_dir,
+#             "AFEKTA"
+#         ),
+#     CEMBIO =
+#         file.path(
+#             data_dir,
+#             "CEMBIO"
+#         ),
+#     HMGU =
+#         file.path(
+#             data_dir,
+#             "HMGU"
+#         ),
+#     ICL =
+#         file.path(
+#             data_dir,
+#             "ICL"
+#         ),
+#     AUTH =
+#         file.path(
+#             data_dir,
+#             "AUTH"
+#         )
+# )
+# 
+# purrr::iwalk(
+#     mzml_dirs,
+#     function(path, name) {
+#         if (!dir.exists(path)) {
+#             stop(
+#                 paste0(
+#                     "Missing mzML directory for ",
+#                     name,
+#                     ":\n",
+#                     path
+#                 )
+#             )
+#         }
+#     }
+# )
 
 ```
 
@@ -577,13 +649,57 @@ function(lab,
 
 ```{r}
 
-# Absolute mzML path
+# find_mzml_file <- function(
+#     lab,
+#     mzml_name,
+#     polarity,
+#     mzml_dirs
+# ) {
+#     directory <- switch(
+#         lab,
+#         afekta = mzml_dirs$AFEKTA,
+#         cembio = mzml_dirs$CEMBIO,
+#         hmgu = mzml_dirs$HMGU,
+#         icl = mzml_dirs$ICL,
+#         auth = mzml_dirs$AUTH,
+#         stop(
+#             "Unknown laboratory: ",
+#             lab
+#         )
+#     )
+#     candidate <- file.path(
+#         directory,
+#         mzml_name
+#     )
+#     if (!file.exists(candidate)) {
+#         stop(
+#             "File not found: ",
+#             candidate
+#         )
+#     }
+#     candidate
+# }
+
+```
+
+```{r}
+
+# Normalize the sample name to match the mzML filename.
 
 provenance$file <- gsub(
     "Human_Endosome",
     "Human Endosome",
     provenance$file
 )
+
+any(
+    grepl(
+        "Human_Endosome",
+        provenance$file
+    )
+)
+
+# Absolute mzML path
 
 provenance <- provenance |>
     dplyr::filter(lab != "icl")
@@ -600,6 +716,46 @@ provenance$mzml_path <-
     )
 
 head(provenance$mzml_path)
+
+stopifnot(
+    all(file.exists(provenance$mzml_path))
+)
+message(
+    "Successfully located ",
+    nrow(provenance),
+    " mzML files."
+)
+
+```
+
+```{r}
+
+# # Absolute mzML path
+# 
+# provenance <- provenance |>
+#     dplyr::filter(lab != "icl")
+# 
+# provenance$mzml_path <-
+#     purrr::pmap_chr(
+#         list(
+#             provenance$lab,
+#             provenance$file,
+#             provenance$polarity
+#         ),
+#         find_mzml_file,
+#         mzml_dirs = mzml_dirs
+#     )
+# 
+# head(provenance$mzml_path)
+# 
+# stopifnot(
+#     all(file.exists(provenance$mzml_path))
+# )
+# message(
+#     "Successfully located ",
+#     nrow(provenance),
+#     " mzML files."
+# )
 
 ```
 
@@ -797,6 +953,12 @@ stopifnot(
 stopifnot(
     !anyNA(provenance$spectrum_id)
 )
+
+# Check that there are no duplicated values in ‘spectrum_id’
+stopifnot(
+    !anyDuplicated(provenance$spectrum_id)
+)
+
 
 # Check that all spectra with exactly the same InChIKey are assigned the same compound_id
 
@@ -1041,6 +1203,11 @@ stopifnot(
 stopifnot(
     provenance$compound_id ==
         msms_spectra$compound_id
+)
+
+stopifnot(
+    provenance$spectrum_id ==
+        msms_spectra$spectrum_id
 )
 
 stopifnot(
