@@ -36,10 +36,12 @@ official `CompoundDb` vignette while adapting it to the specific needs of the
 Ring Trial.
 
 ###############################################################
-# 2. Required packages
+# 2. Required packages and maintenance
 ###############################################################
 
 ```{r}
+
+# Packages
 
 library(CompoundDb)
 
@@ -58,6 +60,44 @@ library(stringr)
 library(purrr)
 
 library(tibble)
+
+```
+
+```{r}
+
+# # renv setup and maintenance (this script is used to initialize, restore, and maintain the reproducible R environment for the HUMAN Ring Trial workflow)
+# 
+# ## 1. Install renv (run once on a new R installation if renv is not already installed)
+# 
+# install.packages("renv")
+# 
+# ## 2. Set project directory
+# 
+# setwd("C:/Users/amart/Desktop/HUMAN Ring Trial/HUMAN_Ring_Trial-main (copia para GitHub)/HUMAN_Ring_Trial")
+# 
+# ## 3. Initialize renv (run only once when creating the renv environment)
+# 
+# renv::init()
+# 
+# ## 4. Load the project environment
+# 
+# renv::load()
+# 
+# ## 5. Check project status
+# 
+# renv::project()
+# 
+# .libPaths()
+# 
+# renv::status()
+# 
+# ## 6. Restore the environment (use this after cloning the repository or when the local renv library needs to be synchronized with renv.lock)
+# 
+# renv::restore()
+# 
+# ## 7. Update the lockfile (run this only after intentionally changing project dependencies)
+# 
+# renv::snapshot()
 
 ```
 
@@ -185,6 +225,186 @@ provenance <-
 
 provenance
 glimpse(provenance)
+
+```
+
+```{r}
+
+# Clean redundant provenance entries
+
+csi_check <-
+    provenance |>
+    dplyr::group_by(
+        compound,
+        adduct,
+        method,
+        pass,
+        file,
+        feature_id
+    ) |>
+    dplyr::summarise(
+        n_csi_values = dplyr::n_distinct(csi_score),
+        csi_min = min(csi_score, na.rm = TRUE),
+        csi_max = max(csi_score, na.rm = TRUE),
+        .groups = "drop"
+    ) |>
+    dplyr::filter(n_csi_values > 1)
+
+csi_check
+
+provenance_clean <-
+    provenance |>
+    # Define each feature within its experimental context
+    dplyr::group_by(
+        compound,
+        adduct,
+        method,
+        pass,
+        file,
+        feature_id
+    ) |>
+    # Check that each feature has a single CSI score
+    dplyr::mutate(
+        .feature_csi_score = max(csi_score, na.rm = TRUE)
+    ) |>
+    dplyr::ungroup() |>
+    # Compare different feature_ids within the same compound + adduct + method + pass + file group    
+    dplyr::group_by(
+        compound,
+        adduct,
+        method,
+        pass,
+        file
+    ) |>
+    dplyr::mutate(
+        .best_csi_score = max(.feature_csi_score, na.rm = TRUE)
+    ) |>
+    dplyr::ungroup() |>
+    # Keep all rows belonging to the feature_id with the highest CSI score    
+    dplyr::filter(
+        .feature_csi_score == .best_csi_score
+    ) |>
+    # Remove temporary columns
+    dplyr::select(
+        -.feature_csi_score,
+        -.best_csi_score
+    )
+
+cat("Original rows:", nrow(provenance), "\n")
+cat("Cleaned rows :", nrow(provenance_clean), "\n")
+cat("Rows removed :", nrow(provenance) - nrow(provenance_clean), "\n")
+
+redundant_features <-
+    provenance |>
+    dplyr::group_by(
+        compound,
+        adduct,
+        method,
+        pass,
+        file,
+        feature_id
+    ) |>
+    dplyr::summarise(
+        csi_score = max(csi_score, na.rm = TRUE),
+        n_rows = dplyr::n(),
+        .groups = "drop"
+    ) |>
+    dplyr::group_by(
+        compound,
+        adduct,
+        method,
+        pass,
+        file
+    ) |>
+    dplyr::mutate(
+        best_csi_score = max(csi_score, na.rm = TRUE),
+        redundant = csi_score < best_csi_score
+    ) |>
+    dplyr::ungroup() |>
+    dplyr::filter(redundant)
+
+redundant_features
+
+n_redundant_features <-
+    nrow(redundant_features)
+
+n_rows_removed <-
+    sum(redundant_features$n_rows)
+
+cat(
+    "Redundant features:", n_redundant_features, "\n",
+    "Rows removed:", n_rows_removed, "\n"
+)
+
+redundant_features |>
+    dplyr::select(
+        compound,
+        adduct,
+        method,
+        pass,
+        file,
+        feature_id,
+        csi_score,
+        best_csi_score,
+        n_rows
+    )
+
+provenance |>
+    dplyr::filter(
+        lab == "icl",
+        compound == "glutathione",
+        file == "C_1_neg_007_Human Endosome_1.1_MS2.mzML"
+    ) |>
+    dplyr::select(
+        compound,
+        adduct,
+        method,
+        pass,
+        feature_id,
+        scan_index,
+        acquisition_num,
+        rt_sec,
+        csi_score
+    )
+
+provenance_clean |>
+    dplyr::filter(
+        lab == "icl",
+        compound == "glutathione",
+        file == "C_1_neg_007_Human Endosome_1.1_MS2.mzML"
+    ) |>
+    dplyr::select(
+        compound,
+        adduct,
+        method,
+        pass,
+        feature_id,
+        scan_index,
+        acquisition_num,
+        rt_sec,
+        csi_score
+    )
+
+provenance_clean_file <-
+    file.path(
+        library_dir,
+        "spectral_library_provenance_cleaned.xlsx"
+    )
+
+writexl::write_xlsx(
+    provenance_clean,
+    provenance_clean_file
+)
+
+cat(
+    "Cleaned provenance written to:\n",
+    provenance_clean_file,
+    "\n"
+)
+
+provenance <- provenance_clean
+
+rm(csi_check, provenance_clean, redundant_features, n_redundant_features, n_rows_removed, provenance_clean_file)
 
 ```
 
@@ -684,7 +904,7 @@ function(lab,
 
 ```{r}
 
-# Normalize the sample name to match the mzML filename.
+# Normalize the sample file name to match the mzML filename.
 
 provenance$file <- gsub(
     "Human_Endosome",
@@ -871,6 +1091,14 @@ sapply(
 
 ```
 
+```{r}
+
+# Remove unnecessary values/objects previously created
+
+rm(i, prov, sp)
+
+```
+
 ###############################################################
 # 13. Combine all spectra
 ###############################################################
@@ -909,7 +1137,7 @@ showMethods("peaksData")
 
 # Remove unnecessary values/objects previously created
 
-rm(i, prov, sp, example)
+rm(example)
 
 ```
 
@@ -955,10 +1183,16 @@ stopifnot(
 )
 
 # Check that there are no duplicated values in ‘spectrum_id’
+
 stopifnot(
     !anyDuplicated(provenance$spectrum_id)
 )
 
+# Check that there are no InChIKey ‘NA’ values (in ‘inchikey’)
+
+stopifnot(
+    !anyNA(provenance$inchikey)
+)
 
 # Check that all spectra with exactly the same InChIKey are assigned the same compound_id
 
@@ -1386,6 +1620,10 @@ compoundVariables(ring_trial_db)
 
 CompoundDb::tables(ring_trial_db)
 
+CompoundDb::tables(ring_trial_db)$msms_spectrum
+
+CompoundDb::tables(ring_trial_db)$ms_compound
+
 # SQLite connection
 
 SQLite_connection <- CompoundDb::dbconn(ring_trial_db)
@@ -1396,6 +1634,11 @@ DBI::dbListTables(SQLite_connection)
 
 DBI::dbGetQuery(
     SQLite_connection,
+    "PRAGMA table_info(msms_spectrum)"
+)
+
+DBI::dbGetQuery(
+    SQLite_connection,
     "SELECT name FROM sqlite_master WHERE type = 'table';"
 )
 
@@ -1403,6 +1646,21 @@ DBI::dbGetQuery(
     SQLite_connection,
     "SELECT COUNT(DISTINCT compound_id) AS n_compounds
      FROM ms_compound"
+)
+
+DBI::dbGetQuery(
+    SQLite_connection,
+    "
+    SELECT
+        spectrum_id,
+        compound_id,
+        acquisitionNum,
+        precursor_mz,
+        collision_energy
+    FROM msms_spectrum
+    WHERE spectrum_id IN (1, 2, 3, 4, 100)
+    ORDER BY spectrum_id
+    "
 )
 
 # Compounds
@@ -1455,9 +1713,18 @@ head(
     spectraData(ring_trial_library)
 )
 
-CompoundDb::tables(ring_trial_db)$msms_spectrum
-
-CompoundDb::tables(ring_trial_db)$ms_compound
+spectraData(
+    ring_trial_library,
+    columns = c(
+        "spectrum_id",
+        "compound_id",
+        "acquisitionNum",
+        "precursorMz",
+        "collisionEnergy",
+        "precursorCharge",
+        "polarity"
+    )
+)
 
 Spectra::coreSpectraVariables()
 
@@ -1909,6 +2176,229 @@ Spectra(
 #     filter =
 #         ~ adduct == "[M+H]+"
 # )
+
+```
+
+```{r}
+
+src <- CompoundDb::src_compdb(ring_trial_db)
+
+src
+
+ms_compound_tbl <-
+    dplyr::tbl(
+        src,
+        "ms_compound"
+    )
+
+ms_compound_tbl |>
+    dplyr::summarise(
+        n_rows = dplyr::n(),
+        n_compounds = dplyr::n_distinct(compound_id)
+    ) |>
+    dplyr::collect()
+
+msms_spectrum_tbl <-
+    dplyr::tbl(
+        src,
+        "msms_spectrum"
+    )
+
+msms_spectrum_tbl |>
+    dplyr::summarise(
+        n_rows = dplyr::n(),
+        n_spectra = dplyr::n_distinct(spectrum_id),
+        n_compounds = dplyr::n_distinct(compound_id)
+    ) |>
+    dplyr::collect()
+
+msms_spectrum_tbl |>
+    dplyr::distinct(
+        lab,
+        adduct,
+        polarity
+    ) |>
+    dplyr::arrange(lab, polarity, adduct) |>
+    dplyr::collect()
+
+# Available laboratories
+
+msms_spectrum_tbl |>
+    dplyr::count(lab) |>
+    dplyr::arrange(lab) |>
+    dplyr::collect()
+
+msms_spectrum_tbl |>
+    dplyr::filter(
+        lab == "cembio"
+    ) |>
+    dplyr::select(
+        spectrum_id,
+        compound_id,
+        lab,
+        adduct,
+        polarity,
+        collision_energy,
+        precursor_mz
+    ) |>
+    dplyr::collect()
+
+# Available adducts
+
+msms_spectrum_tbl |>
+    dplyr::count(adduct) |>
+    dplyr::arrange(adduct) |>
+    dplyr::collect()
+
+msms_spectrum_tbl |>
+    dplyr::filter(
+        adduct == "[M - H]-"
+    ) |>
+    dplyr::select(
+        spectrum_id,
+        compound_id,
+        lab,
+        adduct,
+        polarity,
+        collision_energy,
+        precursor_mz
+    ) |>
+    dplyr::collect()
+
+msms_spectrum_tbl |>
+    dplyr::filter(
+        adduct == "[M + H]+"
+    ) |>
+    dplyr::select(
+        spectrum_id,
+        compound_id,
+        lab,
+        adduct,
+        polarity,
+        collision_energy,
+        precursor_mz
+    ) |>
+    dplyr::collect()
+
+# Available polarities
+
+msms_spectrum_tbl |>
+    dplyr::count(polarity) |>
+    dplyr::arrange(polarity) |>
+    dplyr::collect()
+
+msms_spectrum_tbl |>
+    dplyr::filter(
+        polarity == 1
+    ) |>
+    dplyr::collect()
+
+msms_spectrum_tbl |>
+    dplyr::filter(
+        polarity == 0
+    ) |>
+    dplyr::collect()
+
+# Available collision energies
+
+msms_spectrum_tbl |>
+    dplyr::count(collision_energy) |>
+    dplyr::arrange(collision_energy) |>
+    dplyr::collect()
+
+# Available precursor charges
+
+msms_spectrum_tbl |>
+    dplyr::count(precursorCharge) |>
+    dplyr::arrange(precursorCharge) |>
+    dplyr::collect()
+
+# Example query: combine tables
+# CEMBIO positive-mode spectra acquired at collision energy 40 (+ optional adduct, + optional name)
+
+cembio_positive_ce40 <-
+    msms_spectrum_tbl |>
+    dplyr::filter(
+        lab == "cembio",
+        polarity == 1,
+        collision_energy == "40"
+    ) |>
+    dplyr::select(
+        spectrum_id,
+        compound_id,
+        lab,
+        adduct,
+        polarity,
+        collision_energy,
+        precursor_mz,
+        precursorCharge
+    ) |>
+    dplyr::collect()
+
+cembio_positive_ce40
+
+cembio_positive_ce40_mh <-
+    msms_spectrum_tbl |>
+    dplyr::filter(
+        lab == "cembio",
+        polarity == 1,
+        collision_energy == "40",
+        adduct == "[M + H]+"
+    ) |>
+    dplyr::select(
+        spectrum_id,
+        compound_id,
+        lab,
+        adduct,
+        polarity,
+        collision_energy,
+        precursor_mz,
+        precursorCharge
+    ) |>
+    dplyr::collect()
+
+cembio_positive_ce40_mh
+
+cembio_positive_ce40_name <-
+    msms_spectrum_tbl |>
+    dplyr::filter(
+        lab == "cembio",
+        polarity == 1,
+        collision_energy == "40"
+    ) |>
+    dplyr::inner_join(
+        ms_compound_tbl |>
+            dplyr::select(
+                compound_id,
+                name,
+                inchikey,
+                formula,
+                exactmass
+            ),
+        by = "compound_id"
+    ) |>
+    dplyr::select(
+        spectrum_id,
+        compound_id,
+        name,
+        inchikey,
+        formula,
+        exactmass,
+        lab,
+        adduct,
+        polarity,
+        collision_energy,
+        precursor_mz
+    ) |>
+    dplyr::collect()
+
+cembio_positive_ce40_name
+
+```
+
+```{r}
+
+rm(src, ms_compound_tbl, msms_spectrum_tbl, cembio_positive_ce40, cembio_positive_ce40_mh, cembio_positive_ce40_name)
 
 ```
 
