@@ -385,26 +385,28 @@ provenance_clean |>
         csi_score
     )
 
-provenance_clean_file <-
-    file.path(
-        library_dir,
-        "spectral_library_provenance_cleaned.xlsx"
-    )
-
-writexl::write_xlsx(
-    provenance_clean,
-    provenance_clean_file
-)
-
-cat(
-    "Cleaned provenance written to:\n",
-    provenance_clean_file,
-    "\n"
-)
+# provenance_clean_file <-
+#     file.path(
+#         library_dir,
+#         "spectral_library_provenance_cleaned.xlsx"
+#     )
+# 
+# writexl::write_xlsx(
+#     provenance_clean,
+#     provenance_clean_file
+# )
+# 
+# cat(
+#     "Cleaned provenance written to:\n",
+#     provenance_clean_file,
+#     "\n"
+# )
 
 provenance <- provenance_clean
 
-rm(csi_check, provenance_clean, redundant_features, n_redundant_features, n_rows_removed, provenance_clean_file)
+# rm(csi_check, provenance_clean, redundant_features, n_redundant_features, n_rows_removed, provenance_clean_file)
+
+rm(csi_check, provenance_clean, redundant_features, n_redundant_features, n_rows_removed)
 
 ```
 
@@ -488,7 +490,7 @@ rm(required_columns, missing_columns)
 ###############################################################
 
 standards_file <-
-    "C:/Users/amart/Desktop/HUMAN Ring Trial/HUMAN_Ring_Trial-main (copia para GitHub)/HUMAN_Ring_Trial/1_preprocessing/standards.xlsx"
+    "C:/Users/amart/Desktop/HUMAN Ring Trial/HUMAN_Ring_Trial-main (copia para GitHub)/HUMAN_Ring_Trial/1_preprocessing/standards_extended_with_classes.xlsx"
 
 # Read standards table
 # Column names are located in the second row of the Excel file
@@ -509,7 +511,8 @@ standards_annotation_columns <- c(
     "LipidMaps",
     "SMILES",
     "InChI",
-    "M"
+    "M",
+    "classes"
 )
 
 # Check that all required columns are present
@@ -614,7 +617,8 @@ provenance |>
         LipidMaps,
         SMILES,
         InChI,
-        M
+        M,
+        classes
     ) |>
     head()
 
@@ -773,7 +777,7 @@ provenance <-
 provenance <-
     provenance |>
     dplyr::mutate(
-        instrument_type = "LC-MS"
+        instrument_type = "LC-ESI-QTOF"
     )
 
 # Add synonyms
@@ -797,7 +801,8 @@ provenance <-
         name = compound, # ChEBI names 
         formula = molecular_formula,
         inchikey = target_InChIKey,
-        exactmass = M
+        exactmass = M,
+        compound_class = classes
     )
 
 # Convert exact mass to CompDb-compatible numeric values
@@ -906,18 +911,29 @@ function(lab,
 
 # Normalize the sample file name to match the mzML filename.
 
-provenance$file <- gsub(
-    "Human_Endosome",
-    "Human Endosome",
-    provenance$file
-)
-
-any(
-    grepl(
-        "Human_Endosome",
-        provenance$file
-    )
-)
+# provenance$file <- gsub(
+#     "Human_Endosome",
+#     "Human Endosome",
+#     provenance$file
+# )
+# 
+# any(
+#     grepl(
+#         "Human_Endosome",
+#         provenance$file
+#     )
+# )
+# 
+# writexl::write_xlsx(
+#     provenance,
+#     provenance_file
+# )
+# 
+# cat(
+#     "Normalize provenance on sample file name written to:\n",
+#     provenance_file,
+#     "\n"
+# )
 
 # Absolute mzML path
 
@@ -1249,6 +1265,7 @@ compound_annotations <-
         SMILES,
         inchi,
         exactmass,
+        compound_class,
         synonyms
     ) |>
     dplyr::distinct(compound_id, .keep_all = TRUE)
@@ -1726,6 +1743,19 @@ spectraData(
     )
 )
 
+classyfire_classes <- spectraData(
+    ring_trial_library,
+    columns = "compound_class"
+)
+classyfire_classes$compound_class[1]
+classyfire_classes_levels <- strsplit(classyfire_classes$compound_class[1], "\t")[[1]]
+length(classyfire_classes_levels)
+classyfire_classes_levels
+data.frame(
+    level = seq_along(classyfire_classes_levels),
+    compound_class = classyfire_classes_levels
+)
+
 Spectra::coreSpectraVariables()
 
 getMethod(
@@ -1746,6 +1776,12 @@ stopifnot(
 length(ring_trial_library)
 
 length(ring_trial_spectra)
+
+```
+
+```{r}
+
+rm(classyfire_classes, classyfire_classes_levels)
 
 ```
 
@@ -2449,7 +2485,974 @@ rm(example, comparison)
 ```
 
 ###############################################################
-# 27. Future developments
+# 27. Export to MassBank
+###############################################################
+
+```{r}
+
+# 27.1 Required packages
+
+# # Install the MsBackendMassbank package
+# 
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("MsBackendMassbank")
+
+# Load the MsBackendMassbank package
+
+library(MsBackendMassbank)
+
+```
+
+```{r}
+
+# 27.2 Prepare an independent MassBank export object (keep the original ring_trial_library unchanged)
+
+massbank_library <- ring_trial_library
+
+stopifnot(
+    length(massbank_library) > 0L
+)
+
+```
+
+```{r}
+
+# 27.3 MassBank contributor ID and accession numbers (provisional)
+
+# IMPORTANT: in the future, replace "HUMAN" with the official MassBank contributor ID
+
+massbank_contributor_id <- "HUMAN"
+
+stopifnot(
+    grepl(
+        "^[A-Za-z0-9_]{1,32}$",
+        massbank_contributor_id
+    )
+)
+
+massbank_library$accession <- sprintf(
+    "MSBNK-%s-%05d",
+    massbank_contributor_id,
+    seq_along(massbank_library)
+)
+
+rm(massbank_contributor_id)
+
+# Validate "accession"
+
+stopifnot(
+    !anyDuplicated(massbank_library$accession)
+)
+
+```
+
+```{r}
+
+# 27.4 Record title
+
+massbank_library$title <- paste(
+    massbank_library$name,
+    "LC-ESI-QTOF",
+    "MS2",
+    paste0("CE ", massbank_library$collisionEnergy, " eV"),
+    massbank_library$adduct,
+    sep = "; "
+)
+
+# Replace missing values in "title" components rather than writing "NA" into the record title
+
+massbank_title_components <- list(
+    massbank_library$name,
+    rep("LC-ESI-QTOF", length(massbank_library)),
+    rep("MS2", length(massbank_library)),
+    ifelse(
+        is.na(massbank_library$collisionEnergy),
+        NA_character_,
+        paste0(
+            "CE ",
+            massbank_library$collisionEnergy,
+            " eV"
+        )
+    ),
+    massbank_library$adduct
+)
+
+massbank_library$title <- vapply(
+    seq_along(massbank_library),
+    function(i) {
+        parts <- vapply(
+            massbank_title_components,
+            function(x) as.character(x[i]),
+            character(1)
+        )
+
+        paste(
+            parts[!is.na(parts) & nzchar(parts)],
+            collapse = "; "
+        )
+    },
+    character(1)
+)
+
+stopifnot(
+    all(
+        !is.na(massbank_library$title),
+        massbank_library$title != ""
+    )
+)
+
+head(
+    massbank_library$title
+)
+
+```
+
+```{r}
+
+rm(massbank_title_components)
+
+```
+
+```{r}
+
+# 27.5 Date
+
+massbank_library$date <- format(
+    Sys.Date(),
+    "%Y.%m.%d"
+)
+
+```
+
+```{r}
+
+# 27.6 Authors
+
+massbank_library$authors <- "Andres Martinez Bilesio [com], Philippine Louail [com]"
+
+```
+
+```{r}
+
+# 27.7 License
+
+massbank_library$license <- "CC BY"
+
+# Validate "license"
+
+stopifnot(
+    all(
+        !is.na(massbank_library$license),
+        massbank_library$license != ""
+    )
+)
+
+```
+
+```{r}
+
+# 27.8 Instrument
+
+massbank_library$massbank_instrument <- paste(
+    massbank_library$instrument,
+    massbank_library$MS_instrument,
+    sep = "; "
+)
+
+massbank_library$massbank_instrument <- gsub(
+    "; NA$",
+    "",
+    massbank_library$massbank_instrument
+)
+
+massbank_library$massbank_instrument <- gsub(
+    "^NA; ",
+    "",
+    massbank_library$massbank_instrument
+)
+
+massbank_library$massbank_instrument[
+    is.na(massbank_library$instrument) &
+        is.na(massbank_library$MS_instrument)
+] <- NA_character_
+
+sum(
+    is.na(massbank_library$massbank_instrument)
+)
+
+sum(
+    grepl(
+        "\\bNA\\b",
+        massbank_library$massbank_instrument
+    ),
+    na.rm = TRUE
+)
+
+```
+
+```{r}
+
+# 27.9 Instrument type
+
+# Validate "instrument_type"
+
+stopifnot(
+    all(
+        unique(
+            massbank_library$instrument_type
+        ) == "LC-ESI-QTOF"
+    )
+)
+
+```
+
+```{r}
+
+# 27.10 MS type
+
+massbank_library$ms_ms_type <- "MS2"
+
+# Validate "ms_ms_type"
+
+stopifnot(
+    all(
+        unique(
+            massbank_library$ms_ms_type
+        ) == "MS2"
+    )
+)
+
+```
+
+```{r}
+
+# 27.11 Ion mode (polarity)
+
+# Create a separate "massbank_polarity" variable as character for the MassBank export, while keeping the original Spectra "polarity" variable as integer
+
+massbank_library$massbank_polarity <- ifelse(
+    massbank_library$polarity == 1L,
+    "POSITIVE",
+    ifelse(
+        massbank_library$polarity == 0L,
+        "NEGATIVE",
+        NA_character_
+    )
+)
+
+# Validate "massbank_polarity"
+
+stopifnot(
+    all(
+        unique(
+            massbank_library$massbank_polarity
+        ) %in%
+            c("POSITIVE", "NEGATIVE")
+    )
+)
+
+table(
+    massbank_library$massbank_polarity,
+    useNA = "ifany"
+)
+
+```
+
+```{r}
+
+# 27.12 Ionization
+
+massbank_library$ms_ionization <-
+    massbank_library$source
+
+# Validate "ms_ionization"
+
+stopifnot(
+    all(
+        unique(
+            massbank_library$ms_ionization
+        ) == "ESI"
+    )
+)
+
+```
+
+```{r}
+
+# 27.13 Peak count (peak data)
+
+massbank_library$pknum <- lengths(
+    mz(massbank_library)
+)
+
+# Validate "pknum"
+
+stopifnot(
+    all(
+        massbank_library$pknum ==
+            lengths(intensity(massbank_library))
+    )
+)
+
+stopifnot(
+    all(
+        massbank_library$pknum ==
+            massbank_library$n_peaks
+    )
+)
+
+```
+
+```{r}
+
+# 27.14 Splash
+
+massbank_splash <- massbank_library$splash
+
+stopifnot(
+    !anyNA(massbank_splash),
+    all(nzchar(massbank_splash))
+)
+
+sum(is.na(massbank_library$splash))
+
+sum(
+    massbank_library$splash == "",
+    na.rm = TRUE
+)
+
+anyDuplicated(
+    massbank_library$splash
+)
+
+stopifnot(
+    all(
+        !is.na(massbank_library$splash),
+        massbank_library$splash != ""
+    )
+)
+
+# Duplicate "splash" values can be legitimate when the same fragmentation spectrum is represented more than once; report duplicates for review rather than automatically deleting records
+
+massbank_duplicate_splash <- unique(
+    massbank_splash[
+        duplicated(massbank_splash)
+    ]
+)
+
+print(massbank_duplicate_splash)
+
+```
+
+```{r}
+
+rm(massbank_splash, massbank_duplicate_splash)
+
+```
+
+```{r}
+
+# 27.15 Compound class
+
+# Normalize the hierarchy of chemical classes
+
+normalize_compound_class <- function(x) {
+    vapply(x, function(class_string) {
+
+        if (is.na(class_string) || !nzchar(trimws(class_string))) {
+            return(NA_character_)
+        }
+
+        # Separate by tabs
+      
+        classes <- strsplit(
+            class_string,
+            split = "\t",
+            fixed = TRUE
+        )[[1]]
+
+        # Remove spaces and empty elements
+        
+        classes <- trimws(classes)
+        classes <- classes[nzchar(classes)]
+
+        # Remove duplicates whilst preserving the order
+        
+        classes <- classes[!duplicated(classes)]
+
+        # Semicolon-separated list format
+        
+        paste(classes, collapse = "; ")
+    }, character(1))
+}
+
+massbank_library$massbank_compound_class <-
+    normalize_compound_class(massbank_library$compound_class)
+
+# Check the results
+
+head(massbank_library$massbank_compound_class, 5)
+
+# Check for records without classes
+
+sum(is.na(massbank_library$massbank_compound_class))
+
+# Validate "massbank_compound_class"
+
+stopifnot(
+    all(
+        !is.na(massbank_library$massbank_compound_class),
+        massbank_library$massbank_compound_class != ""
+    )
+)
+
+```
+
+```{r}
+
+# 27.16 Database identifiers
+
+massbank_library$link_chebi <-
+    massbank_library$ChEBI
+
+massbank_library$link_kegg <-
+    massbank_library$KEGG
+
+massbank_library$link_hmdb <-
+    massbank_library$HMDB
+
+massbank_library$link_lipidmaps <-
+    massbank_library$LipidMaps
+
+```
+
+```{r}
+
+# 27.17 Chromatography
+
+# Column
+
+massbank_library$chrom_column <-
+    massbank_library$column
+
+# Mobile phase (keep the two mobile phases distinct in the source data; their combined representation is useful for documenting the experimental method, but should be reviewed before submission as AC$CHROMATOGRAPHY: SOLVENT)
+
+massbank_library$chrom_solvent <- paste(
+    "A:",
+    massbank_library$mobile_phase_A,
+    "; B:",
+    massbank_library$mobile_phase_B
+)
+
+```
+
+```{r}
+
+# 27.18 Fragmentation mode
+
+massbank_library$ms_frag_mode <-
+    massbank_library$fragmentation
+
+```
+
+```{r}
+
+# 27.19 Mass range
+
+massbank_library$ms_mass_range <-
+    massbank_library$mass_range
+
+```
+
+```{r}
+
+# 27.20 Scan settings
+
+scan_setting_vars <- c(
+    "total_scan_rate_MS1_MS2",
+    "total_scan_rate_MS1_seg_pos",
+    "total_scan_rate_MS1_seg_neg",
+    "total_scan_rate_MS2_seg"
+)
+
+massbank_library$ms_scan_setting <- vapply(
+    seq_along(massbank_library),
+    function(i) {
+        values <- vapply(
+            scan_setting_vars,
+            function(v) as.character(massbank_library[[v]][i]),
+            character(1)
+        )
+
+        keep <- !is.na(values) & nzchar(values)
+
+        if (!any(keep)) {
+            return(NA_character_)
+        }
+
+        paste(
+            paste0(scan_setting_vars[keep], ": ", values[keep]),
+            collapse = "; "
+        )
+    },
+    character(1)
+)
+
+```
+
+```{r}
+
+rm(scan_setting_vars)
+
+```
+
+```{r}
+
+# 27.21 MassBank mapping
+
+massbank_mapping <- c(
+
+    # ---------------------------------------------------------
+    # Record information
+    # ---------------------------------------------------------
+
+    accession = "ACCESSION:",
+
+    title = "RECORD_TITLE:",
+
+    date = "DATE:",
+
+    authors = "AUTHORS:",
+
+    license = "LICENSE:",
+
+    copyright = "COPYRIGHT:",
+
+    publication = "PUBLICATION:",
+
+    project = "PROJECT:",
+
+    comment = "COMMENT:",
+
+
+    # ---------------------------------------------------------
+    # Chemical compound information
+    # ---------------------------------------------------------
+
+    name = "CH$NAME:",
+
+    massbank_compound_class = "CH$COMPOUND_CLASS:",
+
+    formula = "CH$FORMULA:",
+
+    exactmass = "CH$EXACT_MASS:",
+
+    SMILES = "CH$SMILES:",
+
+    inchi = "CH$IUPAC:",
+
+    inchikey = "CH$LINK: INCHIKEY",
+    
+    link_chebi = "CH$LINK: CHEBI",
+    
+    link_kegg = "CH$LINK: KEGG",
+
+    link_hmdb = "CH$LINK: HMDB",
+
+    link_lipidmaps = "CH$LINK: LIPIDMAPS",
+
+
+    # ---------------------------------------------------------
+    # Instrument / Mass Spectrometry information
+    # ---------------------------------------------------------
+
+    massbank_instrument = "AC$INSTRUMENT:",
+
+    instrument_type = "AC$INSTRUMENT_TYPE:",
+
+    ms_ms_type = "AC$MASS_SPECTROMETRY: MS_TYPE",
+
+    massbank_polarity = "AC$MASS_SPECTROMETRY: ION_MODE",
+
+    ms_ionization = "AC$MASS_SPECTROMETRY: IONIZATION",
+
+    collisionEnergy = "AC$MASS_SPECTROMETRY: COLLISION_ENERGY",
+    
+    ms_frag_mode = "AC$MASS_SPECTROMETRY: FRAGMENTATION_MODE",
+    
+    ms_mass_range = "AC$MASS_SPECTROMETRY: MASS_RANGE_MZ",
+
+    ms_scan_setting = "AC$MASS_SPECTROMETRY: SCANNING_SETTING",
+
+
+    # ---------------------------------------------------------
+    # Chromatography
+    # ---------------------------------------------------------
+
+    rtime = "AC$CHROMATOGRAPHY: RETENTION_TIME",
+    
+    chrom_column = "AC$CHROMATOGRAPHY: COLUMN_NAME",
+
+    chrom_solvent = "AC$CHROMATOGRAPHY: SOLVENT",
+
+
+    # ---------------------------------------------------------
+    # Precursor (focused ion)
+    # ---------------------------------------------------------
+
+    adduct = "MS$FOCUSED_ION: PRECURSOR_TYPE",
+
+    precursorMz = "MS$FOCUSED_ION: PRECURSOR_M/Z",
+
+    precursorIntensity = "MS$FOCUSED_ION: PRECURSOR_INT",
+
+
+    # ---------------------------------------------------------
+    # Peak information
+    # ---------------------------------------------------------
+
+    splash = "PK$SPLASH:",
+
+    pknum = "PK$NUM_PEAK:"
+)
+
+# Verify that all mapped variables exist
+
+missing_mapping_variables <- setdiff(
+    names(massbank_mapping),
+    spectraVariables(massbank_library)
+)
+
+if (length(missing_mapping_variables)) {
+    stop(
+        "Mapping variables missing from massbank_library: ",
+        paste(missing_mapping_variables, collapse = ", ")
+    )
+}
+
+# Compare the mapping with the backend-supported mappings
+
+massbank_supported_mapping <-
+    spectraVariableMapping(MsBackendMassbank())
+
+print(massbank_supported_mapping)
+print(massbank_mapping)
+
+```
+
+```{r}
+
+rm(missing_mapping_variables, massbank_supported_mapping)
+
+```
+
+```{r}
+
+# 27.22 Validate the MassBank metadata
+
+massbank_qc <-
+    data.frame(
+        variable = c(
+            "accession",
+            "title",
+            "date",
+            "authors",
+            "license",
+            "copyright",
+            "publication",
+            "project",
+            "comment",
+            "name",
+            "massbank_compound_class",
+            "formula",
+            "exactmass",
+            "SMILES",
+            "inchi",
+            "inchikey",
+            "link_chebi",
+            "link_kegg",
+            "link_hmdb",
+            "link_lipidmaps",
+            "massbank_instrument",
+            "instrument_type",
+            "ms_ms_type",
+            "massbank_polarity",
+            "ms_ionization",
+            "collisionEnergy",
+            "ms_frag_mode",
+            "ms_mass_range",
+            "ms_scan_setting",
+            "rtime",
+            "chrom_column",
+            "chrom_solvent",
+            "adduct",
+            "precursorMz",
+            "precursorIntensity",
+            "splash",
+            "pknum"
+        ),
+        missing = c(
+            sum(is.na(massbank_library$accession)),
+            sum(is.na(massbank_library$title)),
+            sum(is.na(massbank_library$date)),
+            sum(is.na(massbank_library$authors)),
+            sum(is.na(massbank_library$license)),
+            sum(is.na(massbank_library$copyright)),
+            sum(is.na(massbank_library$publication)),
+            sum(is.na(massbank_library$project)),
+            sum(is.na(massbank_library$comment)),
+            sum(is.na(massbank_library$name)),
+            sum(is.na(massbank_library$massbank_compound_class)),
+            sum(is.na(massbank_library$formula)),
+            sum(is.na(massbank_library$exactmass)),
+            sum(is.na(massbank_library$SMILES)),
+            sum(is.na(massbank_library$inchi)),
+            sum(is.na(massbank_library$inchikey)),
+            sum(is.na(massbank_library$link_chebi)),
+            sum(is.na(massbank_library$link_kegg)),
+            sum(is.na(massbank_library$link_hmdb)),
+            sum(is.na(massbank_library$link_lipidmaps)),
+            sum(is.na(massbank_library$massbank_instrument)),
+            sum(is.na(massbank_library$instrument_type)),
+            sum(is.na(massbank_library$ms_ms_type)),
+            sum(is.na(massbank_library$massbank_polarity)),
+            sum(is.na(massbank_library$ms_ionization)),
+            sum(is.na(massbank_library$collisionEnergy)),
+            sum(is.na(massbank_library$ms_frag_mode)),
+            sum(is.na(massbank_library$ms_mass_range)),
+            sum(is.na(massbank_library$ms_scan_setting)),
+            sum(is.na(massbank_library$rtime)),
+            sum(is.na(massbank_library$chrom_column)),
+            sum(is.na(massbank_library$chrom_solvent)),
+            sum(is.na(massbank_library$adduct)),
+            sum(is.na(massbank_library$precursorMz)),
+            sum(is.na(massbank_library$precursorIntensity)),
+            sum(is.na(massbank_library$splash)),
+            sum(is.na(massbank_library$pknum))
+        )
+    )
+
+massbank_qc
+
+```
+
+```{r}
+
+# Mandatory metadata QC
+
+massbank_required <- c(
+    "accession",
+    "title",
+    "date",
+    "authors",
+    "license",
+    "name",
+    "massbank_compound_class",
+    "formula",
+    "exactmass",
+    "SMILES",
+    "inchi",
+    "massbank_instrument",
+    "instrument_type",
+    "ms_ms_type",
+    "massbank_polarity",
+    "splash",
+    "pknum"
+)
+
+massbank_qc <- data.frame(
+    variable = massbank_required,
+    missing = vapply(
+        massbank_required,
+        function(v) {
+            x <- massbank_library[[v]]
+            sum(is.na(x) | !nzchar(as.character(x)))
+        },
+        integer(1)
+    )
+)
+
+print(massbank_qc)
+
+if (any(massbank_qc$missing > 0L)) {
+    stop(
+        "MassBank export blocked: mandatory metadata are missing."
+    )
+}
+
+# Report optional metadata completeness
+
+massbank_optional <- c(
+    "inchikey",
+    "link_chebi",
+    "link_kegg",
+    "link_hmdb",
+    "link_lipidmaps",
+    "collisionEnergy",
+    "rtime",
+    "adduct",
+    "precursorMz",
+    "precursorIntensity",
+    "chrom_column",
+    "chrom_solvent",
+    "ms_mass_range",
+    "ms_scan_setting"
+)
+
+massbank_optional_qc <- data.frame(
+    variable = massbank_optional,
+    missing = vapply(
+        massbank_optional,
+        function(v) sum(is.na(massbank_library[[v]])),
+        integer(1)
+    )
+)
+
+print(massbank_optional_qc)
+
+```
+
+```{r}
+
+rm(massbank_qc, massbank_required, massbank_optional, massbank_optional_qc)
+
+```
+
+```{r}
+
+# 27.23 Test export with one spectrum
+
+massbank_output_dir <- file.path(
+    library_dir,
+    "MassBank"
+)
+
+if (!dir.exists(massbank_output_dir)) {
+    dir.create(
+        massbank_output_dir,
+        recursive = TRUE,
+        showWarnings = FALSE
+    )
+}
+
+massbank_test <- massbank_library[1]
+
+massbank_test_file <- file.path(
+    massbank_output_dir,
+    "HUMAN_Ring_Trial_test.txt"
+)
+
+export(
+    MsBackendMassbank(),
+    massbank_test,
+    file = massbank_test_file,
+    mapping = massbank_mapping
+)
+
+stopifnot(
+    file.exists(massbank_test_file),
+    file.info(massbank_test_file)$size > 0
+)
+
+```
+
+```{r}
+
+# Inspect the generated record
+
+massbank_test_lines <- readLines(
+    massbank_test_file,
+    warn = FALSE
+)
+
+cat(
+    paste(massbank_test_lines, collapse = "\n"),
+    "\n"
+)
+
+# Check important tags in the actual output
+
+massbank_expected_tags <- c(
+    "ACCESSION:",
+    "RECORD_TITLE:",
+    "DATE:",
+    "AUTHORS:",
+    "LICENSE:",
+    "CH$NAME:",
+    "CH$COMPOUND_CLASS:",
+    "CH$FORMULA:",
+    "CH$EXACT_MASS:",
+    "CH$SMILES:",
+    "CH$IUPAC:",
+    "AC$INSTRUMENT:",
+    "AC$INSTRUMENT_TYPE:",
+    "AC$MASS_SPECTROMETRY: MS_TYPE",
+    "AC$MASS_SPECTROMETRY: ION_MODE",
+    "PK$SPLASH:",
+    "PK$NUM_PEAK:",
+    "PK$PEAK:"
+)
+
+massbank_tag_qc <- data.frame(
+    tag = massbank_expected_tags,
+    present = vapply(
+        massbank_expected_tags,
+        function(tag) {
+            any(startsWith(massbank_test_lines, tag))
+        },
+        logical(1)
+    )
+)
+
+print(massbank_tag_qc)
+
+if (!all(massbank_tag_qc$present)) {
+    warning(
+        "Some expected tags were not found in the test export. ",
+        "Inspect the mapping and the generated record."
+    )
+}
+
+```
+
+```{r}
+
+rm(massbank_test, massbank_test_file, massbank_test_lines, massbank_expected_tags, massbank_tag_qc)
+
+```
+
+```{r}
+
+# 27.24 Export the complete library
+
+massbank_file <- file.path(
+    massbank_output_dir,
+    "HUMAN_Ring_Trial_MassBank.txt"
+)
+
+export(
+    MsBackendMassbank(),
+    massbank_library,
+    file = massbank_file,
+    mapping = massbank_mapping
+)
+
+stopifnot(
+    file.exists(massbank_file),
+    file.info(massbank_file)$size > 0
+)
+
+message(
+    "MassBank export written to: ",
+    normalizePath(massbank_file)
+)
+
+```
+
+###############################################################
+# 28. Future developments
 ###############################################################
 
 The workflow presented here establishes the basic infrastructure for the HUMAN
@@ -2470,7 +3473,7 @@ Future versions of the library may include:
 - periodic versioning of the library.
 
 ###############################################################
-# 28. To do list
+# 29. To do list
 ###############################################################
 
 # Agregar
