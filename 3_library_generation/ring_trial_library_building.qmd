@@ -68,6 +68,7 @@ library(tibble)
 ```{r}
 
 # Project directories
+
 project_dir <-
     "C:/Users/amart/Desktop/HUMAN Ring Trial/HUMAN_Ring_Trial-main (copia para GitHub)/HUMAN_Ring_Trial"
 
@@ -82,6 +83,7 @@ provenance_file <-
     )
 
 # mzML directories
+
 mzml_dirs <- list(
 
     AFEKTA =
@@ -115,7 +117,7 @@ glimpse(provenance)
 ```
 
 ###############################################################
-# 5. Required columns
+# 5. Quality control
 ###############################################################
 
 ```{r}
@@ -146,14 +148,6 @@ required_columns <- c(
     "csi_score"
 )
 
-```
-
-###############################################################
-# 6. Quality control
-###############################################################
-
-```{r}
-
 missing_columns <-
     setdiff(
         required_columns,
@@ -183,8 +177,400 @@ length(unique(provenance$scan_index))
 
 ```
 
+```{r}
+
+# Remove unnecessary values/objects previously created
+
+rm(required_columns, missing_columns)
+
+```
+
 ###############################################################
-# 7. Locate mzML files
+# 6. Enrich provenance table with information from the standards table and the Ring_trial_setups_summary table
+###############################################################
+
+```{r}
+
+###############################################################
+# Enrich provenance table with information from the standards table
+###############################################################
+
+standards_file <-
+    "C:/Users/amart/Desktop/HUMAN Ring Trial/HUMAN_Ring_Trial-main (copia para GitHub)/HUMAN_Ring_Trial/1_preprocessing/standards.xlsx"
+
+# Read standards table
+# Column names are located in the second row of the Excel file
+
+standards <-
+    read_excel(
+        standards_file,
+        skip = 1
+    )
+
+# Columns to import from standards
+
+standards_annotation_columns <- c(
+    "InChIKey",
+    "ChEBI",
+    "KEGG",
+    "HMDB",
+    "LipidMaps",
+    "SMILES",
+    "InChI",
+    "M"
+)
+
+# Check that all required columns are present
+
+missing_standards_columns <-
+    setdiff(
+        standards_annotation_columns,
+        colnames(standards)
+    )
+
+if (length(missing_standards_columns) > 0) {
+    stop(
+        paste(
+            "The following columns are missing from standards.xlsx:",
+            paste(
+                missing_standards_columns,
+                collapse = ", "
+            )
+        )
+    )
+}
+
+# Check uniqueness of InChIKey in standards
+
+duplicate_standards_inchikey <-
+    standards |>
+    dplyr::group_by(InChIKey) |>
+    dplyr::filter(dplyr::n() > 1) |>
+    dplyr::ungroup()
+
+duplicate_standards_inchikey
+
+# Keep only the required annotation columns, removing duplicated InChIKey
+
+standards_annotations <-
+    standards |>
+    dplyr::select(
+        dplyr::all_of(
+            standards_annotation_columns
+        )
+    ) |>
+    dplyr::filter(
+        !HMDB %in% c(
+            "HMDB0060079",
+            "HMDB0000805",
+            "HMDB0029881"
+        )
+    ) |>
+    dplyr::group_by(InChIKey) |>
+    dplyr::filter(
+        if (any(!is.na(HMDB))) {
+            !is.na(HMDB)
+        } else {
+            TRUE
+        }
+    ) |>
+    dplyr::ungroup()
+
+# Re-check uniqueness of InChIKey in standards after cleaning
+
+duplicate_standards_inchikey <-
+    standards_annotations |>
+    dplyr::group_by(InChIKey) |>
+    dplyr::filter(dplyr::n() > 1) |>
+    dplyr::ungroup()
+
+duplicate_standards_inchikey
+
+if (nrow(duplicate_standards_inchikey) > 0) {
+    stop(
+        paste(
+            "The standards table contains duplicated InChIKeys with different annotations.",
+            "The join may generate multiple rows per provenance entry.",
+            "Resolve these duplicates before joining with provenance.",
+            paste(
+                duplicate_standards_inchikey$InChIKey,
+                collapse = ", "
+            )
+        )
+    )
+}
+
+# Add standards annotations to provenance
+
+provenance <-
+    provenance |>
+    dplyr::left_join(
+        standards_annotations,
+        by = c(
+            "target_InChIKey" = "InChIKey"
+        )
+    )
+
+# Check the enrichment
+
+provenance |>
+    dplyr::select(
+        target_InChIKey,
+        ChEBI,
+        KEGG,
+        HMDB,
+        LipidMaps,
+        SMILES,
+        InChI,
+        M
+    ) |>
+    head()
+
+n_total <-
+    sum(
+        !is.na(provenance$target_InChIKey)
+    )
+
+n_matched <-
+    sum(
+        provenance$target_InChIKey %in%
+        standards$InChIKey
+    )
+
+n_matched
+n_total
+
+unmatched_inchikeys <-
+    provenance |>
+    dplyr::filter(
+        !is.na(target_InChIKey),
+        !target_InChIKey %in% standards$InChIKey
+    ) |>
+    dplyr::distinct(
+        target_InChIKey
+    )
+
+unmatched_inchikeys
+
+```
+
+```{r}
+
+###############################################################
+# Enrich provenance table with laboratory setup information from the Ring_trial_setups_summary table
+###############################################################
+
+ring_trial_setups_summary_file <-
+    "C:/Users/amart/Desktop/HUMAN Ring Trial/HUMAN_Ring_Trial-main (copia para GitHub)/HUMAN_Ring_Trial/1_preprocessing/Ring_trial_setups_summary.xlsx"
+
+# Read laboratory setup information
+
+ring_trial_setups_summary <-
+    read_excel(
+        ring_trial_setups_summary_file
+    )
+
+# Inspect the table
+
+ring_trial_setups_summary
+glimpse(ring_trial_setups_summary)
+
+# Check required key
+
+if (!"lab" %in% colnames(ring_trial_setups_summary)) {
+    stop(
+        "The Ring_trial_setups_summary table does not contain a 'lab' column."
+    )
+}
+
+if (!"lab" %in% colnames(provenance)) {
+    stop(
+        "The provenance table does not contain a 'lab' column."
+    )
+}
+
+# Check uniqueness of laboratory information
+
+duplicate_labs <-
+    ring_trial_setups_summary |>
+    dplyr::count(lab) |>
+    dplyr::filter(n > 1)
+
+if (nrow(duplicate_labs) > 0) {
+    warning(
+        paste(
+            "The Ring_trial_setups_summary table contains more than one row for the following laboratories:",
+            paste(
+                duplicate_labs$lab,
+                collapse = ", "
+            )
+        )
+    )
+}
+
+# Add laboratory setup information to provenance table
+
+provenance <-
+    provenance |>
+    dplyr::left_join(
+        ring_trial_setups_summary,
+        by = "lab"
+    )
+
+# Checking
+
+glimpse(provenance)
+
+head(provenance)
+
+setup_columns <-
+    setdiff(
+        colnames(ring_trial_setups_summary),
+        "lab"
+    )
+
+setup_columns
+
+all(
+    setup_columns %in%
+    colnames(provenance)
+)
+
+provenance |>
+    dplyr::distinct(lab) 
+
+ring_trial_setups_summary |>
+    dplyr::distinct(lab)
+
+unmatched_labs <-
+    ring_trial_setups_summary |>
+    dplyr::filter(
+        !lab %in% provenance$lab
+    ) |>
+    dplyr::distinct(lab)
+
+unmatched_labs
+
+```
+
+```{r}
+
+# Remove unnecessary values/objects previously created
+
+rm(standards_file, standards, standards_annotation_columns, missing_standards_columns, standards_annotations, duplicate_standards_inchikey, n_total, n_matched, unmatched_inchikeys)
+
+rm(ring_trial_setups_summary_file, ring_trial_setups_summary, duplicate_labs, setup_columns, unmatched_labs)
+
+```
+
+###############################################################
+# 7. Adapt provenance table column names/content/format to CompoundDb and MsBackendCompDb conventions
+###############################################################
+
+```{r}
+
+# Add MS level
+
+provenance <-
+    provenance |>
+    dplyr::mutate(
+        ms_level = as.integer(2)
+    )
+
+# Add precursor charge according to adduct
+
+provenance <-
+    provenance |>
+    dplyr::mutate(
+        precursor_charge =
+            dplyr::case_when(
+                adduct %in% c(
+                    "[M + H]+",
+                    "[M + K]+",
+                    "[M + Na]+"
+                ) ~ as.integer(1),
+                adduct %in% c(
+                    "[M - H]-",
+                    "[M + CH2O2 - H]-"
+                ) ~ as.integer(-1),
+                TRUE ~ NA_integer_
+            )
+    )
+
+# Add MS/MS prediction information
+
+provenance <-
+    provenance |>
+    dplyr::mutate(
+        predicted = FALSE
+    )
+
+# Add instrument type
+
+provenance <-
+    provenance |>
+    dplyr::mutate(
+        instrument_type = "LC-MS"
+    )
+
+# Add data origin
+
+provenance <-
+    provenance |>
+    dplyr::mutate(
+        dataOrigin =
+            "HUMAN Ring Trial - MetaSci Library (Human Metabolites)"
+    )
+
+# Add synonyms
+
+provenance <-
+    provenance |>
+    dplyr::mutate(
+        synonyms = sirius_structure
+    )
+
+# Rename columns to Spectra conventions
+
+provenance <-
+    provenance |>
+    dplyr::rename(
+        rtime = rt_sec,
+        acquisitionNum = acquisition_num,
+        scanIndex = scan_index,
+        inchi = InChI,
+        instrument = LC_instrument,
+        name = compound,
+        formula = molecular_formula,
+        inchikey = target_InChIKey,
+        exactmass = M
+    )
+
+# Convert exact mass to CompDb-compatible numeric values
+
+provenance <-
+    provenance |>
+    dplyr::mutate(
+        exactmass = as.numeric(exactmass)
+    )
+
+# Convert polarity to Spectra-compatible integer values
+
+provenance <-
+    provenance |>
+    dplyr::mutate(
+        polarity =
+            dplyr::case_when(
+                polarity == "pos" ~ as.integer(1),
+                polarity == "neg" ~ as.integer(0),
+                TRUE ~ NA_integer_
+            )
+    )
+
+```
+
+###############################################################
+# 8. Locate mzML files
 ###############################################################
 
 ```{r}
@@ -201,12 +587,18 @@ function(lab,
         directory <- mzml_dirs$HMGU
     }
     else if(lab == "cembio"){
-        directory <-
-            ifelse(
-                polarity == "pos",
-                mzml_dirs$CEMBIO_POS,
-                mzml_dirs$CEMBIO_NEG
+        if(polarity == 1){
+            directory <- mzml_dirs$CEMBIO_POS
+        } else if(polarity == 0){
+            directory <- mzml_dirs$CEMBIO_NEG
+        } else {
+            stop(
+                paste(
+                    "Invalid polarity for CEMBIO:",
+                    polarity
+                )
             )
+        }
     }
     else{
         stop(
@@ -219,9 +611,7 @@ function(lab,
     candidate <-
         file.path(
             directory,
-            paste0(
-                mzml_name
-            )
+            mzml_name
         )
     if(!file.exists(candidate)){
         stop(
@@ -239,6 +629,7 @@ function(lab,
 ```{r}
 
 # Absolute mzML path
+
 provenance$file <- gsub(
     "Human_Endosome",
     "Human Endosome",
@@ -264,7 +655,7 @@ head(provenance$mzml_path)
 ```
 
 ###############################################################
-# 8. Split provenance table by mzML file
+# 9. Split provenance table by mzML file
 ###############################################################
 
 ```{r}
@@ -280,7 +671,7 @@ length(provenance_split)
 ```
 
 ###############################################################
-# 9. Read mzML
+# 10. Read mzML
 ###############################################################
 
 ```{r}
@@ -295,14 +686,14 @@ read_mzml <- function(file){
 ```
 
 ###############################################################
-# 10. Extract required scans
+# 11. Extract required scans
 ###############################################################
 
 ```{r}
 
 extract_required_spectra <-
 function(sp, provenance_subset) {
-    scan_numbers <- provenance_subset$acquisition_num
+    scan_numbers <- provenance_subset$acquisitionNum
     idx <- match(
         scan_numbers,
         acquisitionNum(sp)
@@ -323,7 +714,7 @@ function(sp, provenance_subset) {
 ```
 
 ###############################################################
-# 11. Read all mzML files
+# 12. Read all mzML files
 ###############################################################
 
 ```{r}
@@ -337,6 +728,7 @@ names(spectra_list) <-
     names(provenance_split)
 
 # Read spectra
+
 for(i in seq_along(provenance_split)){
     message(
         "Reading ",
@@ -365,6 +757,7 @@ for(i in seq_along(provenance_split)){
 ```{r}
 
 # Check that all mzML files have been read
+
 length(spectra_list)
 sapply(
     spectra_list,
@@ -374,7 +767,7 @@ sapply(
 ```
 
 ###############################################################
-# 12. Combine all spectra
+# 13. Combine all spectra
 ###############################################################
 
 ```{r}
@@ -386,6 +779,7 @@ ring_trial_spectra <- concatenateSpectra(spectra_list)
 ```{r}
 
 # Checking
+
 ring_trial_spectra
 
 spectraVariables(ring_trial_spectra)
@@ -403,29 +797,29 @@ showMethods("peaksData")
 
 ```
 
+```{r}
+
+# Remove unnecessary values/objects previously created
+
+rm(i, prov, sp, example)
+
+```
+
 ###############################################################
-# 13. Build the compound annotation table
+# 14. Build the compound annotation table
 ###############################################################
 
 ```{r}
 
-# # Create a copy of the compound table with the correct order (provenance_split)
-# compound_table <-
-#     dplyr::bind_rows(
-#         provenance_split
-#     )
-# 
-# # Add the compound_id, internal identifier for CompDb
-# compound_table$compound_id <- as.character(seq_len(nrow(compound_table)))
-
 # Create a copy of the compound table with the correct order (provenance_split) and add the compound_id and the spectra_id (internal identifiers for CompDb)
+
 compound_table <-
     dplyr::bind_rows(provenance_split) |>
     dplyr::mutate(
         compound_id =
             match(
-                target_InChIKey,
-                unique(target_InChIKey)
+                inchikey,
+                unique(inchikey)
             ),
         compound_id =
             as.character(compound_id),
@@ -433,63 +827,25 @@ compound_table <-
             seq_len(n())
     )
 
-# Reorganize the columns in the compound table
-compound_table <- compound_table |>
-    dplyr::select(
-        compound_id,
-        spectrum_id,
-        compound,
-        molecular_formula,
-        target_InChIKey,
-        inchikey_2d,
-        sirius_structure,
-        everything()
-    )
-
-compound_table <- compound_table |>
-    dplyr::rename(
-        name = compound,
-        formula = molecular_formula,
-        inchikey = target_InChIKey
-    )
-
-compound_table <- compound_table |>
-    dplyr::mutate(
-        inchi = NA_character_,
-        exactmass = NA_real_,
-        synonyms = sirius_structure
-    )
-
-# Check columns
-required <- c(
-    "compound_id",
-    "name",
-    "inchi",
-    "inchikey",
-    "formula",
-    "exactmass",
-    "synonyms"
-)
-
-setdiff(required, colnames(compound_table))
-
 head(compound_table)
 
-# Check whether ‘compound_table’ is correctly aligned with ‘ring_trial_spectra’.
+# Check whether ‘compound_table’ is correctly aligned with ‘ring_trial_spectra’
+
 all(
-    compound_table$acquisition_num ==
+    compound_table$acquisitionNum ==
         acquisitionNum(ring_trial_spectra)
 )
 
 ```
 
 ###############################################################
-# 14. Build the MS/MS spectra table (the table that `createCompDb()` expects)
+# 15. Build the MS/MS spectra table (the table that `createCompDb()` expects)
 ###############################################################
 
 ```{r}
 
 # Adding basic columns
+
 msms_spectra <-
     data.frame(
         compound_id =
@@ -505,49 +861,45 @@ msms_spectra <-
     )
 
 # Adding mz
+
 msms_spectra$mz <-
     as.list(
         mz(ring_trial_spectra)
     )
 
 # Adding intensities
+
 msms_spectra$intensity <-
     as.list(
         intensity(ring_trial_spectra)
     )
 
-# Correcting polarity class
-msms_spectra <- msms_spectra |>
-    dplyr::mutate(
-        polarity = dplyr::case_when(
-            polarity %in% c("+", "positive", "Positive", "pos") ~ 1L,
-            polarity %in% c("-", "negative", "Negative", "neg") ~ 0L,
-            TRUE ~ NA_integer_
-        )
-    )
-
 # Check
+
 str(msms_spectra)
 
 ```
 
 ###############################################################
-# 15. Validate input tables (compound and MS/MS spectra tables)
+# 16. Validate input tables (compound and MS/MS spectra tables)
 ###############################################################
 
 ```{r}
 
 # Number of compounds
+
 cat("Number of compound entries:",
     nrow(compound_table),
     "\n")
 
 # Number of MS/MS spectra
+
 cat("Number of MS/MS spectra:",
     nrow(msms_spectra),
     "\n")
 
 # Mapping
+
 stopifnot(
     nrow(compound_table) ==
         length(ring_trial_spectra)
@@ -566,6 +918,7 @@ stopifnot(
 )
 
 # Peak consistency
+
 stopifnot(
     length(msms_spectra$mz) ==
         length(msms_spectra$intensity)
@@ -579,6 +932,7 @@ stopifnot(
 )
 
 # Empty spectra (the output should be 0)
+
 empty_spectra <-
     which(
         lengths(msms_spectra$mz) == 0
@@ -587,6 +941,7 @@ empty_spectra <-
 length(empty_spectra)
 
 # Missing precursor m/z
+
 sum(
     is.na(
         msms_spectra$precursor_mz
@@ -594,6 +949,7 @@ sum(
 )
 
 # Missing collision energy
+
 sum(
     is.na(
         msms_spectra$collision_energy
@@ -601,6 +957,7 @@ sum(
 )
 
 # Missing polarity
+
 sum(
     is.na(
         msms_spectra$polarity
@@ -608,6 +965,7 @@ sum(
 )
 
 # Aligned metadata (the output should be always TRUE)
+
 all.equal(
     msms_spectra$precursor_mz,
     precursorMz(ring_trial_spectra)
@@ -625,8 +983,16 @@ all.equal(
 
 ```
 
+```{r}
+
+# Remove unnecessary values/objects previously created
+
+rm(empty_spectra)
+
+```
+
 ###############################################################
-# 16. Create metadata
+# 17. Create metadata
 ###############################################################
 
 ```{r}
@@ -644,7 +1010,7 @@ metadata
 ```
 
 ###############################################################
-# 17. Create output directory
+# 18. Create output directory
 ###############################################################
 
 ```{r}
@@ -673,7 +1039,7 @@ if(file.exists(db_file))
 ```
 
 ###############################################################
-# 18. Create the CompDb database
+# 19. Create the CompDb database
 ###############################################################
 
 ```{r}
@@ -693,7 +1059,7 @@ cat(db_file, "\n")
 ```
 
 ###############################################################
-# 19. Load the CompDb database
+# 20. Load the CompDb database
 ###############################################################
 
 ```{r}
@@ -705,27 +1071,77 @@ ring_trial_db
 ```
 
 ###############################################################
-# 20. Validate the CompDb
+# 21. Validate the CompDb
 ###############################################################
 
 ```{r}
 
 # Metadata
+
 metadata(ring_trial_db)
 
 # Available variables
+
 compoundVariables(ring_trial_db)
 
+# Available database tables
+
+CompoundDb::tables(ring_trial_db)
+
+# SQLite connection
+
+SQLite_connection <- CompoundDb::dbconn(ring_trial_db)
+
+# SQLite tables
+
+DBI::dbListTables(SQLite_connection)
+
+DBI::dbGetQuery(
+    SQLite_connection,
+    "SELECT name FROM sqlite_master WHERE type = 'table';"
+)
+
+DBI::dbGetQuery(
+    SQLite_connection,
+    "SELECT COUNT(DISTINCT compound_id) AS n_compounds
+     FROM ms_compound"
+)
+
+# Compounds
+
+compounds(
+    ring_trial_db,
+    columns = c(
+        "compound_id",
+        "name",
+        "inchikey",
+        "formula",
+        "exactmass"
+    )
+)
+
 # Number of compounds
+
 compounds(ring_trial_db) |>
     nrow()
 
-nrow(compound_table) # should be the same
+nrow(
+    compounds(
+        ring_trial_db,
+        columns = "compound_id"
+    )
+)
+
+# Number of spectra
+
+nrow(compound_table)
 
 # Does the database contain MS/MS spectra?
+
 hasMsMsSpectra(ring_trial_db) # should be TRUE
 
 # Load the spectra
+
 library(Spectra)
 
 ring_trial_library <-
@@ -734,17 +1150,19 @@ ring_trial_library <-
 ring_trial_library
 
 # Numbers of spectra (should be the same)
+
 length(ring_trial_library)
 
 length(ring_trial_spectra)
 
 # Available spectrum variables
+
 spectraVariables(ring_trial_library) # to check what information has been stored in the CompDb.
 
 ```
 
 ###############################################################
-# 21. Validate spectral integrity
+# 22. Validate spectral integrity
 ###############################################################
 
 ```{r}
@@ -753,12 +1171,14 @@ original <- ring_trial_spectra[1]
 retrieved <- ring_trial_library[1]
 
 # Compare masses
+
 identical(
     mz(original)[[1]],
     mz(retrieved)[[1]]
 )
 
 # Compare intensities
+
 identical(
     intensity(original)[[1]],
     intensity(retrieved)[[1]]
@@ -766,22 +1186,25 @@ identical(
 )
 
 # Compare precursor
+
 precursorMz(original)
 precursorMz(retrieved)
 
 # Compare collision energy
+
 collisionEnergy(original)
 collisionEnergy(retrieved)
 
 ```
 
 ###############################################################
-# 22. Example queries
+# 23. Example queries
 ###############################################################
 
 ```{r}
 
 # Search for a compound
+
 Spectra(
     ring_trial_db,
     filter =
@@ -825,7 +1248,7 @@ head(
 ```
 
 ###############################################################
-# 23. Plot an MS/MS spectrum
+# 24. Plot an MS/MS spectrum
 ###############################################################
 
 ```{r}
@@ -844,12 +1267,13 @@ plotSpectra(
 ```
 
 ###############################################################
-# 24. Pairwise comparison
+# 25. Pairwise comparison
 ###############################################################
 
 ```{r}
 
-# As the entire library is stored as a Spectra object, we can use the functions from the Spectra package directly.
+# As the entire library is stored as a Spectra object, we can use the functions from the Spectra package directly
+
 comparison <-
     compareSpectra(
         example,
@@ -858,21 +1282,6 @@ comparison <-
     )
 
 comparison
-
-```
-
-###############################################################
-# 25. Save the CompDb
-###############################################################
-
-```{r}
-
-# Although `createCompDb()` already generates the SQLite file, we can explicitly state what the final result of the workflow is.
-cat(
-    "Final library saved as:\n",
-    db_file,
-    "\n"
-)
 
 ```
 
@@ -896,3 +1305,17 @@ Future versions of the library may include:
 - automatic export to MassBank;
 - automatic export to GNPS;
 - periodic versioning of the library.
+
+###############################################################
+# 27. To do list
+###############################################################
+
+# Agregar
+
+- agregar inchi y exact mass a partir de tabla de standards y calculo compdb respectivamente.
+- agregar info de laboratorio/plataforma segun lab de provenance.
+- editar provenance para que nombres de columnas coincidan con spectraVariables(example)
+- editar provenance eliminando casos de redundancia discutidos con Johannes y Phili
+- agregar filtros para que aparezcan en AnnotationFilter::supportedFilters(ring_trial_db)
+- evaluar dividir informacion de compuestos y espectros en compound_table
+- exportar a MassBank
