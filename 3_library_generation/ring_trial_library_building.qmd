@@ -68,7 +68,6 @@ library(tibble)
 ```{r}
 
 # Project directories
-
 project_dir <-
     "C:/Users/amart/Desktop/HUMAN Ring Trial/HUMAN_Ring_Trial-main (copia para GitHub)/HUMAN_Ring_Trial"
 
@@ -83,7 +82,6 @@ provenance_file <-
     )
 
 # mzML directories
-
 mzml_dirs <- list(
 
     AFEKTA =
@@ -126,6 +124,7 @@ required_columns <- c(
     "lab",
     "file_mixture",
     "true_mixture",
+    "mislabeled",
     "compound",
     "target_InChIKey",
     "inchikey_2d",
@@ -240,7 +239,6 @@ function(lab,
 ```{r}
 
 # Absolute mzML path
-
 provenance$file <- gsub(
     "Human_Endosome",
     "Human Endosome",
@@ -339,7 +337,6 @@ names(spectra_list) <-
     names(provenance_split)
 
 # Read spectra
-
 for(i in seq_along(provenance_split)){
     message(
         "Reading ",
@@ -368,13 +365,11 @@ for(i in seq_along(provenance_split)){
 ```{r}
 
 # Check that all mzML files have been read
-
 length(spectra_list)
 sapply(
     spectra_list,
     length
 )
-
 
 ```
 
@@ -414,17 +409,35 @@ showMethods("peaksData")
 
 ```{r}
 
-# Create a copy of the compound table (provenance)
-compound_table <- provenance
+# # Create a copy of the compound table with the correct order (provenance_split)
+# compound_table <-
+#     dplyr::bind_rows(
+#         provenance_split
+#     )
+# 
+# # Add the compound_id, internal identifier for CompDb
+# compound_table$compound_id <- as.character(seq_len(nrow(compound_table)))
 
-# Add the compound_id, internal identifier for CompDb
-compound_table$compound_id <- seq_len(nrow(compound_table))
+# Create a copy of the compound table with the correct order (provenance_split) and add the compound_id and the spectra_id (internal identifiers for CompDb)
+compound_table <-
+    dplyr::bind_rows(provenance_split) |>
+    dplyr::mutate(
+        compound_id =
+            match(
+                target_InChIKey,
+                unique(target_InChIKey)
+            ),
+        compound_id =
+            as.character(compound_id),
+        spectrum_id =
+            seq_len(n())
+    )
 
 # Reorganize the columns in the compound table
-compound_table <-
-    compound_table |>
+compound_table <- compound_table |>
     dplyr::select(
         compound_id,
+        spectrum_id,
         compound,
         molecular_formula,
         target_InChIKey,
@@ -440,15 +453,14 @@ compound_table <- compound_table |>
         inchikey = target_InChIKey
     )
 
-compound_table$inchi <- NA_character_
+compound_table <- compound_table |>
+    dplyr::mutate(
+        inchi = NA_character_,
+        exactmass = NA_real_,
+        synonyms = sirius_structure
+    )
 
-compound_table$exactmass <- NA_real_
-
-compound_table$synonyms <- compound_table$sirius_structure
-
-compound_table$compound_id <- as.character(compound_table$compound_id)
-
-# Reorganize and check
+# Check columns
 required <- c(
     "compound_id",
     "name",
@@ -463,10 +475,16 @@ setdiff(required, colnames(compound_table))
 
 head(compound_table)
 
+# Check whether ‘compound_table’ is correctly aligned with ‘ring_trial_spectra’.
+all(
+    compound_table$acquisition_num ==
+        acquisitionNum(ring_trial_spectra)
+)
+
 ```
 
 ###############################################################
-# 14. Build the MS/MS table (the table that `createCompDb()` expects)
+# 14. Build the MS/MS spectra table (the table that `createCompDb()` expects)
 ###############################################################
 
 ```{r}
@@ -476,13 +494,14 @@ msms_spectra <-
     data.frame(
         compound_id =
             compound_table$compound_id,
+        spectrum_id =
+            seq_len(length(ring_trial_spectra)),
         precursor_mz =
-            compound_table$precursor_mz_med,
+            precursorMz(ring_trial_spectra),
         collision_energy =
-            compound_table$collision_energy,
+            collisionEnergy(ring_trial_spectra),
         polarity =
-            compound_table$polarity,
-        stringsAsFactors = FALSE
+            polarity(ring_trial_spectra)
     )
 
 # Adding mz
@@ -497,14 +516,9 @@ msms_spectra$intensity <-
         intensity(ring_trial_spectra)
     )
 
-# Check
-str(msms_spectra)
-
-# Corrections
+# Correcting polarity class
 msms_spectra <- msms_spectra |>
     dplyr::mutate(
-        spectrum_id = dplyr::row_number(),
-        compound_id = as.character(compound_id),
         polarity = dplyr::case_when(
             polarity %in% c("+", "positive", "Positive", "pos") ~ 1L,
             polarity %in% c("-", "negative", "Negative", "neg") ~ 0L,
@@ -534,6 +548,11 @@ cat("Number of MS/MS spectra:",
     "\n")
 
 # Mapping
+stopifnot(
+    nrow(compound_table) ==
+        length(ring_trial_spectra)
+)
+
 stopifnot(
     nrow(msms_spectra) ==
         length(ring_trial_spectra)
@@ -586,6 +605,22 @@ sum(
     is.na(
         msms_spectra$polarity
     )
+)
+
+# Aligned metadata (the output should be always TRUE)
+all.equal(
+    msms_spectra$precursor_mz,
+    precursorMz(ring_trial_spectra)
+)
+
+all.equal(
+    msms_spectra$collision_energy,
+    collisionEnergy(ring_trial_spectra)
+)
+
+all.equal(
+    msms_spectra$polarity,
+    polarity(ring_trial_spectra)
 )
 
 ```
@@ -698,10 +733,10 @@ ring_trial_library <-
 
 ring_trial_library
 
-# Number of spectra
+# Numbers of spectra (should be the same)
 length(ring_trial_library)
 
-length(ring_trial_spectra) # should be the same
+length(ring_trial_spectra)
 
 # Available spectrum variables
 spectraVariables(ring_trial_library) # to check what information has been stored in the CompDb.
@@ -753,6 +788,40 @@ Spectra(
         ~ name == "5-hydroxy-L-tryptophan"
 )
 
+# Spectra(
+#     ring_trial_db,
+#     filter =
+#         ~ polarity == 1
+# )
+# 
+# Spectra(
+#     ring_trial_db,
+#     filter =
+#         ~ lab == "cembio"
+# )
+# 
+# Spectra(
+#     ring_trial_db,
+#     filter =
+#         ~ collision_energy == 40
+# )
+# 
+# Spectra(
+#     ring_trial_db,
+#     filter =
+#         ~ adduct == "[M+H]+"
+# )
+
+example <- Spectra(ring_trial_db)
+
+spectraVariables(example)
+
+AnnotationFilter::supportedFilters(ring_trial_db)
+
+head(
+    spectraData(example)
+)
+
 ```
 
 ###############################################################
@@ -781,7 +850,6 @@ plotSpectra(
 ```{r}
 
 # As the entire library is stored as a Spectra object, we can use the functions from the Spectra package directly.
-
 comparison <-
     compareSpectra(
         example,
@@ -800,7 +868,6 @@ comparison
 ```{r}
 
 # Although `createCompDb()` already generates the SQLite file, we can explicitly state what the final result of the workflow is.
-
 cat(
     "Final library saved as:\n",
     db_file,
