@@ -240,7 +240,7 @@ if (length(missing_standards_columns) > 0) {
     )
 }
 
-# Check uniqueness of InChIKey in standards
+# Check uniqueness of InChIKey in standards (if several standard records share the same InChIKey, prefer the record containing an HMDB identifier)
 
 duplicate_standards_inchikey <-
     standards |>
@@ -331,6 +331,8 @@ n_total <-
         !is.na(provenance$target_InChIKey)
     )
 
+n_total
+
 n_matched <-
     sum(
         provenance$target_InChIKey %in%
@@ -338,7 +340,6 @@ n_matched <-
     )
 
 n_matched
-n_total
 
 unmatched_inchikeys <-
     provenance |>
@@ -501,7 +502,7 @@ provenance <-
         scanIndex = scan_index,
         inchi = InChI,
         instrument = LC_instrument,
-        name = compound,
+        name = compound, # ChEBI names 
         formula = molecular_formula,
         inchikey = target_InChIKey,
         exactmass = M
@@ -783,6 +784,18 @@ provenance <-
 all(
     provenance$acquisitionNum ==
         acquisitionNum(ring_trial_spectra)
+)
+
+# Check that there are no ‘NA’ values in ‘compound_id’
+
+stopifnot(
+    !anyNA(provenance$compound_id)
+)
+
+# Check that there are no ‘NA’ values in ‘spectrum_id’
+
+stopifnot(
+    !anyNA(provenance$spectrum_id)
 )
 
 # Check that all spectra with exactly the same InChIKey are assigned the same compound_id
@@ -1286,7 +1299,15 @@ getMethod(
     "MsBackendCompDb"
 )
 
+methods("peaksData")
+showMethods("peaksData")
+
 # Numbers of spectra (should be the same)
+
+stopifnot(
+    length(ring_trial_library) ==
+    length(ring_trial_spectra)
+)
 
 length(ring_trial_library)
 
@@ -1304,14 +1325,72 @@ length(ring_trial_spectra)
 # 23.1. Basic checks
 ###############################################################
 
+# Obtain compound_id identifiers from original data and retrieved data
+
+original_compounds_ids <-
+    unique(
+        as.character(
+            msms_spectra$compound_id
+        )
+    )
+
+retrieved_compounds_ids <-
+    unique(
+        as.character(
+            spectraData(
+                ring_trial_library,
+                columns = "compound_id"
+            )$compound_id
+        )
+    )
+
+# Validate compound_id identifiers
+
+stopifnot(
+    length(original_compounds_ids) == length(retrieved_compounds_ids)
+)
+
+cat(
+    "Number of original compounds:",
+    length(original_compounds_ids),
+    "\n"
+)
+
+cat(
+    "Number of retrieved compounds:",
+    length(retrieved_compounds_ids),
+    "\n"
+)
+
+# Check that the same compound_id identifiers are present
+
+stopifnot(
+    setequal(
+        original_compounds_ids,
+        retrieved_compounds_ids
+    )
+)
+
+cat(
+    "The same compound_id identifiers are present in both objects.\n"
+)
+
+missing_compounds_ids <-
+    setdiff(
+        original_compounds_ids,
+        retrieved_compounds_ids
+    )
+
+missing_compounds_ids
+
 # Obtain spectrum_id identifiers from original data and retrieved data
 
-original_ids <-
+original_spectra_ids <-
     as.character(
         msms_spectra$spectrum_id
     )
 
-retrieved_ids <-
+retrieved_spectra_ids <-
     as.character(
         spectraData(
             ring_trial_library,
@@ -1322,55 +1401,63 @@ retrieved_ids <-
 # Validate spectrum_id identifiers
 
 stopifnot(
-    length(original_ids) == length(retrieved_ids)
+    length(original_spectra_ids) == length(retrieved_spectra_ids)
 )
 
 cat(
     "Number of original spectra:",
-    length(original_ids),
+    length(original_spectra_ids),
     "\n"
 )
 
 cat(
     "Number of retrieved spectra:",
-    length(retrieved_ids),
+    length(retrieved_spectra_ids),
     "\n"
 )
 
 cat(
     "Number of unique original spectrum_id identifiers:",
-    length(unique(original_ids)),
+    length(unique(original_spectra_ids)),
     "\n"
 )
 
 cat(
     "Number of unique retrieved spectrum_id identifiers:",
-    length(unique(retrieved_ids)),
+    length(unique(retrieved_spectra_ids)),
     "\n"
 )
 
 # Check that spectrum_id identifiers are unique in both objects
 
 stopifnot(
-    !anyDuplicated(original_ids)
+    !anyDuplicated(original_spectra_ids)
 )
 
 stopifnot(
-    !anyDuplicated(retrieved_ids)
+    !anyDuplicated(retrieved_spectra_ids)
 )
 
 # Check that the same spectrum_id identifiers are present
 
 stopifnot(
     setequal(
-        original_ids,
-        retrieved_ids
+        original_spectra_ids,
+        retrieved_spectra_ids
     )
 )
 
 cat(
     "The same spectrum_id identifiers are present in both objects.\n"
 )
+
+missing_spectra_ids <-
+    setdiff(
+        original_spectra_ids,
+        retrieved_spectra_ids
+    )
+
+missing_spectra_ids
 
 ```
 
@@ -1384,14 +1471,14 @@ cat(
 
 original_index <-
     setNames(
-        seq_along(original_ids),
-        original_ids
+        seq_along(original_spectra_ids),
+        original_spectra_ids
     )
 
 retrieved_index <-
     setNames(
-        seq_along(retrieved_ids),
-        retrieved_ids
+        seq_along(retrieved_spectra_ids),
+        retrieved_spectra_ids
     )
 
 # Test specific spectrum_id
@@ -1551,7 +1638,7 @@ set.seed(123)
 
 test_ids <-
     sample(
-        original_ids,
+        original_spectra_ids,
         20
     )
 
@@ -1614,7 +1701,7 @@ cat(
 
 # Remove unnecessary values/objects previously created
 
-rm(original_ids, retrieved_ids, original_index, retrieved_index, mz_identical, intensity_identical, precursor_identical, collision_energy_identical, number_peaks_identical, test_ids, sid, original_idx, retrieved_idx, original, retrieved)
+rm(original_compounds_ids, retrieved_compounds_ids, missing_compounds_ids, original_spectra_ids, retrieved_spectra_ids, missing_spectra_ids, original_index, retrieved_index, mz_identical, intensity_identical, precursor_identical, collision_energy_identical, number_peaks_identical, test_ids, sid, original_idx, retrieved_idx, original, retrieved)
 
 ```
 
