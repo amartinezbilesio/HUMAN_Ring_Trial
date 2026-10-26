@@ -469,36 +469,6 @@ rm(ring_trial_setups_summary_file, ring_trial_setups_summary, duplicate_labs, se
 
 ```{r}
 
-# Add MS level
-
-provenance <-
-    provenance |>
-    dplyr::mutate(
-        ms_level = as.integer(2)
-    )
-
-# Add precursor charge according to adduct
-
-provenance <-
-    provenance |>
-    dplyr::mutate(
-        precursor_charge =
-            dplyr::case_when(
-                adduct %in% c(
-                    "[M + H]+",
-                    "[M + K]+",
-                    "[M + Na]+"
-                ) ~ as.integer(1),
-                adduct %in% c(
-                    "[M - H]-",
-                    "[M + CH2O2 - H]-"
-                ) ~ as.integer(-1),
-                TRUE ~ NA_integer_
-            )
-    )
-
-# Add MS/MS prediction information
-
 provenance <-
     provenance |>
     dplyr::mutate(
@@ -511,15 +481,6 @@ provenance <-
     provenance |>
     dplyr::mutate(
         instrument_type = "LC-MS"
-    )
-
-# Add data origin
-
-provenance <-
-    provenance |>
-    dplyr::mutate(
-        dataOrigin =
-            "HUMAN Ring Trial - MetaSci Library (Human Metabolites)"
     )
 
 # Add synonyms
@@ -554,19 +515,6 @@ provenance <-
         exactmass = as.numeric(exactmass)
     )
 
-# Convert polarity to Spectra-compatible integer values
-
-provenance <-
-    provenance |>
-    dplyr::mutate(
-        polarity =
-            dplyr::case_when(
-                polarity == "pos" ~ as.integer(1),
-                polarity == "neg" ~ as.integer(0),
-                TRUE ~ NA_integer_
-            )
-    )
-
 ```
 
 ###############################################################
@@ -587,9 +535,9 @@ function(lab,
         directory <- mzml_dirs$HMGU
     }
     else if(lab == "cembio"){
-        if(polarity == 1){
+        if(polarity == "pos"){
             directory <- mzml_dirs$CEMBIO_POS
-        } else if(polarity == 0){
+        } else if(polarity == "neg"){
             directory <- mzml_dirs$CEMBIO_NEG
         } else {
             stop(
@@ -772,6 +720,9 @@ sapply(
 
 ```{r}
 
+# As detailed in the documentation of the Spectra class, a Spectra object is a container for mass spectrometry (MS) data that includes both the mass peaks data (or peaks data, generally m/z and intensity values) as well as spectra metadata (so called spectra variables). Spectra variables generally define one value per spectrum, while for peaks variables one value per mass peak is defined and hence multiple values per spectrum (depending on the number of mass peaks of a spectrum).
+# Data can be extracted from a Spectra object using dedicated accessor functions or also using the $ operator. Depending on the backend class used by the Spectra to represent the data, data can also be added or replaced (again, using dedicated functions or using ⁠$<-⁠).
+
 ring_trial_spectra <- concatenateSpectra(spectra_list)
 
 ```
@@ -806,14 +757,14 @@ rm(i, prov, sp, example)
 ```
 
 ###############################################################
-# 14. Build the compound annotation table
+# 14. Build the compound annotation table (one of the tables that `createCompDb()` expects)
 ###############################################################
 
 ```{r}
 
-# Create a copy of the compound table with the correct order (provenance_split) and add the compound_id and the spectra_id (internal identifiers for CompDb)
+# Create the provenance annotations table, a copy of the provenance table with the correct order (provenance_split) and the corresponding compound_id (internal identifier for CompDb)
 
-compound_table <-
+provenance_annotations <-
     dplyr::bind_rows(provenance_split) |>
     dplyr::mutate(
         compound_id =
@@ -822,42 +773,202 @@ compound_table <-
                 unique(inchikey)
             ),
         compound_id =
-            as.character(compound_id),
-        spectrum_id =
-            seq_len(n())
+            as.character(compound_id)
     )
 
-head(compound_table)
+# Check that all spectra with exactly the same InChIKey are assigned the same compound_id
 
-# Check whether ‘compound_table’ is correctly aligned with ‘ring_trial_spectra’
+compound_id_check <-
+    provenance_annotations |>
+    distinct(
+        inchikey,
+        compound_id
+    )
+
+compound_id_check
+
+compound_id_check <-
+    provenance_annotations |>
+    distinct(
+        compound_id,
+        inchikey
+    ) |>
+    count(compound_id) |>
+    filter(n > 1)
+
+stopifnot(nrow(compound_id_check) == 0)
+
+# Check whether ‘provenance_annotations’ is correctly aligned with ‘ring_trial_spectra’
 
 all(
-    compound_table$acquisitionNum ==
+    provenance_annotations$acquisitionNum ==
         acquisitionNum(ring_trial_spectra)
 )
+
+# Create the compound annotations table with the correct order (provenance_split) and the corresponding compound_id (internal identifier for CompDb), and with a single row per compound
+
+compound_annotations <-
+    provenance_annotations |>
+    dplyr::select(
+        compound_id,
+        name,
+        inchikey,
+        inchikey_2d,
+        sirius_structure,
+        formula,
+        ChEBI,
+        KEGG,
+        HMDB,
+        LipidMaps,
+        SMILES,
+        inchi,
+        exactmass,
+        synonyms
+    ) |>
+    dplyr::distinct(compound_id, .keep_all = TRUE)
+
+head(compound_annotations)
+
+```
+
+```{r}
+
+# Remove unnecessary values/objects previously created
+
+rm(compound_id_check)
 
 ```
 
 ###############################################################
-# 15. Build the MS/MS spectra table (the table that `createCompDb()` expects)
+# 15. Build the MS/MS spectra table (one of the tables that `createCompDb()` expects)
 ###############################################################
 
 ```{r}
 
-# Adding basic columns
+# Create the MS/MS spectra table, adding basic columns of spectra metadata and mass peaks data (or peaks data, generally m/z and intensity values), as well as the compound_id and the spectrum_id (internal identifiers for CompDb)
 
 msms_spectra <-
     data.frame(
         compound_id =
-            compound_table$compound_id,
+            provenance_annotations$compound_id,
         spectrum_id =
             seq_len(length(ring_trial_spectra)),
+        lab =
+            provenance_annotations$lab,
+        file_mixture =
+            provenance_annotations$file_mixture,
+        true_mixture =
+            provenance_annotations$true_mixture,
+        mislabeled =
+            provenance_annotations$mislabeled,
+        adduct =
+            provenance_annotations$adduct,
+        method =
+            provenance_annotations$method,
+        pass =
+            provenance_annotations$pass,
+        feature_id =
+            provenance_annotations$feature_id,
+        file =
+            provenance_annotations$file,
+        precursor_mz_raw =
+            provenance_annotations$precursor_mz_raw,
+        precursor_mz_med =
+            provenance_annotations$precursor_mz_med,
+        n_peaks =
+            provenance_annotations$n_peaks,
+        csi_score =
+            provenance_annotations$csi_score,
+        details =
+            provenance_annotations$details,
+        instrument_type =
+            provenance_annotations$instrument_type,
+        instrument =
+            provenance_annotations$instrument,
+        column =
+            provenance_annotations$column,
+        mobile_phase_A =
+            provenance_annotations$mobile_phase_A,
+        mobile_phase_B =
+            provenance_annotations$mobile_phase_B,        
+        H2O =
+            provenance_annotations$H2O,
+        ACN =
+            provenance_annotations$ACN,
+        formic_acid =
+            provenance_annotations$formic_acid,    
+        duration_min =
+            provenance_annotations$duration_min,
+        inj_vol_uL_pos =
+            provenance_annotations$inj_vol_uL_pos,
+        inj_vol_uL_neg =
+            provenance_annotations$inj_vol_uL_neg,        
+        MS_instrument =
+            provenance_annotations$MS_instrument,
+        source =
+            provenance_annotations$source,
+        mass_range =
+            provenance_annotations$mass_range,        
+        DDA_DIA =
+            provenance_annotations$DDA_DIA,
+        fragmentation =
+            provenance_annotations$fragmentation,
+        number_of_injections =
+            provenance_annotations$number_of_injections,        
+        total_scan_rate_MS1_MS2 =
+            provenance_annotations$total_scan_rate_MS1_MS2,
+        total_scan_rate_MS1_seg_pos =
+            provenance_annotations$total_scan_rate_MS1_seg_pos,
+        total_scan_rate_MS1_seg_neg =
+            provenance_annotations$total_scan_rate_MS1_seg_neg,
+        total_scan_rate_MS2_seg =
+            provenance_annotations$total_scan_rate_MS2_seg,        
+        inclusion_list =
+            provenance_annotations$inclusion_list,        
+        MTBLS_ID =
+            provenance_annotations$MTBLS_ID,
+        MTBLS_assay_name =
+            provenance_annotations$MTBLS_assay_name,
+        MTBLS_public_status =
+            provenance_annotations$MTBLS_public_status,
+        MTBLS_access_link =
+            provenance_annotations$MTBLS_access_link,
+        ms_level =
+            msLevel(ring_trial_spectra),
+        scanIndex =
+            scanIndex(ring_trial_spectra),
+        acquisitionNum =
+            acquisitionNum(ring_trial_spectra),
+        precScanNum =
+            precScanNum(ring_trial_spectra),
+        dataStorage =
+            dataStorage(ring_trial_spectra),
+        dataOrigin =
+            dataOrigin(ring_trial_spectra),
+        smoothed =
+            smoothed(ring_trial_spectra),
+        centroided =
+            centroided(ring_trial_spectra),
+        predicted =
+            provenance_annotations$predicted,
         precursor_mz =
             precursorMz(ring_trial_spectra),
         collision_energy =
             collisionEnergy(ring_trial_spectra),
+        rtime =
+            rtime(ring_trial_spectra),
         polarity =
-            polarity(ring_trial_spectra)
+            polarity(ring_trial_spectra),
+        precursorCharge =
+            precursorCharge(ring_trial_spectra),
+        precursorIntensity =
+            precursorIntensity(ring_trial_spectra),
+        isolationWindowUpperMz =
+            isolationWindowUpperMz(ring_trial_spectra),
+        isolationWindowLowerMz =
+            isolationWindowLowerMz(ring_trial_spectra),
+        isolationWindowTargetMz =
+            isolationWindowTargetMz(ring_trial_spectra)
     )
 
 # Adding mz
@@ -889,7 +1000,7 @@ str(msms_spectra)
 # Number of compounds
 
 cat("Number of compound entries:",
-    nrow(compound_table),
+    nrow(compound_annotations),
     "\n")
 
 # Number of MS/MS spectra
@@ -901,20 +1012,8 @@ cat("Number of MS/MS spectra:",
 # Mapping
 
 stopifnot(
-    nrow(compound_table) ==
-        length(ring_trial_spectra)
-)
-
-stopifnot(
     nrow(msms_spectra) ==
         length(ring_trial_spectra)
-)
-
-stopifnot(
-    identical(
-        compound_table$compound_id,
-        msms_spectra$compound_id
-    )
 )
 
 # Peak consistency
@@ -998,8 +1097,8 @@ rm(empty_spectra)
 ```{r}
 
 metadata <- make_metadata(
-    source = "HUMAN Ring Trial",
-    source_version = "MetaSci Library (Human Metabolites) - 0.1",
+    source = "HUMAN Ring Trial - MetaSci Library (Human Metabolites)",
+    source_version = "0.1.0",
     source_date = format(Sys.Date()),
     organism = "Hsapiens",
     url = "https://github.com/philouail/HUMAN_Ring_Trial"
@@ -1046,7 +1145,7 @@ if(file.exists(compdb_file))
 
 compdb_file <-
     createCompDb(
-        x = compound_table,
+        x = compound_annotations,
         msms_spectra = msms_spectra,
         metadata = metadata,
         path = compdb_output_dir,
@@ -1134,7 +1233,7 @@ nrow(
 compounds(ring_trial_db) |>
     nrow()
 
-nrow(compound_table)
+nrow(compound_annotations)
 
 # Does the database contain MS/MS spectra?
 
@@ -1338,5 +1437,5 @@ Future versions of the library may include:
 - editar provenance para que nombres de columnas coincidan con spectraVariables(example)
 - editar provenance eliminando casos de redundancia discutidos con Johannes y Phili
 - agregar filtros para que aparezcan en AnnotationFilter::supportedFilters(ring_trial_db)
-- evaluar dividir informacion de compuestos y espectros en compound_table
+- evaluar dividir informacion de compuestos y espectros en compound_annotations
 - exportar a MassBank
