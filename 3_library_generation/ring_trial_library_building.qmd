@@ -773,7 +773,9 @@ provenance_annotations <-
                 unique(inchikey)
             ),
         compound_id =
-            as.character(compound_id)
+            as.character(compound_id),
+        spectrum_id =
+            seq_len(n())
     )
 
 # Check that all spectra with exactly the same InChIKey are assigned the same compound_id
@@ -805,7 +807,7 @@ all(
         acquisitionNum(ring_trial_spectra)
 )
 
-# Create the compound annotations table with the correct order (provenance_split) and the corresponding compound_id (internal identifier for CompDb), and with a single row per compound
+# Create the compound annotations table (Compound-level) with the correct order (provenance_split) and the corresponding compound_id (internal identifier for CompDb), containing a single row per compound
 
 compound_annotations <-
     provenance_annotations |>
@@ -814,7 +816,6 @@ compound_annotations <-
         name,
         inchikey,
         inchikey_2d,
-        sirius_structure,
         formula,
         ChEBI,
         KEGG,
@@ -845,14 +846,14 @@ rm(compound_id_check)
 
 ```{r}
 
-# Create the MS/MS spectra table, adding basic columns of spectra metadata and mass peaks data (or peaks data, generally m/z and intensity values), as well as the compound_id and the spectrum_id (internal identifiers for CompDb)
+# Create the MS/MS spectra table (Spectrum-level, Acquisition/run-level, Ring Trial provenance and External repository), adding basic columns of spectra metadata and mass peaks data (or peaks data, generally m/z and intensity values), as well as the compound_id and the spectrum_id (internal identifiers for CompDb), containing several rows per compound, each of which corresponds to a different MS/MS spectrum
 
 msms_spectra <-
     data.frame(
         compound_id =
             provenance_annotations$compound_id,
         spectrum_id =
-            seq_len(length(ring_trial_spectra)),
+            provenance_annotations$spectrum_id,
         lab =
             provenance_annotations$lab,
         file_mixture =
@@ -1014,6 +1015,16 @@ cat("Number of MS/MS spectra:",
 stopifnot(
     nrow(msms_spectra) ==
         length(ring_trial_spectra)
+)
+
+stopifnot(
+    provenance_annotations$compound_id ==
+        msms_spectra$compound_id
+)
+
+stopifnot(
+    msms_spectra$spectrum_id ==
+        seq_len(length(ring_trial_spectra))
 )
 
 # Peak consistency
