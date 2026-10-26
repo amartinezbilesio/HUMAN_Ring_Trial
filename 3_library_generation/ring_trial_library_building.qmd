@@ -1010,31 +1010,31 @@ metadata
 ```
 
 ###############################################################
-# 18. Create output directory
+# 18. Create CompDb output directory
 ###############################################################
 
 ```{r}
 
-output_dir <-
+compdb_output_dir <-
     file.path(
         library_dir,
         "CompDb"
     )
 
-if(!dir.exists(output_dir))
+if(!dir.exists(compdb_output_dir))
     dir.create(
-        output_dir,
+        compdb_output_dir,
         recursive = TRUE
     )
 
-db_file <-
+compdb_file <-
     file.path(
-        output_dir,
+        compdb_output_dir,
         "RingTrial.sqlite"
     )
 
-if(file.exists(db_file))
-    file.remove(db_file)
+if(file.exists(compdb_file))
+    file.remove(compdb_file)
 
 ```
 
@@ -1044,17 +1044,17 @@ if(file.exists(db_file))
 
 ```{r}
 
-db_file <-
+compdb_file <-
     createCompDb(
         x = compound_table,
         msms_spectra = msms_spectra,
         metadata = metadata,
-        path = output_dir,
+        path = compdb_output_dir,
         dbFile = "RingTrial.sqlite"
     )
 
 cat("Database written to:\n")
-cat(db_file, "\n")
+cat(compdb_file, "\n")
 
 ```
 
@@ -1064,7 +1064,7 @@ cat(db_file, "\n")
 
 ```{r}
 
-ring_trial_db <- CompDb(db_file)
+ring_trial_db <- CompDb(compdb_file)
 
 ring_trial_db
 
@@ -1122,9 +1122,6 @@ compounds(
 
 # Number of compounds
 
-compounds(ring_trial_db) |>
-    nrow()
-
 nrow(
     compounds(
         ring_trial_db,
@@ -1133,6 +1130,9 @@ nrow(
 )
 
 # Number of spectra
+
+compounds(ring_trial_db) |>
+    nrow()
 
 nrow(compound_table)
 
@@ -1149,15 +1149,30 @@ ring_trial_library <-
 
 ring_trial_library
 
+spectraVariables(ring_trial_library) # available spectrum variables (to check what information has been stored in the CompDb)
+
+AnnotationFilter::supportedFilters(ring_trial_db)
+
+head(
+    spectraData(ring_trial_library)
+)
+
+CompoundDb::tables(ring_trial_db)$msms_spectrum
+
+CompoundDb::tables(ring_trial_db)$ms_compound
+
+Spectra::coreSpectraVariables()
+
+getMethod(
+    "backendInitialize",
+    "MsBackendCompDb"
+)
+
 # Numbers of spectra (should be the same)
 
 length(ring_trial_library)
 
 length(ring_trial_spectra)
-
-# Available spectrum variables
-
-spectraVariables(ring_trial_library) # to check what information has been stored in the CompDb.
 
 ```
 
@@ -1194,6 +1209,14 @@ precursorMz(retrieved)
 
 collisionEnergy(original)
 collisionEnergy(retrieved)
+
+```
+
+```{r}
+
+# Remove unnecessary values/objects previously created
+
+rm(original, retrieved)
 
 ```
 
@@ -1235,16 +1258,6 @@ Spectra(
 #         ~ adduct == "[M+H]+"
 # )
 
-example <- Spectra(ring_trial_db)
-
-spectraVariables(example)
-
-AnnotationFilter::supportedFilters(ring_trial_db)
-
-head(
-    spectraData(example)
-)
-
 ```
 
 ###############################################################
@@ -1282,6 +1295,14 @@ comparison <-
     )
 
 comparison
+
+```
+
+```{r}
+
+# Remove unnecessary values/objects previously created
+
+rm(example, comparison)
 
 ```
 
