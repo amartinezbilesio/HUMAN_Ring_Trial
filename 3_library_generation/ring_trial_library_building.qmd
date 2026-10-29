@@ -63,10 +63,6 @@ library(tibble)
 
 # Restore the R environment for the HUMAN Ring Trial workflow
 
-## Set project directory
-
-setwd(here::here())
-
 ## Load the project environment
 
 renv::load()
@@ -452,7 +448,7 @@ rm(required_columns, missing_columns)
 
 ## Enrich "provenance" table with information from the "standards" table
 
-```{r. include=FALSE}
+```{r, include=FALSE}
 
 # "standards" file path
 
@@ -864,6 +860,36 @@ function(lab,
 
 ```
 
+```{r, include=FALSE}
+
+# Normalize the "file" name to match the mzML file name
+
+provenance$file <- gsub(
+    "Human_Endosome",
+    "Human Endosome",
+    provenance$file
+)
+
+any(
+    grepl(
+        "Human_Endosome",
+        provenance$file
+    )
+)
+
+cat(
+    "Normalize provenance on sample file name written to:\n",
+    provenance_file,
+    "\n"
+)
+
+# Exclude "icl"
+
+provenance <- provenance |>
+    dplyr::filter(lab != "icl")
+
+```
+
 ```{r, eval=FALSE, echo=TRUE}
 
 find_mzml_file <- function(
@@ -897,41 +923,6 @@ find_mzml_file <- function(
     }
     candidate
 }
-
-```
-
-```{r, eval=FALSE, echo=FALSE}
-
-# Normalize the "file" name to match the mzML file name
-
-provenance$file <- gsub(
-    "Human_Endosome",
-    "Human Endosome",
-    provenance$file
-)
-
-any(
-    grepl(
-        "Human_Endosome",
-        provenance$file
-    )
-)
-
-writexl::write_xlsx(
-    provenance,
-    provenance_file
-)
-
-cat(
-    "Normalize provenance on sample file name written to:\n",
-    provenance_file,
-    "\n"
-)
-
-# Exclude "icl"
-
-provenance <- provenance |>
-    dplyr::filter(lab != "icl")
 
 ```
 
