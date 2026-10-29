@@ -83,38 +83,7 @@ renv::restore()
 
 # Project structure
 
-```{r, include=FALSE}
-
-# Project directories
-
-project_dir <- "C:/Users/amart/Desktop/HUMAN Ring Trial/HUMAN_Ring_Trial-main (copia para GitHub)/HUMAN_Ring_Trial"
-
-library_dir <- file.path(
-    project_dir,
-    "3_library_generation"
-)
-
-provenance_file <- file.path(
-    library_dir,
-    "spectral_library_provenance.xlsx"
-)
-
-# mzML directories
-
-mzml_dirs <- list(
-    AFEKTA =
-        "C:/Users/amart/Desktop/HUMAN Data/3. Ring Trial/AFEKTA/Afekta/Hackathon_results/human_ring_trial/HE_mzml",
-    CEMBIO_POS =
-        "C:/Users/amart/Desktop/HUMAN Data/3. Ring Trial/CEMBIO/RT_MS2_POS_mzml",
-    CEMBIO_NEG =
-        "C:/Users/amart/Desktop/HUMAN Data/3. Ring Trial/CEMBIO/RT_MS2_NEG_mzml",
-    HMGU =
-        "C:/Users/amart/Desktop/HUMAN Data/3. Ring Trial/HMGU/mzml_ringtrial/mzml_ringtrial/HE_mzml"
-)
-
-```
-
-```{r, eval=FALSE, echo=TRUE}
+```{r}
 
 # Project directories 
 
@@ -448,16 +417,7 @@ rm(required_columns, missing_columns)
 
 ## Enrich "provenance" table with information from the "standards" table
 
-```{r, include=FALSE}
-
-# "standards" file path
-
-standards_file <-
-    "C:/Users/amart/Desktop/HUMAN Ring Trial/HUMAN_Ring_Trial-main (copia para GitHub)/HUMAN_Ring_Trial/1_preprocessing/standards_extended_with_classes.xlsx"
-
-```
-
-```{r, eval=FALSE, echo=TRUE}
+```{r}
 
 # "standards" file path
 
@@ -630,16 +590,7 @@ unmatched_inchikeys
 
 ## Enrich "provenance" table with laboratory setup information from the "ring_trial_setups_summary" table
 
-```{r, include=FALSE}
-
-# "ring_trial_setups_summary" file path
-
-ring_trial_setups_summary_file <-
-    "C:/Users/amart/Desktop/HUMAN Ring Trial/HUMAN_Ring_Trial-main (copia para GitHub)/HUMAN_Ring_Trial/1_preprocessing/Ring_trial_setups_summary.xlsx"
-
-```
-
-```{r, eval=FALSE, echo=TRUE}
+```{r}
 
 # "ring_trial_setups_summary" file path
 
@@ -807,90 +758,7 @@ provenance <-
 
 # Locate mzML files
 
-```{r, include=FALSE}
-
-find_mzml_file <-
-function(lab,
-         mzml_name,
-         polarity,
-         mzml_dirs){
-    if(lab == "afekta"){
-        directory <- mzml_dirs$AFEKTA
-    }
-    else if(lab == "hmgu"){
-        directory <- mzml_dirs$HMGU
-    }
-    else if(lab == "cembio"){
-        if(polarity == "pos"){
-            directory <- mzml_dirs$CEMBIO_POS
-        } else if(polarity == "neg"){
-            directory <- mzml_dirs$CEMBIO_NEG
-        } else {
-            stop(
-                paste(
-                    "Invalid polarity for CEMBIO:",
-                    polarity
-                )
-            )
-        }
-    }
-    else{
-        stop(
-            paste(
-                "Unknown laboratory:",
-                lab
-            )
-        )
-    }
-    candidate <-
-        file.path(
-            directory,
-            mzml_name
-        )
-    if(!file.exists(candidate)){
-        stop(
-            paste(
-                "File not found:",
-                candidate
-            )
-        )
-    }
-    candidate
-}
-
-```
-
-```{r, include=FALSE}
-
-# Normalize the "file" name to match the mzML file name
-
-provenance$file <- gsub(
-    "Human_Endosome",
-    "Human Endosome",
-    provenance$file
-)
-
-any(
-    grepl(
-        "Human_Endosome",
-        provenance$file
-    )
-)
-
-cat(
-    "Normalize provenance on sample file name written to:\n",
-    provenance_file,
-    "\n"
-)
-
-# Exclude "icl"
-
-provenance <- provenance |>
-    dplyr::filter(lab != "icl")
-
-```
-
-```{r, eval=FALSE, echo=TRUE}
+```{r}
 
 find_mzml_file <- function(
     lab,
